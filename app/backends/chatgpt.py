@@ -123,10 +123,15 @@ async def _events(prompt, model, system, images):
                     if line.startswith("data:"):
                         data.append(line[5:].lstrip())
                     elif not line and data:
-                        yield _decode("\n".join(data))
+                        message = "\n".join(data)
+                        if message == "[DONE]":
+                            return
+                        yield _decode(message)
                         data = []
                 if data:
-                    yield _decode("\n".join(data))
+                    message = "\n".join(data)
+                    if message != "[DONE]":
+                        yield _decode(message)
     except httpx.HTTPError as exc:
         raise AIError("Could not connect to ChatGPT; try again later") from exc
 

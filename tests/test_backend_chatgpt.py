@@ -86,6 +86,27 @@ class ChatGPTBackendTests(unittest.IsolatedAsyncioTestCase):
             [part async for part in chatgpt.stream("p", model="m")], ["가", "나"]
         )
 
+    async def test_done_sentinel_requires_valid_completed_response(self):
+        delta = {"type": "response.output_text.delta", "delta": "가"}
+        for terminator in ("data: [DONE]\n\n", "data: [DONE]"):
+            self.body = (
+                "data: " + json.dumps(delta) + "\n\n"
+                "data: " + json.dumps(completed()) + "\n\n" + terminator
+            )
+            self.assertEqual(
+                [chunk async for chunk in chatgpt.stream("p", model="m")], ["가"]
+            )
+            for events in ([delta], [delta, {"type": "response.failed"}]):
+                self.body = (
+                    "".join("data: " + json.dumps(event) + "\n\n" for event in events)
+                    + terminator
+                )
+                chunks = []
+                with self.assertRaises(AIError):
+                    async for chunk in chatgpt.stream("p", model="m"):
+                        chunks.append(chunk)
+                self.assertEqual(chunks, [])
+
     async def test_rejects_unfinished_failed_and_mismatched_streams(self):
         for events in (
             [{"type": "response.output_text.delta", "delta": "partial"}],
