@@ -211,6 +211,14 @@ async def begin(redirect_uri: str, account_id: str | None = None) -> dict:
     return {"url": AUTHORIZE + "?" + urlencode(query), "state": state}
 
 
+class _TerminalGrantError(AIError):
+    """A structured OAuth response confirms the renewable grant is unusable."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__("ChatGPT connection expired; Continue with ChatGPT again")
+
+
 async def _request(method: str, url: str, **kwargs) -> dict:
     try:
         async with httpx.AsyncClient(
@@ -218,6 +226,16 @@ async def _request(method: str, url: str, **kwargs) -> dict:
         ) as client:
             response = await client.request(method, url, **kwargs)
         if response.is_error:
+            if url == TOKEN and response.status_code in (400, 401, 403):
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                code = payload.get("error") if isinstance(payload, dict) else None
+                if isinstance(code, dict):
+                    code = code.get("code")
+                if code in ("invalid_grant", "refresh_token_revoked"):
+                    raise _TerminalGrantError(code)
             raise from_text(
                 str(response.status_code) + " " + response.text,
                 "ChatGPT connection failed; sign in again",
@@ -407,16 +425,28 @@ async def _access_token() -> str:
         if record.get("expires_at", 0) <= time.time() + 60:
             if not record.get("refresh_token"):
                 raise AIError("ChatGPT connection expired; sign in again")
-            response = await _request(
-                "POST",
-                TOKEN,
-                data={
-                    "grant_type": "refresh_token",
-                    "client_id": record["client_id"],
-                    "refresh_token": record["refresh_token"],
-                    "resource": RESOURCE,
-                },
-            )
+            try:
+                response = await _request(
+                    "POST",
+                    TOKEN,
+                    data={
+                        "grant_type": "refresh_token",
+                        "client_id": record["client_id"],
+                        "refresh_token": record["refresh_token"],
+                        "resource": RESOURCE,
+                    },
+                )
+            except _TerminalGrantError:
+                for field in (
+                    "access_token",
+                    "refresh_token",
+                    "id_token",
+                    "expires_at",
+                    "scopes",
+                ):
+                    record.pop(field, None)
+                _save(data)
+                raise
             try:
                 replacement = _tokens(response, record)
                 if response.get("id_token"):

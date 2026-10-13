@@ -163,7 +163,6 @@ async def _text(prompt, model, system, images):
                 if not isinstance(delta, str):
                     raise AIError("ChatGPT returned an invalid text delta")
                 emitted.append(delta)
-                yield delta
             elif kind == "response.completed":
                 response = event.get("response")
                 # Plan-backed streams may omit output from the final envelope. Use
@@ -183,7 +182,11 @@ async def _text(prompt, model, system, images):
         raise AIError("ChatGPT stream ended without a completed response")
     if emitted and "".join(emitted) != final:
         raise AIError("ChatGPT stream did not match its final response")
-    if not emitted:
+    # Consumers paint and cache chunks immediately; release only validated output.
+    if emitted:
+        for delta in emitted:
+            yield delta
+    else:
         yield final
 
 

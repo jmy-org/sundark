@@ -136,11 +136,30 @@ class ChatGPTBackendTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "response.output_text.delta", "delta": "partial"},
                 failure,
             ]
-            stream = chatgpt.stream("p", model="m")
-            self.assertEqual(await anext(stream), "partial")
+            chunks = []
             with self.assertRaises(RateLimitError) as raised:
-                await anext(stream)
+                async for chunk in chatgpt.stream("p", model="m"):
+                    chunks.append(chunk)
+            self.assertEqual(chunks, [])
             self.assertNotIn("sensitive", str(raised.exception))
+
+    async def test_invalid_translation_batch_never_releases_numbered_lines(self):
+        text = "0: First translation\n1: Second translation\n"
+        tool = completed(text)
+        tool["response"]["output"] = [{"type": "function_call"}]
+        for tail in (
+            [],
+            [{"type": "response.failed"}],
+            [{"type": "response.incomplete"}],
+            [completed(text + "extra")],
+            [tool],
+        ):
+            self.events = [{"type": "response.output_text.delta", "delta": text}] + tail
+            chunks = []
+            with self.subTest(tail=tail), self.assertRaises(AIError):
+                async for chunk in chatgpt.stream("p", model="m"):
+                    chunks.append(chunk)
+            self.assertEqual(chunks, [])
 
     async def test_http_structured_subscription_limit_is_classified(self):
         self.code = 403

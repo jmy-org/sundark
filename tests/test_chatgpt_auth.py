@@ -549,3 +549,75 @@ class ChatGPTAuthTests(unittest.TestCase):
             self.assertEqual(auth._read()["accounts"]["issued"]["subject"], "subject")
 
         asyncio.run(scenario())
+
+    def test_terminal_and_temporary_refresh_errors_via_httpx(self):
+        import httpx
+
+        original_client = httpx.AsyncClient
+        for status, body, terminal in (
+            (
+                400,
+                {
+                    "error": "invalid_grant",
+                    "error_description": "private provider detail",
+                },
+                True,
+            ),
+            (401, {"error": {"code": "refresh_token_revoked"}}, True),
+            (401, {"error": "unauthorized"}, False),
+            (503, {"error": "invalid_grant"}, False),
+            (429, {"error": "rate_limit"}, False),
+        ):
+            with self.subTest(status=status, body=body):
+                record = {
+                    "client_id": "issued",
+                    "subject": "subject",
+                    "access_token": "generated-expired",
+                    "refresh_token": "generated-old-refresh",
+                    "id_token": "generated-validated-id",
+                    "expires_at": 0,
+                    "scopes": auth.SCOPE.split(),
+                }
+                other = {"client_id": "other", "subject": "other-subject"}
+                auth._save(
+                    {
+                        "host_id": "generated-host",
+                        "active": "issued",
+                        "accounts": {"issued": record.copy(), "other": other.copy()},
+                    }
+                )
+                submitted = []
+
+                def handler(request):
+                    submitted.append(request)
+                    return httpx.Response(status, json=body)
+
+                def client(**kwargs):
+                    return original_client(
+                        transport=httpx.MockTransport(handler), **kwargs
+                    )
+
+                async def scenario():
+                    with patch.object(auth.httpx, "AsyncClient", client):
+                        for _ in range(2):
+                            with self.assertRaises(AIError) as raised:
+                                await auth.access_token()
+                            self.assertNotIn(
+                                "private provider detail", str(raised.exception)
+                            )
+                    stored = auth._read()
+                    self.assertEqual(stored["host_id"], "generated-host")
+                    self.assertEqual(stored["accounts"]["other"], other)
+                    if terminal:
+                        self.assertFalse(auth.status()["connected"])
+                        self.assertFalse(auth.status()["ready"])
+                        self.assertEqual(len(submitted), 1)
+                        self.assertEqual(
+                            stored["accounts"]["issued"],
+                            {"client_id": "issued", "subject": "subject"},
+                        )
+                    else:
+                        self.assertEqual(stored["accounts"]["issued"], record)
+                        self.assertEqual(len(submitted), 2)
+
+                asyncio.run(scenario())
