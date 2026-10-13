@@ -54,8 +54,18 @@ def _read() -> dict:
         for key, record in data["accounts"].items():
             if not isinstance(key, str) or not isinstance(record, dict):
                 raise ValueError
-            if record.get("client_id") != key or not isinstance(
-                record.get("subject"), str
+            provisional = record.get("provisional") is True
+            if provisional and (
+                record.get("subject") is not None
+                or data.get("active") == key
+                or any(
+                    record.get(field) is not None
+                    for field in ("access_token", "refresh_token", "id_token")
+                )
+            ):
+                raise ValueError
+            if record.get("client_id") != key or (
+                not provisional and not isinstance(record.get("subject"), str)
             ):
                 raise ValueError
             if not isinstance(record.get("email", ""), str):
@@ -154,13 +164,16 @@ def status() -> dict:
                 "email": value.get("email"),
                 "label": value.get("email", "ChatGPT") + " · " + key[-8:],
                 "connected": bool(value.get("access_token")),
+                "provisional": value.get("provisional") is True,
             }
             for key, value in data["accounts"].items()
         ],
     }
 
 
-async def begin(redirect_uri: str, account_id: str | None = None) -> dict:
+async def begin(
+    redirect_uri: str, account_id: str | None = None, *, new_account: bool = False
+) -> dict:
     uri = urlsplit(redirect_uri)
     if (
         uri.scheme != "http"
@@ -174,6 +187,14 @@ async def begin(redirect_uri: str, account_id: str | None = None) -> dict:
         raise AIError("ChatGPT sign-in requires a 127.0.0.1 callback")
     async with _locked():
         data = _read()
+        if account_id is None and not new_account and data.get("active") is None:
+            provisional = [
+                key
+                for key, value in data["accounts"].items()
+                if value.get("provisional")
+            ]
+            if provisional:
+                account_id = provisional[-1]
         account = data["accounts"].get(account_id) if account_id else None
         if account_id and not account:
             raise AIError("Choose a saved ChatGPT account")
@@ -214,9 +235,13 @@ async def begin(redirect_uri: str, account_id: str | None = None) -> dict:
         .rstrip("="),
     }
     if account:
+        if not account.get(
+            "provisional"
+        ) and "chatgpt.tokens.use.direct" not in account.get("scopes", []):
+            query["prompt"] = "consent"
         if account.get("id_token"):
             query["id_token_hint"] = account["id_token"]
-        if account.get("email"):
+        if account.get("email") and not account.get("provisional"):
             query["login_hint"] = account["email"]
     else:
         query["agent_name_hint"] = "Sundark"
@@ -364,6 +389,22 @@ async def complete(
         or (pending["client_id"] and client_id and issued != client_id)
     ):
         raise AIError("ChatGPT registration did not return the expected client")
+    async with _locked():
+        data = _read()
+        if pending["generation"] != data.get("generation", 0):
+            raise AIError("ChatGPT sign-in was cancelled; try again")
+        if not pending["client_id"]:
+            if issued in data["accounts"]:
+                raise AIError(
+                    "ChatGPT registration returned an existing client; choose that account"
+                )
+            data["accounts"][issued] = {
+                "client_id": issued,
+                "provisional": True,
+                "subject": None,
+                "email": "ChatGPT registration pending",
+            }
+            _save(data)
     response = await _request(
         "POST",
         TOKEN,
@@ -396,7 +437,11 @@ async def complete(
             if pending["generation"] != data.get("generation", 0):
                 raise AIError("ChatGPT sign-in was cancelled; try again")
             previous = data["accounts"].get(issued)
-            if previous and previous["subject"] != claims["sub"]:
+            if (
+                previous
+                and not previous.get("provisional")
+                and previous["subject"] != claims["sub"]
+            ):
                 raise AIError("ChatGPT registration identity did not match")
             data["accounts"][issued] = record
             data["active"] = issued
@@ -415,6 +460,8 @@ async def select(account_id: str) -> dict:
         data = _read()
         if account_id not in data["accounts"]:
             raise AIError("Choose a saved ChatGPT account")
+        if data["accounts"][account_id].get("provisional"):
+            raise AIError("Complete ChatGPT sign-in for this registration first")
         data["generation"] = data.get("generation", 0) + 1
         _PENDING.clear()
         data["active"] = account_id

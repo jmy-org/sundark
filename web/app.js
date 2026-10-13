@@ -43,7 +43,10 @@ async function loadConfig() {
   if (!backend) openSettings();
 }
 
-const chatGPT = { busy: false, status: null, generation: 0, initialModels: false, focusReturn: null };
+const chatGPT = {
+  busy: false, status: null, generation: 0, initialModels: false,
+  focusReturn: null, pendingAccountId: null,
+};
 
 function setChatGPTBusy(busy) {
   const controls = ["chatgpt-account", "chatgpt-login", "chatgpt-reconnect", "chatgpt-refresh", "chatgpt-logout"];
@@ -89,11 +92,17 @@ function renderChatGPTStatus(status) {
     option.value = account.account_id; option.textContent = account.label || account.email || "ChatGPT account";
     select.appendChild(option);
   }
-  if (status.account_id || status.active) select.value = status.account_id || status.active;
+  const pendingAccount = accounts.find((account) =>
+    account.account_id === chatGPT.pendingAccountId && account.provisional);
+  if (pendingAccount) select.value = pendingAccount.account_id;
+  else {
+    chatGPT.pendingAccountId = null;
+    if (status.account_id || status.active) select.value = status.account_id || status.active;
+  }
   (accounts.length > 1 ? show : hide)($("chatgpt-account-label"));
   (select.value ? show : hide)($("chatgpt-reconnect"));
   (status.connected ? show : hide)($("chatgpt-logout"));
-  $("chatgpt-login").textContent = status.connected ? "Add ChatGPT account" : "Continue with ChatGPT";
+  $("chatgpt-login").textContent = status.connected ? "Add new ChatGPT account" : "Continue with ChatGPT";
 }
 
 async function getChatGPTJSON(path) {
@@ -166,10 +175,20 @@ async function changeChatGPTAccount(path, accountId) {
   }
 }
 
+function selectChatGPTAccount(accountId) {
+  const account = (chatGPT.status?.accounts || []).find((item) => item.account_id === accountId);
+  if (account?.provisional) {
+    chatGPT.pendingAccountId = accountId;
+    return;
+  }
+  chatGPT.pendingAccountId = null;
+  changeChatGPTAccount("/api/chatgpt/select", accountId);
+}
+
 $("chatgpt-refresh").addEventListener("click", refreshChatGPT);
-$("chatgpt-account").addEventListener("change", (e) => changeChatGPTAccount("/api/chatgpt/select", e.target.value));
+$("chatgpt-account").addEventListener("change", (e) => selectChatGPTAccount(e.target.value));
 $("chatgpt-logout").addEventListener("click", () => changeChatGPTAccount("/api/chatgpt/logout", $("chatgpt-account").value || null));
-async function loginChatGPT(accountId) {
+async function loginChatGPT(accountId, newAccount = false) {
   if (chatGPT.busy) return;
   clearChatGPTLink();
   const generation = chatGPT.generation;
@@ -177,7 +196,7 @@ async function loginChatGPT(accountId) {
   if (popup) popup.opener = null;
   setChatGPTBusy(true); hide($("chatgpt-error"));
   try {
-    const result = await postJSON("/api/chatgpt/login", { account_id: accountId });
+    const result = await postJSON("/api/chatgpt/login", { account_id: accountId, new_account: newAccount });
     const url = new URL(result.auth_url || result.url);
     if (url.protocol !== "https:") throw new Error("Could not open ChatGPT sign-in.");
     if (generation !== chatGPT.generation) { if (popup) popup.close(); return; }
@@ -187,7 +206,7 @@ async function loginChatGPT(accountId) {
   } catch (err) { if (popup) popup.close(); chatGPTError(err); }
   finally { setChatGPTBusy(false); }
 }
-$("chatgpt-login").addEventListener("click", () => loginChatGPT(null));
+$("chatgpt-login").addEventListener("click", () => loginChatGPT(null, chatGPT.status?.connected === true));
 $("chatgpt-reconnect").addEventListener("click", () => {
   const accountId = $("chatgpt-account").value;
   if (accountId) loginChatGPT(accountId);

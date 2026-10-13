@@ -296,7 +296,8 @@ class ChatGPTAuthTests(unittest.TestCase):
                 with self.assertRaises(AIError):
                     await callback
                 self.assertFalse(auth.status()["connected"])
-                self.assertEqual(auth.status()["accounts"], [])
+                self.assertTrue(auth.status()["accounts"][0]["provisional"])
+                self.assertIsNone(auth.status()["active"])
                 self.assertEqual(revoked, ["generated-refresh"])
 
         asyncio.run(scenario())
@@ -819,5 +820,102 @@ class ChatGPTAuthTests(unittest.TestCase):
                     await logout
                 self.assertTrue(auth.status()["ready"])
                 self.assertEqual(auth.status()["active"], "other")
+
+        asyncio.run(scenario())
+
+    def test_missing_plan_scope_requests_consent_only_when_needed(self):
+        record = {
+            "client_id": "issued",
+            "subject": "subject",
+            "access_token": "generated-access",
+            "scopes": ["openid"],
+        }
+        auth._save(
+            {
+                "host_id": "generated-host",
+                "active": "issued",
+                "accounts": {"issued": record},
+            }
+        )
+
+        async def scenario():
+            attempt = await auth.begin(
+                "http://127.0.0.1:8743/api/chatgpt/callback", "issued"
+            )
+            query = parse_qs(urlsplit(attempt["url"]).query)
+            self.assertEqual(query["prompt"], ["consent"])
+            self.assertEqual(query["scope"], [auth.SCOPE])
+            with self.assertRaises(AIError):
+                await auth.access_token()
+            data = auth._read()
+            data["accounts"]["issued"]["scopes"] = auth.SCOPE.split()
+            auth._save(data)
+            ordinary = await auth.begin(
+                "http://127.0.0.1:8743/api/chatgpt/callback", "issued"
+            )
+            self.assertNotIn("prompt", parse_qs(urlsplit(ordinary["url"]).query))
+
+        asyncio.run(scenario())
+
+    def test_failed_initial_exchange_reuses_issued_registration(self):
+        calls = []
+
+        async def request(*args, **kwargs):
+            calls.append(kwargs["data"]["client_id"])
+            raise auth._TerminalGrantError("invalid_grant")
+
+        self.patch_request(request)
+
+        async def scenario():
+            initial = await auth.begin("http://127.0.0.1:8743/api/chatgpt/callback")
+            with self.assertRaises(AIError):
+                await auth.complete(
+                    "generated-expired-code", initial["state"], "issued"
+                )
+            self.assertEqual(calls, ["issued"])
+            status = auth.status()
+            self.assertFalse(status["ready"])
+            self.assertFalse(status["connected"])
+            self.assertIsNone(status["active"])
+            retry = await auth.begin("http://127.0.0.1:8743/api/chatgpt/callback")
+            query = parse_qs(urlsplit(retry["url"]).query)
+            self.assertEqual(query["client_id"], ["issued"])
+            self.assertNotIn("agent_name_hint", query)
+            fresh = await auth.begin(
+                "http://127.0.0.1:8743/api/chatgpt/callback", new_account=True
+            )
+            self.assertEqual(
+                parse_qs(urlsplit(fresh["url"]).query)["client_id"],
+                ["dynamic_agent_client"],
+            )
+            with self.assertRaises(AIError):
+                await auth.select("issued")
+
+        asyncio.run(scenario())
+
+    def test_new_callback_cannot_overwrite_existing_registration(self):
+        saved = {
+            "client_id": "issued",
+            "subject": "subject",
+            "access_token": "generated-existing",
+            "scopes": auth.SCOPE.split(),
+        }
+        auth._save(
+            {
+                "host_id": "generated-host",
+                "active": "issued",
+                "accounts": {"issued": saved},
+            }
+        )
+
+        async def scenario():
+            initial = await auth.begin(
+                "http://127.0.0.1:8743/api/chatgpt/callback", new_account=True
+            )
+            with patch.object(auth, "_request") as request:
+                with self.assertRaises(AIError):
+                    await auth.complete("generated-code", initial["state"], "issued")
+                request.assert_not_called()
+            self.assertEqual(auth._read()["accounts"]["issued"], saved)
 
         asyncio.run(scenario())

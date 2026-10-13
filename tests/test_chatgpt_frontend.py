@@ -124,3 +124,103 @@ assert.equal(initiating.focusCalls, 1, "the previous control is not focused agai
             ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_add_account_action_requests_new_registration(self):
+        script = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const src = fs.readFileSync("web/app.js", "utf8");
+const start = src.indexOf("async function loginChatGPT(");
+const end = src.indexOf("\n}\n", start) + 3;
+const listener = src.slice(src.indexOf('$("chatgpt-login").addEventListener'),
+                           src.indexOf("\n", src.indexOf('$("chatgpt-login").addEventListener')));
+let click;
+let payload;
+const context = {
+  chatGPT: { busy: false, generation: 0, status: { connected: true } },
+  window: { open: () => null },
+  URL,
+  setChatGPTBusy() {}, clearChatGPTLink() {}, hide() {}, show() {},
+  postJSON: async (_path, body) => { payload = body; return { auth_url: "https://auth.openai.com/" }; },
+  $: (id) => id === "chatgpt-login"
+    ? { addEventListener: (_event, callback) => { click = callback; } }
+    : { href: "" },
+};
+vm.createContext(context);
+vm.runInContext(src.slice(start, end) + "\n" + listener, context);
+
+(async () => {
+  await click();
+  assert.equal(payload.new_account, true, "Add new ChatGPT account requests a new registration");
+  context.chatGPT.status.connected = false;
+  await click();
+  assert.equal(payload.new_account, false, "Continue with ChatGPT reuses the current provisional registration");
+})().catch((err) => { console.error(err); process.exitCode = 1; });
+"""
+        result = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_pending_account_can_reconnect_without_becoming_active(self):
+        script = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const src = fs.readFileSync("web/app.js", "utf8");
+const extract = (signature) => {
+  const start = src.indexOf(signature);
+  return src.slice(start, src.indexOf("\n}\n", start) + 3);
+};
+const reconnectStart = src.indexOf('$("chatgpt-reconnect").addEventListener');
+const reconnectListener = src.slice(reconnectStart, src.indexOf("\n});", reconnectStart) + 4);
+let reconnectClick;
+let loginArgs;
+let selectCalls = 0;
+const select = {
+  innerHTML: "", value: "", options: [],
+  appendChild(option) { this.options.push(option); },
+};
+const elements = {
+  "chatgpt-status": {}, "chatgpt-account": select,
+  "chatgpt-account-label": {}, "chatgpt-reconnect": {}, "chatgpt-logout": {},
+  "chatgpt-login": {},
+};
+const context = {
+  chatGPT: { status: null, pendingAccountId: null },
+  document: { createElement: () => ({}) },
+  $: (id) => id === "chatgpt-reconnect"
+    ? { addEventListener: (_event, callback) => { reconnectClick = callback; } }
+    : elements[id],
+  show() {}, hide() {},
+  changeChatGPTAccount() { selectCalls++; },
+  loginChatGPT(accountId, newAccount = false) { loginArgs = [accountId, newAccount]; },
+};
+vm.createContext(context);
+vm.runInContext(
+  extract("function renderChatGPTStatus(") + "\n" +
+  extract("function selectChatGPTAccount(") + "\n" + reconnectListener,
+  context,
+);
+
+const status = {
+  connected: true, active: "active-A", accounts: [
+    { account_id: "active-A", email: "a@example.org", provisional: false },
+    { account_id: "pending-B", email: "ChatGPT registration pending", provisional: true },
+  ],
+};
+context.renderChatGPTStatus(status);
+select.value = "pending-B";
+context.selectChatGPTAccount(select.value);
+assert.equal(selectCalls, 0, "choosing a pending registration must not call account selection");
+assert.equal(context.chatGPT.status.active, "active-A", "the active account remains A");
+context.renderChatGPTStatus(status);
+assert.equal(select.value, "pending-B", "refresh preserves the locally selected pending registration");
+reconnectClick();
+assert.deepEqual(loginArgs, ["pending-B", false], "Reconnect targets B without requesting a new registration");
+"""
+        result = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

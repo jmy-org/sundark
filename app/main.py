@@ -25,7 +25,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from . import ai, backends, biblio, layout_model, paper_id, pdf_utils, settings, store
 from .backends import chatgpt_auth
@@ -994,6 +994,7 @@ def _chatgpt_origin(request: Request) -> str:
 
 class ChatGPTAccountReq(BaseModel):
     account_id: str | None = None
+    new_account: StrictBool = False
 
 
 @app.get("/api/chatgpt/status")
@@ -1011,7 +1012,9 @@ async def chatgpt_models(request: Request):
 @app.post("/api/chatgpt/login")
 async def chatgpt_login(request: Request, req: ChatGPTAccountReq):
     origin = _chatgpt_origin(request)
-    return await chatgpt_auth.begin(origin + "/api/chatgpt/callback", req.account_id)
+    return await chatgpt_auth.begin(
+        origin + "/api/chatgpt/callback", req.account_id, new_account=req.new_account
+    )
 
 
 @app.get("/api/chatgpt/callback")

@@ -27,8 +27,28 @@ class ChatGPTApiTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
             begin.assert_awaited_once_with(
-                "http://127.0.0.1:8743/api/chatgpt/callback", None
+                "http://127.0.0.1:8743/api/chatgpt/callback",
+                None,
+                new_account=False,
             )
+            response = self.client.post(
+                "/api/chatgpt/login",
+                json={"new_account": True},
+                headers=self.origin,
+            )
+            self.assertEqual(response.status_code, 200)
+            begin.assert_awaited_with(
+                "http://127.0.0.1:8743/api/chatgpt/callback",
+                None,
+                new_account=True,
+            )
+            response = self.client.post(
+                "/api/chatgpt/login",
+                json={"new_account": "false"},
+                headers=self.origin,
+            )
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(begin.await_count, 2)
 
     def test_account_selection_is_awaited_and_protected(self):
         with (
