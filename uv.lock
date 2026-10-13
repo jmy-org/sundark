@@ -3702,6 +3702,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "doclayout-yolo" },
     { name = "fastapi" },
+    { name = "filelock" },
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "pillow" },
@@ -3724,6 +3725,7 @@ dev = [
 requires-dist = [
     { name = "doclayout-yolo", specifier = ">=0.0.3" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "filelock", specifier = ">=4.0" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "huggingface-hub", specifier = ">=0.23" },
     { name = "pillow", specifier = ">=10.0" },

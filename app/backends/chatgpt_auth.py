@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import fcntl
 import hashlib
 import json
 import os
@@ -18,6 +17,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
+from filelock import AsyncFileLock
 
 from ..errors import AIError, from_text
 
@@ -84,19 +84,28 @@ def _read() -> dict:
 
 def _save(data: dict) -> None:
     path = _path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".chatgpt-")
+    name = None
     try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=".chatgpt-")
         with os.fdopen(fd, "w") as file:
-            os.fchmod(file.fileno(), 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(file.fileno(), 0o600)
             json.dump(data, file)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(name, path)
+        for attempt in range(4):
+            try:
+                os.replace(name, path)
+                break
+            except OSError as exc:
+                if getattr(exc, "winerror", None) not in (32, 33) or attempt == 3:
+                    raise
+                time.sleep(0.02)
     except OSError as exc:
         raise AIError("Could not save ChatGPT connection settings") from exc
     finally:
-        if os.path.exists(name):
+        if name is not None and os.path.exists(name):
             os.unlink(name)
 
 
@@ -104,19 +113,22 @@ def _save(data: dict) -> None:
 async def _locked():
     async with _LOCK:
         path = _path()
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        lock_path = Path(str(path) + ".lock")
         try:
-            # Nonblocking acquisition keeps cancellation from leaking a worker-held lock.
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    await asyncio.sleep(0.05)
-            yield
-        finally:
-            os.close(fd)
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if lock_path.is_symlink():
+                raise AIError("ChatGPT credential lock must not be a symbolic link")
+            lock = AsyncFileLock(
+                lock_path,
+                mode=0o600,
+                run_in_executor=False,
+                fallback_to_soft=False,
+                preserve_lock_file=True,
+            )
+            async with lock:
+                yield
+        except OSError as exc:
+            raise AIError("Could not access ChatGPT connection settings") from exc
 
 
 def status() -> dict:
@@ -231,10 +243,23 @@ async def _request(method: str, url: str, **kwargs) -> dict:
                     payload = response.json()
                 except ValueError:
                     payload = None
-                code = payload.get("error") if isinstance(payload, dict) else None
+                code = (
+                    payload.get("error", payload.get("code"))
+                    if isinstance(payload, dict)
+                    else None
+                )
                 if isinstance(code, dict):
                     code = code.get("code")
-                if code in ("invalid_grant", "refresh_token_revoked"):
+                code = code.lower() if isinstance(code, str) else None
+                if code in (
+                    "invalid_grant",
+                    "invalid_refresh_token",
+                    "token_expired",
+                    "refresh_token_expired",
+                    "refresh_token_invalidated",
+                    "refresh_token_reused",
+                    "refresh_token_revoked",
+                ):
                     raise _TerminalGrantError(code)
             raise from_text(
                 str(response.status_code) + " " + response.text,

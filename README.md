@@ -155,7 +155,9 @@ account status, choose the account's available models, and save settings. Saving
 checks each selected model with a small real request that uses your plan.
 
 Credentials remain on the local server in `~/.config/sundark/chatgpt.json`,
-written atomically with owner-only permissions. `SUNDARK_CHATGPT_CREDENTIALS`
+written atomically with owner-only permissions on POSIX. On Windows, files
+inherit the chosen directory's ACL; keep that directory restricted to your
+Windows account. `SUNDARK_CHATGPT_CREDENTIALS`
 changes that location. Do not commit or share this file. Sundark keeps its own
 registration and does not read Codex credentials or require an API key.
 You can add accounts, select a saved account, and sign out in AI settings.

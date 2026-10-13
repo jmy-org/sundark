@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -43,7 +44,8 @@ class ChatGPTAuthTests(unittest.TestCase):
             assert first["state"] != second["state"]
             assert first["nonce"] != second["nonce"]
             assert first["code_challenge_method"] == ["S256"]
-            assert auth._path().stat().st_mode & 0o777 == 0o600
+            if os.name == "posix":
+                assert auth._path().stat().st_mode & 0o777 == 0o600
             assert auth.status()["ready"] is False
             with self.assertRaises(AIError):
                 await auth.begin("http://localhost:8743/api/chatgpt/callback")
@@ -554,20 +556,40 @@ class ChatGPTAuthTests(unittest.TestCase):
         import httpx
 
         original_client = httpx.AsyncClient
-        for status, body, terminal in (
+        terminal_codes = (
+            "invalid_grant",
+            "invalid_refresh_token",
+            "token_expired",
+            "refresh_token_expired",
+            "refresh_token_invalidated",
+            "refresh_token_reused",
+            "refresh_token_revoked",
+        )
+        cases = [
             (
-                400,
-                {
-                    "error": "invalid_grant",
-                    "error_description": "private provider detail",
-                },
+                status,
+                {"error": error, "error_description": "private provider detail"},
                 True,
-            ),
-            (401, {"error": {"code": "refresh_token_revoked"}}, True),
-            (401, {"error": "unauthorized"}, False),
-            (503, {"error": "invalid_grant"}, False),
-            (429, {"error": "rate_limit"}, False),
-        ):
+            )
+            for code in terminal_codes
+            for error in (code, code.upper(), {"code": code}, {"code": code.upper()})
+            for status in (400, 401, 403)
+        ]
+        cases.extend(
+            (status, {"code": value}, True)
+            for code in terminal_codes
+            for value in (code, code.upper())
+            for status in (400, 401, 403)
+        )
+        cases.extend(
+            [
+                (400, {"error": "invalid_client"}, False),
+                (401, {"error": "unauthorized"}, False),
+                (503, {"error": "invalid_grant"}, False),
+                (429, {"error": "rate_limit"}, False),
+            ]
+        )
+        for status, body, terminal in cases:
             with self.subTest(status=status, body=body):
                 record = {
                     "client_id": "issued",
@@ -621,3 +643,65 @@ class ChatGPTAuthTests(unittest.TestCase):
                         self.assertEqual(len(submitted), 2)
 
                 asyncio.run(scenario())
+
+    def test_atomic_save_without_fchmod(self):
+        data = {"host_id": "generated-host", "accounts": {}, "active": None}
+        if hasattr(auth.os, "fchmod"):
+            original = auth.os.fchmod
+            delattr(auth.os, "fchmod")
+            try:
+                auth._save(data)
+            finally:
+                auth.os.fchmod = original
+        else:
+            auth._save(data)
+        self.assertEqual(auth._read(), data)
+        self.assertEqual(list(auth._path().parent.glob(".chatgpt-*")), [])
+
+    def test_save_filesystem_error_is_safe(self):
+        with patch.object(
+            auth.tempfile, "mkstemp", side_effect=OSError("private filesystem detail")
+        ):
+            with self.assertRaises(AIError) as raised:
+                auth._save(
+                    {"host_id": "generated-host", "accounts": {}, "active": None}
+                )
+        self.assertNotIn("private filesystem detail", str(raised.exception))
+
+    def test_windows_sharing_violation_replace_retry(self):
+        data = {"host_id": "generated-host", "accounts": {}, "active": None}
+        original = os.replace
+        attempts = []
+
+        def replace(source, destination):
+            attempts.append(source)
+            if len(attempts) <= 2:
+                error = OSError("generated sharing violation")
+                error.winerror = 32
+                raise error
+            return original(source, destination)
+
+        with (
+            patch.object(auth.os, "replace", replace),
+            patch.object(auth.time, "sleep") as sleep,
+        ):
+            auth._save(data)
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(auth._read(), data)
+        self.assertEqual(list(auth._path().parent.glob(".chatgpt-*")), [])
+
+    def test_permission_denied_replace_is_not_retried(self):
+        error = OSError("generated permission denied")
+        error.winerror = 5
+        with (
+            patch.object(auth.os, "replace", side_effect=error) as replace,
+            patch.object(auth.time, "sleep") as sleep,
+        ):
+            with self.assertRaises(AIError):
+                auth._save(
+                    {"host_id": "generated-host", "accounts": {}, "active": None}
+                )
+        self.assertEqual(replace.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual(list(auth._path().parent.glob(".chatgpt-*")), [])
