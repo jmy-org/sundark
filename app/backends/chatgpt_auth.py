@@ -339,7 +339,9 @@ def _tokens(response: dict, old: dict | None = None) -> dict:
         "access_token": access,
         "refresh_token": response.get("refresh_token", old.get("refresh_token")),
         "id_token": response.get("id_token", old.get("id_token")),
-        "scopes": scopes.split() if scopes is not None else old.get("scopes", []),
+        "scopes": scopes.split()
+        if scopes is not None
+        else old.get("scopes", SCOPE.split()),
         "expires_at": time.time() + expiry,
     }
 
@@ -399,10 +401,13 @@ async def complete(
             data["accounts"][issued] = record
             data["active"] = issued
             _save(data)
-        return status()
     except BaseException:
         await _revoke(response.get("refresh_token"), issued)
         raise
+    superseded = previous.get("refresh_token") if previous else None
+    if superseded and superseded != record.get("refresh_token"):
+        await _settle(asyncio.create_task(_revoke(superseded, issued)))
+    return status()
 
 
 async def select(account_id: str) -> dict:
@@ -563,7 +568,7 @@ async def _logout(account_id: str | None) -> dict:
             ):
                 record.pop(field, None)
         _save(data)
-        confirmed = await _revoke(token, client_id)
+    confirmed = await _revoke(token, client_id)
     return {**status(), "remote_revoked": confirmed}
 
 

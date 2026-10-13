@@ -705,3 +705,119 @@ class ChatGPTAuthTests(unittest.TestCase):
         self.assertEqual(replace.call_count, 1)
         sleep.assert_not_called()
         self.assertEqual(list(auth._path().parent.glob(".chatgpt-*")), [])
+
+    def test_initial_scope_omission_preserves_requested_grant(self):
+        response = {
+            "access_token": "generated-access",
+            "expires_in": 300,
+            "token_type": "Bearer",
+        }
+        self.assertEqual(auth._tokens(response)["scopes"], auth.SCOPE.split())
+        self.assertEqual(auth._tokens({**response, "scope": ""})["scopes"], [])
+        self.assertEqual(
+            auth._tokens(response, {"scopes": ["openid"]})["scopes"], ["openid"]
+        )
+
+    def test_reconnect_revokes_superseded_grant_after_save(self):
+        auth._save(
+            {
+                "host_id": "generated-host",
+                "active": "issued",
+                "accounts": {
+                    "issued": {
+                        "client_id": "issued",
+                        "subject": "subject",
+                        "access_token": "generated-old-access",
+                        "refresh_token": "generated-old-refresh",
+                        "expires_at": 0,
+                        "scopes": auth.SCOPE.split(),
+                    }
+                },
+            }
+        )
+        revoked = []
+
+        async def request(*args, **kwargs):
+            return {
+                "access_token": "generated-new-access",
+                "refresh_token": "generated-new-refresh",
+                "id_token": "generated-new-id",
+                "expires_in": 300,
+                "token_type": "Bearer",
+            }
+
+        async def identity(*args):
+            return {"sub": "subject"}
+
+        async def revoke(token, client):
+            self.assertEqual(
+                auth._read()["accounts"]["issued"]["refresh_token"],
+                "generated-new-refresh",
+            )
+            self.assertFalse(auth._LOCK.locked())
+            revoked.append((token, client))
+            return True
+
+        self.patch_request(request)
+
+        async def scenario():
+            with (
+                patch.object(auth, "_identity", identity),
+                patch.object(auth, "_revoke", revoke),
+            ):
+                attempt = await auth.begin(
+                    "http://127.0.0.1:8743/api/chatgpt/callback", "issued"
+                )
+                result = await auth.complete("generated-code", attempt["state"])
+                self.assertTrue(result["ready"])
+            self.assertEqual(revoked, [("generated-old-refresh", "issued")])
+
+        asyncio.run(scenario())
+
+    def test_logout_revocation_does_not_hold_locks_and_survives_cancellation(self):
+        record = {
+            "client_id": "issued",
+            "subject": "subject",
+            "access_token": "generated-access",
+            "refresh_token": "generated-refresh",
+            "expires_at": time.time() + 300,
+            "scopes": auth.SCOPE.split(),
+        }
+        other = {**record, "client_id": "other", "subject": "other-subject"}
+        auth._save(
+            {
+                "host_id": "generated-host",
+                "active": "issued",
+                "accounts": {"issued": record, "other": other},
+            }
+        )
+
+        async def scenario():
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def revoke(token, client):
+                self.assertFalse(auth._LOCK.locked())
+                entered.set()
+                await release.wait()
+                return True
+
+            with patch.object(auth, "_revoke", revoke):
+                logout = asyncio.create_task(auth.logout())
+                await entered.wait()
+                self.assertFalse(auth.status()["connected"])
+                async with auth._locked():
+                    self.assertNotIn(
+                        "refresh_token", auth._read()["accounts"]["issued"]
+                    )
+                await auth.select("other")
+                self.assertEqual(await auth.access_token(), "generated-access")
+                logout.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(logout.done())
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await logout
+                self.assertTrue(auth.status()["ready"])
+                self.assertEqual(auth.status()["active"], "other")
+
+        asyncio.run(scenario())
