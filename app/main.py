@@ -276,8 +276,10 @@ _layout_lock = asyncio.Lock()
 # page's text; running heads match by
 # letters; page 0 cuts at a real Abstract heading and keeps a caption above it; only the
 # reference list is skipped, from a whole-line References heading to an appendix heading or
-# the first page that is not a reference list.)
-_LAYOUT_VERSION = 10
+# the first page that is not a reference list. v11: attach a lone equation number "(1)"
+# to the display equation beside it (as the sentence's "eqno") instead of dropping it as a
+# short fragment.)
+_LAYOUT_VERSION = 11
 
 
 def _page_layout_cached(doc_id: str, page: int) -> dict:
