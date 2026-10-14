@@ -36,3 +36,6 @@ class FrontendTests(unittest.TestCase):
         versions = set(re.findall(r"KaTeX/([\d.]+)/", html))
         self.assertEqual(len(versions), 1, versions)
         self.assertIn(f"KaTeX/{versions.pop()}/contrib/copy-tex.min.js", html)
+
+    def test_unrenderable_math_is_not_swapped_in(self):
+        self.node("tests/frontend_math_guard.test.js")
