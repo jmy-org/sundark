@@ -156,9 +156,8 @@ not run for this isolated media change.
 
 The final-media browser executor could not complete navigation through the
 Chrome extension (30-second and 60-second timeouts), despite the preview responding
-HTTP 200. Final browser playback, seeking, caption switching and mobile layout
-therefore remain unverified for these exact exports; earlier browser results do
-not transfer to them. No physical-mobile, Safari, fullscreen or VoiceOver acceptance
+HTTP 200. Real Chrome native-control interaction remains unverified; earlier browser results do
+not transfer to these exact exports. A subsequent isolated headless check is recorded below. No physical-mobile, Safari, fullscreen or VoiceOver acceptance
 is claimed.
 
 Published media-only prerelease:
@@ -168,5 +167,22 @@ GitHub authentication, and every byte count and SHA-256 matched the delivery/inp
 manifests. Final MP4 total: 7,972,369 bytes; posters: 589,080 bytes; delivery total:
 8,561,449 bytes. Authoring inputs total: 2,979,512 bytes. The release targets
 existing remote commit `9e9eaf82a03920c48bcc13e1c9644cbb7343fdca`, is a prerelease,
-and does not change the latest application release. No code push, PR or Pages
-deployment was performed; source/workflow changes remain local.
+and does not change the latest application release. At media publication, source
+and workflow changes were still local. The user subsequently authorized PR #15
+and squash merge; the final headless checks below were completed before merge.
+
+### Final isolated Chromium verification
+
+After the extension connection failed, a delegated executor used Remotion's
+existing Chrome Headless Shell with a temporary profile, leaving the user's
+Chrome profile untouched. All three exact final files played with advancing time,
+paused without advancing, and sought to nine seconds. Both Korean and English
+tracks parsed four cues per film and displayed the expected active cue; disabling
+tracks removed the editorial overlay. Captions-on/off screenshots were checked.
+With cache disabled, initial MP4 request count was zero. Desktop 1440 × 1000 and
+mobile 390 × 844 had no horizontal overflow.
+
+These are headless media API/CDP results, not native-control click, fullscreen,
+Safari, physical-mobile or assistive-technology acceptance. Local evidence:
+`/tmp/sundark-headless-final-qa.json` and `/tmp/sundark-headless-final-*.png`.
+The PR's Linux regression and Windows credential checks also passed.
