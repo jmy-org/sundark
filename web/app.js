@@ -322,7 +322,12 @@ function zoteroCollectionOptions(cols) {
 }
 
 let zotCollectionsLoaded = false;
+// Each fresh listing (new query, collection, or source) gets a generation number; a reply that
+// arrives after a newer listing started, or after switching to Folder, is dropped.
+let zotGen = 0;
 async function loadZotero(start = 0) {
+  const gen = start === 0 ? ++zotGen : zotGen;
+  const stale = () => gen !== zotGen || libSource !== "zotero";
   const list = $("paperlist");
   if (start === 0) list.innerHTML = '<li class="emptylib">Loading Zotero…</li>';
   $("libdir").textContent = "Zotero · My Library";
@@ -330,7 +335,9 @@ async function loadZotero(start = 0) {
     if (!zotCollectionsLoaded) {
       const sel = $("zot-coll");
       sel.innerHTML = '<option value="">All items</option>';
-      for (const o of zoteroCollectionOptions((await getJSON("/api/zotero/collections")).collections)) {
+      const cols = (await getJSON("/api/zotero/collections")).collections;
+      if (stale()) return;
+      for (const o of zoteroCollectionOptions(cols)) {
         const opt = document.createElement("option");
         opt.value = o.key; opt.textContent = o.label;
         sel.appendChild(opt);
@@ -341,6 +348,7 @@ async function loadZotero(start = 0) {
     if ($("zot-coll").value) params.set("collection", $("zot-coll").value);
     if ($("zot-q").value.trim()) params.set("q", $("zot-q").value.trim());
     const r = await getJSON("/api/zotero/items?" + params);
+    if (stale()) return;
     if (start === 0) list.innerHTML = "";
     list.querySelector("li.more")?.remove();
     if (!r.items.length && start === 0) {
@@ -364,14 +372,16 @@ async function loadZotero(start = 0) {
         list.appendChild(sub);
       }
     }
-    const shown = start + r.items.length;
-    if (shown < r.total) {
+    // "next" counts every Zotero entry read, including skipped notes and attachments.
+    const next = r.next ?? start + r.items.length;
+    if (next < r.total) {
       const more = document.createElement("li");
-      more.className = "more"; more.textContent = `Load more (${shown}/${r.total})`;
-      more.addEventListener("click", () => loadZotero(shown));
+      more.className = "more"; more.textContent = `Load more (${next}/${r.total})`;
+      more.addEventListener("click", () => loadZotero(next));
       list.appendChild(more);
     }
   } catch (err) {
+    if (stale()) return;
     list.innerHTML = '<li class="emptylib">' + esc(err.message) + "</li>";
     zotCollectionsLoaded = false;
   }

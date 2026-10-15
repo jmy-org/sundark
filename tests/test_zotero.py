@@ -153,3 +153,58 @@ class ZoteroTests(unittest.TestCase):
             "app.zotero._get", side_effect=zotero.ZoteroError("Zotero is not running")
         ):
             self.assertFalse(zotero.available())
+
+
+STANDALONE = {
+    "key": "PDFONLY1",
+    "data": {
+        "key": "PDFONLY1",
+        "itemType": "attachment",
+        "contentType": "application/pdf",
+        "title": "dropped-in.pdf",
+        "filename": "dropped-in.pdf",
+    },
+}
+NOTE = {"key": "NOTE0001", "data": {"key": "NOTE0001", "itemType": "note"}}
+WEBPAGE = {
+    "key": "HTML0001",
+    "data": {"key": "HTML0001", "itemType": "attachment", "contentType": "text/html"},
+}
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_standalone_pdf_is_listed_as_its_own_openable_item(self):
+        def get(path, params=None):
+            if path == "/items/top":
+                return [STANDALONE, NOTE, WEBPAGE], 3
+            raise AssertionError(path)
+
+        with patch("app.zotero._get", side_effect=get):
+            page = zotero.items()
+        self.assertEqual(
+            page["items"],
+            [
+                {
+                    "key": "PDFONLY1",
+                    "title": "dropped-in.pdf",
+                    "authors": [],
+                    "year": "",
+                    "doi": None,
+                    "pdfs": [{"key": "PDFONLY1", "name": "dropped-in.pdf"}],
+                }
+            ],
+        )
+
+    def test_next_offset_counts_every_upstream_entry(self):
+        def get(path, params=None):
+            if path == "/items/top":
+                return [NOTE, ITEM, WEBPAGE], 120
+            if path.endswith("/children"):
+                return [], None
+            raise AssertionError(path)
+
+        with patch("app.zotero._get", side_effect=get):
+            page = zotero.items(start=50)
+        self.assertEqual([i["key"] for i in page["items"]], ["4SSLMJWN"])
+        self.assertEqual(page["next"], 53)  # 50 + all three raw entries, not 50 + 1
+        self.assertEqual(page["total"], 120)

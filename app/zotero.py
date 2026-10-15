@@ -119,30 +119,60 @@ def _pdfs(item_key: str) -> list[dict]:
     ]
 
 
+def _is_pdf(data: dict) -> bool:
+    return (
+        data.get("itemType") == "attachment"
+        and data.get("contentType") == "application/pdf"
+    )
+
+
 def items(collection: str | None = None, q: str | None = None, start: int = 0) -> dict:
-    """One page of top-level items (newest-added first), each with its PDF attachments."""
+    """One page of top-level items (newest-added first), each with its PDF attachments.
+
+    A PDF dropped into Zotero without a parent item is a top-level attachment; it is listed
+    as its own openable item. Notes and non-PDF attachments are skipped. "next" is the offset
+    of the following page counted over every upstream entry, skipped ones included, so paging
+    never overlaps or stalls."""
     path = f"/collections/{collection}/items/top" if collection else "/items/top"
     params = {"limit": PAGE, "start": start, "sort": "dateAdded", "direction": "desc"}
     if q:
         params.update(q=q, qmode="titleCreatorYear")
-    batch, total = _get(path, params)
-    batch = [
-        i for i in batch if i["data"].get("itemType") not in ("attachment", "note")
+    raw, total = _get(path, params)
+    kept = [
+        i
+        for i in raw
+        if i["data"].get("itemType") not in ("attachment", "note") or _is_pdf(i["data"])
     ]
+
+    def pdfs_of(i):
+        if _is_pdf(i["data"]):  # a standalone PDF opens as itself
+            return [
+                {
+                    "key": i["key"],
+                    "name": i["data"].get("filename")
+                    or i["data"].get("title")
+                    or "PDF",
+                }
+            ]
+        return _pdfs(i["key"])
+
     with ThreadPoolExecutor(8) as pool:
-        pdfs = list(pool.map(lambda i: _pdfs(i["key"]), batch))
+        pdfs = list(pool.map(pdfs_of, kept))
     return {
-        "total": total if total is not None else len(batch),
+        "total": total if total is not None else start + len(raw),
+        "next": start + len(raw),
         "items": [
             {
                 "key": i["key"],
-                "title": i["data"].get("title") or "(untitled)",
+                "title": i["data"].get("title")
+                or i["data"].get("filename")
+                or "(untitled)",
                 "authors": _authors(i["data"].get("creators", [])),
                 "year": (i["data"].get("date") or "")[:4],
                 "doi": i["data"].get("DOI") or None,
                 "pdfs": p,
             }
-            for i, p in zip(batch, pdfs)
+            for i, p in zip(kept, pdfs)
         ],
     }
 

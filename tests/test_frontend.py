@@ -39,3 +39,6 @@ class FrontendTests(unittest.TestCase):
 
     def test_zotero_collections_are_listed_as_a_tree(self):
         self.node("tests/frontend_zotero.test.js")
+
+    def test_zotero_list_ignores_stale_replies_and_pages_by_next(self):
+        self.node("tests/frontend_zotero_list.test.js")
