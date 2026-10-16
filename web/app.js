@@ -351,10 +351,6 @@ async function loadZotero(start = 0) {
     if (stale()) return;
     if (start === 0) list.innerHTML = "";
     list.querySelector("li.more")?.remove();
-    if (!r.items.length && start === 0) {
-      list.innerHTML = '<li class="emptylib">No matching Zotero items.</li>';
-      return;
-    }
     for (const it of r.items) {
       const who = it.authors.length > 2 ? it.authors[0] + " et al." : it.authors.join(", ");
       const li = document.createElement("li");
@@ -379,6 +375,8 @@ async function loadZotero(start = 0) {
       more.className = "more"; more.textContent = `Load more (${next}/${r.total})`;
       more.addEventListener("click", () => loadZotero(next));
       list.appendChild(more);
+    } else if (!list.children.length) {
+      list.innerHTML = '<li class="emptylib">No matching Zotero items.</li>';
     }
   } catch (err) {
     if (stale()) return;

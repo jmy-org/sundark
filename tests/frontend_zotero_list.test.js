@@ -64,5 +64,44 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   assert.ok(more, "load-more row shown");
   more.listeners.click(); await tick();
   assert.match(pending.pop().url, /start=50/, "next page starts at the server's offset");
+  // 4) a page of skipped notes/attachments must not hide later papers.
+  ctx.loadZotero(); await tick();
+  reply(pending.pop(), { total: 120, next: 50, items: [] }); await tick(); await tick();
+  let emptyMore = $("paperlist").children.find((c) => c.className === "more");
+  assert.ok(emptyMore, "empty first page still offers the next page");
+  assert.doesNotMatch($("paperlist").innerHTML, /No matching/, "not empty until all pages are exhausted");
+  emptyMore.listeners.click(); await tick();
+  const later = pending.pop();
+  assert.match(later.url, /start=50/);
+  reply(later, { total: 120, next: 100, items: [] }); await tick(); await tick();
+  emptyMore = $("paperlist").children.find((c) => c.className === "more");
+  assert.ok(emptyMore, "consecutive empty pages remain reachable");
+  emptyMore.listeners.click(); await tick();
+  const last = pending.pop();
+  assert.match(last.url, /start=100/);
+  reply(last, { total: 120, next: 120, items: [item("D")] }); await tick(); await tick();
+  assert.equal($("paperlist").children.length, 1);
+  assert.match($("paperlist").children[0].innerHTML, /^D/);
+
+  // 5) exhausting only skipped entries shows the empty state, including later pages.
+  ctx.loadZotero(); await tick();
+  reply(pending.pop(), { total: 60, next: 50, items: [] }); await tick(); await tick();
+  $("paperlist").children[0].listeners.click(); await tick();
+  reply(pending.pop(), { total: 60, next: 60, items: [] }); await tick(); await tick();
+  assert.match($("paperlist").innerHTML, /No matching Zotero items/);
+  assert.equal($("paperlist").children.length, 0);
+
+  ctx.loadZotero(); await tick();
+  reply(pending.pop(), { total: 0, next: 0, items: [] }); await tick(); await tick();
+  assert.match($("paperlist").innerHTML, /No matching Zotero items/);
+
+  // 6) a final skipped-only page keeps already displayed papers.
+  ctx.loadZotero(); await tick();
+  reply(pending.pop(), { total: 60, next: 50, items: [item("E")] }); await tick(); await tick();
+  $("paperlist").children[1].listeners.click(); await tick();
+  reply(pending.pop(), { total: 60, next: 60, items: [] }); await tick(); await tick();
+  assert.equal($("paperlist").children.length, 1);
+  assert.match($("paperlist").children[0].innerHTML, /^E/);
+  assert.doesNotMatch($("paperlist").innerHTML, /No matching/);
   console.log("zotero list PASS");
 })().catch((e) => { console.error(e); process.exitCode = 1; });
