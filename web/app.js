@@ -325,6 +325,7 @@ let zotCollectionsLoaded = false;
 // Each fresh listing (new query, collection, or source) gets a generation number; a reply that
 // arrives after a newer listing started, or after switching to Folder, is dropped.
 let zotGen = 0;
+let folderGen = 0;
 async function loadZotero(start = 0) {
   const gen = start === 0 ? ++zotGen : zotGen;
   const stale = () => gen !== zotGen || libSource !== "zotero";
@@ -358,13 +359,21 @@ async function loadZotero(start = 0) {
       if (!it.pdfs.length) {
         li.classList.add("nopdf"); li.title = "No PDF attached in Zotero";
       } else {
-        li.addEventListener("click", () => openFromZotero(it.key, it.pdfs[0].key, li));
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "paper-action";
+        button.innerHTML = li.innerHTML; li.innerHTML = "";
+        button.addEventListener("click", () => openFromZotero(it.key, it.pdfs[0].key, li));
+        li.appendChild(button);
       }
       list.appendChild(li);
       for (const pdf of it.pdfs.slice(1)) {  // extra PDFs (e.g. supplementary material)
         const sub = document.createElement("li");
-        sub.className = "sub"; sub.textContent = "↳ " + pdf.name;
-        sub.addEventListener("click", () => openFromZotero(it.key, pdf.key, sub));
+        sub.className = "sub";
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "paper-action";
+        button.textContent = "↳ " + pdf.name;
+        button.addEventListener("click", () => openFromZotero(it.key, pdf.key, sub));
+        sub.appendChild(button);
         list.appendChild(sub);
       }
     }
@@ -372,8 +381,16 @@ async function loadZotero(start = 0) {
     const next = r.next ?? start + r.items.length;
     if (next < r.total) {
       const more = document.createElement("li");
-      more.className = "more"; more.textContent = `Load more (${next}/${r.total})`;
-      more.addEventListener("click", () => loadZotero(next));
+      more.className = "more";
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "paper-action";
+      button.textContent = `Load more (${next}/${r.total})`;
+      button.addEventListener("click", () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        loadZotero(next);
+      });
+      more.appendChild(button);
       list.appendChild(more);
     } else if (!list.children.length) {
       list.innerHTML = '<li class="emptylib">No matching Zotero items.</li>';
@@ -399,10 +416,13 @@ async function openFromZotero(item, attachment, li) {
 
 async function loadLibrary() {
   if (libSource === "zotero") return loadZotero();
+  const gen = ++folderGen;
+  const stale = () => gen !== folderGen || libSource !== "folder";
   const list = $("paperlist");
   list.innerHTML = '<li class="emptylib">Loading…</li>';
   try {
     const r = await fetch("/api/papers").then((x) => x.json());
+    if (stale()) return;
     $("libdir").textContent = r.dir;
     if (!r.papers.length) {
       list.innerHTML = '<li class="emptylib">No PDFs here yet.<br>Drop .pdf files in the folder, then ⟳.</li>';
@@ -416,6 +436,7 @@ async function loadLibrary() {
       list.appendChild(li);
     }
   } catch (err) {
+    if (stale()) return;
     list.innerHTML = '<li class="emptylib">Error: ' + err.message + "</li>";
   }
 }
