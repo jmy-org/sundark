@@ -187,3 +187,33 @@ This backend uses the official public Responses API with ChatGPT OAuth, inline
 images, no agent tools, `store:false`, and streamed responses. Account sign-in
 and a model list alone do not prove plan access; a completed AI request does.
 See [OpenAI's sign-in guide](https://developers.openai.com/siwc/token-sharing-open-source/sign-in).
+
+### Browser regression tests
+
+```bash
+uv sync --locked
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+pnpm test:e2e
+```
+
+The test launches Chromium and a dedicated FastAPI server at `127.0.0.1:18743`.
+It uploads a generated PDF through the UI and exercises the production HTML,
+JavaScript, PDF renderer, PDF text extraction, AI prompts, endpoints, settings,
+and filesystem caches. Every data directory, library, and credential file is
+isolated in temporary storage; your papers, chats, settings, and accounts are
+untouched. Production-pinned CDN libraries are served from local test dependencies.
+
+The external AI transport and layout detector are deterministic test doubles, and
+the sentence splitter uses the supported pysbd fallback to avoid model downloads.
+These checks prove browser/server integration and language separation, not actual
+provider access, translation quality, layout-model accuracy, other browsers, or
+assistive-technology usability. Failures retain traces and screenshots under
+`test-results/`; open a trace with `pnpm exec playwright show-trace <trace.zip>`.
+
+For an actual-provider smoke check, run the normal app from a disposable checkout with a disposable library
+and isolated account configuration, connect your subscription, upload a
+non-sensitive paper, and generate translation, summary, anatomy, chat, and a
+review export in two languages. Check the text and generated ZIP manually; never
+interpret deterministic browser-test success as evidence that a live AI request
+completed.
