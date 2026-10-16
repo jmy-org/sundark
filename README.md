@@ -12,6 +12,8 @@ Inspired by sites like themoonlight.io, but kept simple and private.
 > Personal/local use only. No reader access control. Subscription usage limits apply. Only `app/backends/`
 > starts AI processes; serving other people would need a billable API backend there.
 
+The public landing page lives in [`site/`](site/README.md), separate from the local reader.
+
 ## Requirements (macOS)
 
 1. **ChatGPT** with eligible plan access, or **Claude Code** / **Hermes** installed and logged in.
@@ -113,6 +115,10 @@ any other copy of the same paper. Zotero must be running with
 enabled. Paper Reader only reads from Zotero; items without a PDF are greyed out, and extra PDFs
 (e.g. supplementary material) are listed under their item.
 
+Over the PDF pane, **Ctrl + mouse wheel** zooms just the paper around the pointer.
+Over the library, AI panel, or top bar, it keeps the browser's whole-app zoom.
+The PDF's **+ / −**, **fit width**, and **fit page** controls remain available.
+
 ### Paper identity and titles
 
 When you open a PDF, Sundark looks for its DOI or arXiv ID on the first two pages and
@@ -145,6 +151,7 @@ app/
   pdf_utils.py   PyMuPDF text extraction
   store.py       local PDF + result cache
 web/             static reader UI (pdf.js + marked, no build step)
+site/            public landing page, deployed separately to GitHub Pages
 papers/          your PDFs (gitignored)
 data/            runtime cache (gitignored)
 ```
