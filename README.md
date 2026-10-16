@@ -96,13 +96,14 @@ You can still **Upload PDF** from the top bar for one-off files.
 
 1. Pick a paper from the **Library**, or **Upload PDF**.
 2. **AI** badge (top right): choose the AI Backend and a model per task (see
-   *AI settings*). Saving reloads the page; results are cached per backend and model.
+   *AI settings*). Saving reloads the page; results are cached per backend, model, and output language.
 3. **Summary** tab → *Generate summary*.
-4. **Translation** tab → pick a language (default Korean); it translates the page
-   shown on the left and follows you as you page through.
+4. **AI settings** → choose one output language (default Korean) for translation,
+   summary, anatomy, explanations, chat, and review notes. The **Translation** tab
+   translates the page shown on the left and follows you as you page through.
 5. **Chat** tab → ask questions about the paper.
 
-Results are cached per paper **and per AI Backend and model** under `data/`, so reopening is instant
+Results are cached per paper **and per AI Backend, model, and output language** under `data/`, so reopening is instant
 and doesn't re-spend usage. Text-based PDFs only (scanned images need OCR — not yet).
 
 Over the PDF pane, **Ctrl + mouse wheel** zooms just the paper around the pointer.
@@ -150,7 +151,8 @@ data/            runtime cache (gitignored)
 
 - AI Backend and models: the **AI** badge, stored in `data/settings.json`; defaults in
   `DEFAULT_MODELS` in `app/settings.py`.
-- Default translation language: the `<select>` in `web/index.html`.
+- Output language: **AI settings**, stored as `output_language` in `data/settings.json`;
+  defaults to Korean. Supported languages are defined in `app/settings.py`.
 - Papers folder: `PAPERS_DIR` env var (default `./papers`).
 
 ### Continue with ChatGPT

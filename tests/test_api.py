@@ -122,7 +122,11 @@ class ApiTests(unittest.TestCase):
             self.client.post("/api/summarize", json={"doc_id": "d"})
         names = sorted(p.name for p in (store.CACHE / "d").iterdir())
         self.assertEqual(
-            names, ["summary_claude-sonnet.json", "summary_hermes-gpt-6.1-sol.json"]
+            names,
+            [
+                "summary_Korean_claude-sonnet.json",
+                "summary_Korean_hermes-gpt-6.1-sol.json",
+            ],
         )
 
     def test_chat_history_survives_backend_switch(self):
