@@ -1120,16 +1120,31 @@ async def save_settings(req: SettingsReq):
         raise HTTPException(400, str(exc)) from exc
     current = settings.load()
     merged = {**current["models"][req.backend], **req.models}
+    account = chatgpt_auth.validation_identity() if req.backend == "chatgpt" else None
     unchanged = (
-        current["backend"] == req.backend and merged == current["models"][req.backend]
+        current["backend"] == req.backend
+        and merged == current["models"][req.backend]
+        and (
+            req.backend != "chatgpt"
+            or account is not None
+            and account == current["validated_chatgpt_identity"]
+        )
     )
     for model_id in [] if unchanged else sorted(set(merged.values())):
         try:
             await ai.probe(req.backend, model_id)
         except AIError as exc:
             raise HTTPException(400, f"{model_id}: {exc}") from exc
+    if req.backend == "chatgpt" and chatgpt_auth.validation_identity() != account:
+        raise HTTPException(409, "ChatGPT account changed; save settings again")
     try:
-        settings.save(req.backend, req.models, req.concurrency, language)
+        settings.save(
+            req.backend,
+            req.models,
+            req.concurrency,
+            language,
+            validated_chatgpt_identity=account,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True}

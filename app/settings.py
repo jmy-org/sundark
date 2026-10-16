@@ -103,6 +103,9 @@ def load() -> dict:
         "backend": backend,
         "models": models,
         "concurrency": concurrency,
+        "validated_chatgpt_identity": raw.get("validated_chatgpt_identity")
+        if isinstance(raw.get("validated_chatgpt_identity"), str)
+        else None,
         "output_language": raw.get("output_language")
         if raw.get("output_language") in OUTPUT_LANGUAGES
         else DEFAULT_OUTPUT_LANGUAGE,
@@ -137,6 +140,8 @@ def save(
     models: dict[str, str],
     concurrency: int,
     output_language: str | None = None,
+    *,
+    validated_chatgpt_identity: str | None = None,
 ) -> None:
     validate(backend, models, concurrency)
     if output_language is not None and output_language not in OUTPUT_LANGUAGES:
@@ -147,6 +152,9 @@ def save(
         "backend": backend,
         "models": current["models"],
         "concurrency": current["concurrency"],
+        "validated_chatgpt_identity": validated_chatgpt_identity
+        if backend == "chatgpt"
+        else current["validated_chatgpt_identity"],
     }
     raw["models"][backend] = {**current["models"][backend], **models}
     raw["concurrency"][backend] = concurrency
