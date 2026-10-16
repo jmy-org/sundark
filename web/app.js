@@ -288,11 +288,150 @@ $("settings-form").addEventListener("submit", async (e) => {
 });
 
 // ================= Library =================
+// Two sources: the papers folder, or the user's Zotero library (read-only, via Zotero's local API).
+let libSource = "folder";
+try { libSource = localStorage.getItem("libSource") || "folder"; } catch {}
+
+function setLibSource(src) {
+  libSource = src;
+  try { localStorage.setItem("libSource", src); } catch {}
+  $("src-folder").classList.toggle("active", src === "folder");
+  $("src-zotero").classList.toggle("active", src === "zotero");
+  $("zot-controls").classList.toggle("hidden", src !== "zotero");
+  loadLibrary();
+}
+$("src-folder").addEventListener("click", () => setLibSource("folder"));
+$("src-zotero").addEventListener("click", () => setLibSource("zotero"));
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+  return res.json();
+}
+
+// Flat Zotero collections (each with a parent key) -> picker options in tree order, indented.
+function zoteroCollectionOptions(cols) {
+  const keys = new Set(cols.map((c) => c.key));
+  const kids = new Map();
+  for (const c of cols) {
+    const parent = c.parent && keys.has(c.parent) ? c.parent : null;
+    if (!kids.has(parent)) kids.set(parent, []);
+    kids.get(parent).push(c);
+  }
+  const out = [];
+  const walk = (parent, depth) => {
+    const list = (kids.get(parent) || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+    for (const c of list) {
+      out.push({ key: c.key, label: "\u00a0\u00a0".repeat(depth) + c.name + " (" + c.count + ")" });
+      walk(c.key, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return out;
+}
+
+let zotCollectionsLoaded = false;
+// Each fresh listing (new query, collection, or source) gets a generation number; a reply that
+// arrives after a newer listing started, or after switching to Folder, is dropped.
+let zotGen = 0;
+let folderGen = 0;
+async function loadZotero(start = 0) {
+  const gen = start === 0 ? ++zotGen : zotGen;
+  const stale = () => gen !== zotGen || libSource !== "zotero";
+  const list = $("paperlist");
+  if (start === 0) list.innerHTML = '<li class="emptylib">Loading Zotero…</li>';
+  $("libdir").textContent = "Zotero · My Library";
+  try {
+    if (!zotCollectionsLoaded) {
+      const sel = $("zot-coll");
+      sel.innerHTML = '<option value="">All items</option>';
+      const cols = (await getJSON("/api/zotero/collections")).collections;
+      if (stale()) return;
+      for (const o of zoteroCollectionOptions(cols)) {
+        const opt = document.createElement("option");
+        opt.value = o.key; opt.textContent = o.label;
+        sel.appendChild(opt);
+      }
+      zotCollectionsLoaded = true;
+    }
+    const params = new URLSearchParams({ start: String(start) });
+    if ($("zot-coll").value) params.set("collection", $("zot-coll").value);
+    if ($("zot-q").value.trim()) params.set("q", $("zot-q").value.trim());
+    const r = await getJSON("/api/zotero/items?" + params);
+    if (stale()) return;
+    if (start === 0) list.innerHTML = "";
+    list.querySelector("li.more")?.remove();
+    for (const it of r.items) {
+      const who = it.authors.length > 2 ? it.authors[0] + " et al." : it.authors.join(", ");
+      const li = document.createElement("li");
+      li.innerHTML = `${esc(it.title)}<span class="meta">${esc([who, it.year].filter(Boolean).join(" · "))}</span>`;
+      if (!it.pdfs.length) {
+        li.classList.add("nopdf"); li.title = "No PDF attached in Zotero";
+      } else {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "paper-action";
+        button.innerHTML = li.innerHTML; li.innerHTML = "";
+        button.addEventListener("click", () => openFromZotero(it.key, it.pdfs[0].key, li));
+        li.appendChild(button);
+      }
+      list.appendChild(li);
+      for (const pdf of it.pdfs.slice(1)) {  // extra PDFs (e.g. supplementary material)
+        const sub = document.createElement("li");
+        sub.className = "sub";
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "paper-action";
+        button.textContent = "↳ " + pdf.name;
+        button.addEventListener("click", () => openFromZotero(it.key, pdf.key, sub));
+        sub.appendChild(button);
+        list.appendChild(sub);
+      }
+    }
+    // "next" counts every Zotero entry read, including skipped notes and attachments.
+    const next = r.next ?? start + r.items.length;
+    if (next < r.total) {
+      const more = document.createElement("li");
+      more.className = "more";
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "paper-action";
+      button.textContent = `Load more (${next}/${r.total})`;
+      button.addEventListener("click", () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        loadZotero(next);
+      });
+      more.appendChild(button);
+      list.appendChild(more);
+    } else if (!list.children.length) {
+      list.innerHTML = '<li class="emptylib">No matching Zotero items.</li>';
+    }
+  } catch (err) {
+    if (stale()) return;
+    list.innerHTML = '<li class="emptylib">' + esc(err.message) + "</li>";
+    zotCollectionsLoaded = false;
+  }
+}
+$("zot-coll").addEventListener("change", () => loadZotero());
+let zotSearchT;
+$("zot-q").addEventListener("input", () => { clearTimeout(zotSearchT); zotSearchT = setTimeout(() => loadZotero(), 300); });
+
+async function openFromZotero(item, attachment, li) {
+  document.querySelectorAll(".paperlist li").forEach((x) => x.classList.remove("active"));
+  if (li) li.classList.add("active");
+  setTitle("Opening…");
+  try {
+    await openDoc(await postJSON("/api/zotero/open", { item, attachment }));
+  } catch (err) { setTitle("Open failed: " + err.message); }
+}
+
 async function loadLibrary() {
+  if (libSource === "zotero") return loadZotero();
+  const gen = ++folderGen;
+  const stale = () => gen !== folderGen || libSource !== "folder";
   const list = $("paperlist");
   list.innerHTML = '<li class="emptylib">Loading…</li>';
   try {
     const r = await fetch("/api/papers").then((x) => x.json());
+    if (stale()) return;
     $("libdir").textContent = r.dir;
     if (!r.papers.length) {
       list.innerHTML = '<li class="emptylib">No PDFs here yet.<br>Drop .pdf files in the folder, then ⟳.</li>';
@@ -306,10 +445,11 @@ async function loadLibrary() {
       list.appendChild(li);
     }
   } catch (err) {
+    if (stale()) return;
     list.innerHTML = '<li class="emptylib">Error: ' + err.message + "</li>";
   }
 }
-$("refresh").addEventListener("click", loadLibrary);
+$("refresh").addEventListener("click", () => { zotCollectionsLoaded = false; loadLibrary(); });
 
 async function openFromLibrary(rel, li) {
   document.querySelectorAll(".paperlist li").forEach((x) => x.classList.remove("active"));
@@ -508,6 +648,7 @@ function ensureLayout(i) {
         para: s.para,
         size: s.size,
         heading: s.heading,
+        eqno: s.eqno || null,  // equation number "(1)" printed beside a display equation
         rects: lineRects(s.words.map((wi) => L.words[wi]), !s.equation),  // in points
         // A sentence that wraps to the next page carries that page's word boxes too, so the
         // highlight can span both pages.
@@ -856,8 +997,15 @@ function preparePage(i) {
       para.appendChild(document.createElement("br"));
     }
     const sp = makeTrSeg(i, k, "");
+    if (seg.eqno) sp.dataset.eqno = seg.eqno;
     if (isBullet) sp.classList.add("trbullet");
     para.appendChild(sp);
+    if (seg.eqno) {
+      // Shown beside the translated equation until the image-read LaTeX takes it as \tag.
+      const no = document.createElement("span");
+      no.className = "treqno"; no.textContent = "(" + seg.eqno + ")";
+      para.appendChild(no);
+    }
     para.appendChild(document.createTextNode(" "));
     P.spanByK[k] = sp;
   });
@@ -921,7 +1069,16 @@ async function fetchMath(i, wrap) {
     if (!d.equations || !d.equations.length) return;
     for (const eq of d.equations) {
       const sp = wrap.querySelector(`.trseg[data-i="${eq.i}"]`);
-      if (sp && eq.latex) sp.textContent = "\\[ " + eq.latex + " \\]";
+      if (!sp || !eq.latex) continue;
+      // Keep the translation's own math if KaTeX cannot render the image-read LaTeX.
+      if (window.katex) {
+        try { window.katex.renderToString(eq.latex, { displayMode: true, throwOnError: true }); }
+        catch { continue; }
+      }
+      const tag = sp.dataset && sp.dataset.eqno ? " \\tag{" + sp.dataset.eqno + "}" : "";
+      sp.textContent = "\\[ " + eq.latex + tag + " \\]";
+      const no = sp.nextElementSibling;
+      if (tag && no && no.classList.contains("treqno")) no.remove();
     }
     renderMath(wrap);
   } catch { /* best-effort: keep the original text if math fetch fails */ }
@@ -1644,4 +1801,4 @@ let resizeT;
 window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(refitPdf, 300); });
 
 window.S = S; // expose for debugging
-loadConfig().finally(loadLibrary);
+loadConfig().finally(() => setLibSource(libSource));
