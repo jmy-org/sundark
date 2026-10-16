@@ -248,6 +248,27 @@ class ApiTests(unittest.TestCase):
 
             self.assertEqual(asyncio.run(ai.equation_latex(b"PNG")), "")
 
+    def test_cached_repair_stops_after_first_rate_limit(self):
+        src = "where the probability that the system is in state i is given by the vector and A is the transition matrix."
+        cached = {"segments": [{"src": src, "tr": src} for _ in range(3)]}
+        with (
+            patch("app.main.store.cache_get", return_value=cached),
+            patch("app.main.store.cache_put") as put,
+            patch(
+                "app.main._retranslate",
+                new=AsyncMock(side_effect=RateLimitError("Slow down")),
+            ) as retry,
+        ):
+            response = self.client.post(
+                "/api/translate_stream",
+                json={"doc_id": "d", "page": 0, "segments": [src] * 3},
+            )
+        lines = [json.loads(x) for x in response.text.splitlines()]
+        self.assertEqual(lines, [{"error": "Slow down", "rate_limited": True}])
+        retry.assert_awaited_once()
+        put.assert_not_called()
+        self.assertTrue(all("checked" not in seg for seg in cached["segments"]))
+
     def test_cached_untranslated_sentence_is_fixed_once(self):
         src = (
             "where the probability that the system is in state i at n MCS is given by the "

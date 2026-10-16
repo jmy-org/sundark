@@ -1408,11 +1408,16 @@ def _attach_equation_numbers(lines: list[dict]) -> list[dict]:
     for ln in lines:
         m = _EQNO.fullmatch(ln["text"].strip())
         if m and not ln.get("math"):
-            best, overlap = None, 0.0
+            best, score = None, None
             for eq in equations:
                 ov = min(eq["bottom"], ln["bottom"]) - max(eq["top"], ln["top"])
-                if ov > overlap and eq["right"] <= ln["left"] + 2:
-                    best, overlap = eq, ov
+                candidate = (ln["left"] - eq["right"], -ov)
+                if (
+                    ov > 0
+                    and eq["right"] <= ln["left"] + 2
+                    and (score is None or candidate < score)
+                ):
+                    best, score = eq, candidate
             if best is not None:
                 best["eqno"] = m.group(1)
                 continue
@@ -1661,6 +1666,15 @@ def _page_layout(
                     continue
             merged_lines.append(ln)
         lines = _attach_equation_numbers(merged_lines)
+        for ln in lines:
+            ln["formula"] = next(
+                (
+                    i
+                    for i, rect in enumerate(formula_rects)
+                    if _in_rects(ln["cx"], ln["cy"], [rect])
+                ),
+                None,
+            )
 
         # Drop running heads and page numbers, by their text, not by height alone. A line repeated
         # across pages (`headers`) goes when it is in the page's top or bottom band, or inside a
@@ -1773,8 +1787,13 @@ def _page_layout(
                 in_eq = cur is not None and cur.get("equation")
                 is_eq_line = bool(ln.get("math"))
                 if is_eq_line and not ln["heading"]:
-                    # display-equation line: keep whole; consecutive equation lines merge.
-                    if in_eq:
+                    # Merge only within one model region; adjacent equations retain
+                    # their own crops and numbers, while multiline formulas stay whole.
+                    if (
+                        in_eq
+                        and prev["formula"] == ln["formula"]
+                        and not (cur.get("eqno") and ln.get("eqno"))
+                    ):
                         cur["widx"].extend(ln["widx"])
                     else:
                         if cur:

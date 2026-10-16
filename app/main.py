@@ -784,8 +784,15 @@ async def translate_stream(req: TranslateReq):
                     ):
                         try:
                             better = await _retranslate(seg["src"], req.target_lang)
-                        except RateLimitError:
-                            better = ""
+                        except RateLimitError as exc:
+                            yield (
+                                json.dumps(
+                                    {"error": str(exc), "rate_limited": True},
+                                    ensure_ascii=False,
+                                )
+                                + "\n"
+                            )
+                            return
                         else:
                             seg["checked"], changed = True, True
                         if better:
