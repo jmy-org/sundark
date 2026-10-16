@@ -1410,6 +1410,8 @@ def _attach_equation_numbers(lines: list[dict]) -> list[dict]:
         if m and not ln.get("math"):
             best, score = None, None
             for eq in equations:
+                if eq.get("eqno"):
+                    continue
                 ov = min(eq["bottom"], ln["bottom"]) - max(eq["top"], ln["top"])
                 candidate = (ln["left"] - eq["right"], -ov)
                 if (

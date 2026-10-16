@@ -39,6 +39,15 @@ class EquationNumberTests(unittest.TestCase):
         self.assertEqual(_attach_equation_numbers([eq, num]), [eq, num])
         self.assertNotIn("eqno", eq)
 
+    def test_unmatched_number_does_not_replace_an_existing_number(self):
+        eq = line("x = a", 80, 140, 100, 112, math=True)
+        number = line("(1)", 270, 285, 101, 111)
+        unmatched = line("(2)", 540, 555, 101, 111)
+        self.assertEqual(
+            _attach_equation_numbers([eq, number, unmatched]), [eq, unmatched]
+        )
+        self.assertEqual(eq["eqno"], "1")
+
     def test_numbers_beside_prose_or_inside_text_stay(self):
         prose = line("as shown in", 300, 400, 100, 112)
         num = line("(1)", 540, 560, 101, 111)
