@@ -97,6 +97,86 @@ class OutputLanguageTests(unittest.TestCase):
             ["Japanese", "English"],
         )
 
+    def test_stream_repair_keeps_resolved_language_after_settings_change(self):
+        for override, expected in ((None, "Japanese"), ("French", "French")):
+            with self.subTest(override=override):
+                settings.save("claude", {}, 2, "Japanese")
+
+                async def stream(segments, target_lang, brief=""):
+                    self.assertEqual(target_lang, expected)
+                    settings.save("claude", {}, 2, "English")
+                    yield "untranslated source"
+
+                body = {
+                    "doc_id": "doc",
+                    "page": 0,
+                    "segments": ["source"],
+                    "force": True,
+                }
+                if override is not None:
+                    body["target_lang"] = override
+                with (
+                    patch("app.main._get_brief", new=AsyncMock(return_value="")),
+                    patch("app.main.ai.translate_stream", new=stream),
+                    patch(
+                        "app.main.ai.untranslated", side_effect=[True, False]
+                    ) as check,
+                    patch(
+                        "app.main.ai.translate", new=AsyncMock(return_value="repaired")
+                    ) as repair,
+                ):
+                    response = self.client.post("/api/translate_stream", json=body)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(json.loads(response.text)["tr"], "repaired")
+                self.assertEqual(
+                    [call.args[2] for call in check.call_args_list],
+                    [expected, expected],
+                )
+                repair.assert_awaited_once_with("source", expected)
+
+    def test_cached_stream_repair_keeps_resolved_language(self):
+        import hashlib
+
+        for override, expected in ((None, "Japanese"), ("French", "French")):
+            with self.subTest(override=override):
+                settings.save("claude", {}, 2, "Japanese")
+                signature = hashlib.sha1(b"source").hexdigest()[:10]
+                key = f"tr_{expected}_{ai.cache_tag('translate')}_0_{signature}"
+                store.cache_put(
+                    "doc",
+                    key,
+                    {
+                        "segments": [{"src": "source", "tr": "old"}],
+                        "translation": "old",
+                    },
+                )
+                checked = []
+
+                def untranslated(source, translated, target_lang):
+                    checked.append(target_lang)
+                    settings.save("claude", {}, 2, "English")
+                    return translated == "old"
+
+                body = {"doc_id": "doc", "page": 0, "segments": ["source"]}
+                if override is not None:
+                    body["target_lang"] = override
+                with (
+                    patch("app.main.ai.untranslated", side_effect=untranslated),
+                    patch(
+                        "app.main.ai.translate", new=AsyncMock(return_value="repaired")
+                    ) as repair,
+                    patch("app.main.ai.translate_stream") as stream,
+                ):
+                    response = self.client.post("/api/translate_stream", json=body)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(json.loads(response.text)["tr"], "repaired")
+                self.assertEqual(checked, [expected, expected])
+                repair.assert_awaited_once_with("source", expected)
+                stream.assert_not_called()
+                self.assertEqual(
+                    store.cache_get("doc", key)["segments"][0]["tr"], "repaired"
+                )
+
     def test_all_request_languages_are_validated(self):
         for endpoint, body in (
             ("summarize", {}),

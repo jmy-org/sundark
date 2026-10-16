@@ -856,10 +856,10 @@ async def translate_stream(req: TranslateReq):
                     # Cached before the untranslated() check existed: fix it once, then
                     # mark it so a sentence that stays English is not retried every open.
                     if not seg.get("checked") and ai.untranslated(
-                        seg["src"], seg["tr"], req.target_lang
+                        seg["src"], seg["tr"], language
                     ):
                         try:
-                            better = await _retranslate(seg["src"], req.target_lang)
+                            better = await _retranslate(seg["src"], language)
                         except RateLimitError as exc:
                             yield (
                                 json.dumps(
@@ -898,16 +898,14 @@ async def translate_stream(req: TranslateReq):
                 async for tr in chunks:
                     k = len(collected)
                     collected.append(tr)
-                    if ai.untranslated(segs[k], tr, req.target_lang):
+                    if ai.untranslated(segs[k], tr, language):
                         held.append(k)  # shown after a second, single-sentence attempt
                         continue
                     yield json.dumps({"i": k, "tr": tr}, ensure_ascii=False) + "\n"
             finally:
                 await chunks.aclose()
             for k in held:
-                collected[k] = (
-                    await _retranslate(segs[k], req.target_lang) or collected[k]
-                )
+                collected[k] = await _retranslate(segs[k], language) or collected[k]
                 yield (
                     json.dumps({"i": k, "tr": collected[k]}, ensure_ascii=False) + "\n"
                 )
