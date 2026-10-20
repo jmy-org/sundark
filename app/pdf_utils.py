@@ -50,31 +50,46 @@ def _title_from_fonts(page) -> str:
 
     This gives properly spaced text (e.g. 'Diffusion Policy: Visuomotor Policy
     Learning via Action Diffusion') instead of the space-stripped metadata title.
+    A line's size is the size most of its characters are set in: a math symbol set larger
+    than the rest of its line, taken as the line's size, left out the title's next line.
+    Lines on one row are read left to right (a small-caps title comes word by word, a short
+    word a hair lower than its neighbours).
     """
     try:
         d = page.get_text("dict")
     except Exception:  # noqa: BLE001
         return ""
     limit_y = page.rect.height * 0.5
-    lines = []  # (size, y, text)
+    lines = []  # (size, bbox, text)
     for block in d.get("blocks", []):
         for line in block.get("lines", []):
             spans = line.get("spans", [])
             text = "".join(s.get("text", "") for s in spans).strip()
-            y = line.get("bbox", [0, 0, 0, 0])[1]
-            if not text or y > limit_y:
+            box = line.get("bbox", [0, 0, 0, 0])
+            if not text or box[1] > limit_y:
                 continue
             if text.lower().startswith(("arxiv:", "doi:")):
                 continue
-            size = max((s.get("size", 0) for s in spans), default=0)
-            lines.append((size, y, text))
+            chars: dict[float, int] = {}
+            for s in spans:
+                size = s.get("size", 0)
+                chars[size] = chars.get(size, 0) + len(s.get("text", "").strip())
+            size = max(chars, key=lambda k: (chars[k], k))
+            lines.append((size, box, text))
     if not lines:
         return ""
     max_size = max(s for s, _, _ in lines)
-    title_lines = [
-        t for (s, y, t) in sorted(lines, key=lambda x: x[1]) if s >= max_size - 0.5
+    rows: list[list[tuple]] = []
+    for _, box, text in sorted(
+        (ln for ln in lines if ln[0] >= max_size - 0.5), key=lambda ln: ln[1][1]
+    ):
+        if rows and box[1] < rows[-1][-1][0][3] - (box[3] - box[1]) / 2:
+            rows[-1].append((box, text))
+        else:
+            rows.append([(box, text)])
+    return " ".join(t for row in rows for _, t in sorted(row, key=lambda r: r[0][0]))[
+        :300
     ]
-    return " ".join(title_lines)[:300]
 
 
 def segment(text: str, max_len: int = 600) -> list[str]:
@@ -291,8 +306,9 @@ _CMEX = str.maketrans(
 )
 
 # Bump when extract() changes what it returns, so stored docs are re-extracted on next open.
-# (v3: CMEX10 symbols decoded.)
-TEXT_VERSION = 3
+# (v3: CMEX10 symbols decoded. v4: a title line's size is the size most of its characters
+# use, and lines on one row read left to right.)
+TEXT_VERSION = 4
 
 
 def _cmap_codes(cmap: str) -> frozenset[int]:
@@ -922,6 +938,9 @@ def _letters(text: str) -> str:
 # ("Abstract—We ..."). Not "abstracting" in the introduction: 2411.14499 has no Abstract
 # heading, and cutting there dropped its abstract and the start of its introduction.
 _ABSTRACT_RE = re.compile(r"(?:Abstract|ABSTRACT)(?:[.:—–-].*)?")
+
+# An e-mail domain ("x@mit.edu", "{a, b} @mit.edu"); not "mAP@0.5" or "Recall@1".
+_EMAIL = re.compile(r"@ ?[A-Za-z][\w-]*(?:\.[A-Za-z][\w-]*)+")
 
 
 def _front_cut(words: list[dict], height: float) -> float:
@@ -1872,6 +1891,22 @@ def _page_layout(
             for p in _paragraphs(group, captions=kind == "caption"):
                 paras.append({**p, "aside": True, "caption": kind == "caption"})
         line_of = {g: li for li, ln in enumerate(lines) for g in ln["widx"]}
+
+        # Page 0's footnote with an e-mail address is the authors' contact block (affiliations,
+        # "Correspondence to: ..."): front matter, like the lines above the Abstract, set at the
+        # foot of the page. Over 32 papers, all 10 such footnotes were one (one also held a
+        # funding note, which goes with it); content footnotes (a definition, a URL) carry no
+        # address.
+        if page_index == 0:
+            paras = [
+                p
+                for p in paras
+                if not (
+                    p.get("aside")
+                    and not p.get("caption")
+                    and _EMAIL.search(" ".join(words[g]["t"] for g in p["widx"]))
+                )
+            ]
 
         # An appendix or supplement may open on a cover that repeats page 0's front matter
         # (title, authors, affiliations). Page 0 drops those lines, so a later paragraph made

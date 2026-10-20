@@ -19,7 +19,11 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   (`app/paper_id.py`: `doi:`, `arxiv:`, `zotero:`, or `file:<doc_id>`) keys Chat History and
   the translation glossary. `app/biblio.py` fetches the Bibliographic Record and rejects a
   DOI whose record title is not on the first page (a cited work's DOI). Zotero integration
-  calls `main._ingest(data, {"key": ..., "doi": ...})`; Zotero's DOI wins.
+  calls `main._ingest(data, {"key": ..., "doi": ...})`; Zotero's DOI wins. A record title is
+  shown through `biblio.plain_title` (arXiv titles carry TeX, "$\alpha_1$-Net", CrossRef
+  titles HTML tags). Before a paper is opened, the library title is `pdf_utils.title_of`:
+  page 0's largest lines, a line sized by the size most of its characters use (a larger
+  math symbol in the first line once left out the second).
 - **Zotero is read-only, through Zotero's local API** (`app/zotero.py`, port 23119, personal
   library only). `/api/zotero/open` reads the PDF in place and calls
   `_ingest(data, {"key": item, "doi": zotero_doi})`. Never copy Zotero PDFs into `papers/` and
@@ -327,6 +331,10 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   ("Abstract—We ...", `_ABSTRACT_RE`); "abstracting" in 2411.14499's introduction (which
   has no Abstract heading) cut away its abstract and introduction. Without the heading
   the cut is 22% down the page. A figure caption above the Abstract (SAM's teaser) is kept.
+  Its footnote with an e-mail address (`_EMAIL`) goes too: that is the authors' contact
+  block (affiliations, "Correspondence to: ..."), the same front matter set at the foot of
+  the page. Over 32 papers all 10 such footnotes were one; content footnotes carry no
+  address, and "Equal contribution" or a venue notice without one is still translated.
 - **An appendix cover's copy of the front matter is dropped.** Page 0 drops everything
   above the Abstract (title, authors, affiliations; `_front_cut`). An appendix or
   supplement often opens on a cover that repeats those lines, and the model may type its
