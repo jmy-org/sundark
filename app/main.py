@@ -351,8 +351,9 @@ _layout_lock = asyncio.Lock()
 # the first page that is not a reference list. v11: attach a lone equation number "(1)"
 # to the display equation beside it (as the sentence's "eqno") instead of dropping it as a
 # short fragment. v12: page 0 drops a footnote with an e-mail address, the authors' contact
-# block.)
-_LAYOUT_VERSION = 12
+# block. v13: a line under both a furniture box and a body box goes by the more confident
+# box.)
+_LAYOUT_VERSION = 13
 
 
 def _page_layout_cached(doc_id: str, page: int) -> dict:
