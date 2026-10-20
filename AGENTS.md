@@ -202,7 +202,10 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   model's furniture ("abandon") class also holds footnotes and now and then a heading it
   mistook ("D. Combining Lhybrid and Lvlb Models"), so a furniture box drops only
   repeated lines, bare page numbers ("12", "1:4", "xii", a lone symbol) and text set
-  sideways (the arXiv stamp along the first page's edge).
+  sideways (the arXiv stamp along the first page's edge). A line under both a furniture
+  box and a text box: a title or caption box wins, and a body box wins only when it is at
+  least as confident. The model may add a weak second guess for one region, and a footnote
+  it also called body text (0.33 against 0.71) was read into the middle of the abstract.
 - **Footnotes and figure/table captions come after the page's text.** Footnotes (the rest
   of a furniture box) and captions are *asides*: their paragraphs are built apart and
   placed at the end of the page, captions first, flagged `aside`. A caption is a model

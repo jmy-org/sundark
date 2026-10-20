@@ -288,6 +288,44 @@ class FurnitureTests(unittest.TestCase):
         self.assertEqual(texts[-1], "1 The code is available online.")
         self.assertTrue(sentences[-1].get("aside"))
 
+    def test_a_weak_text_box_over_a_footnote_does_not_pull_it_into_the_text(self):
+        # the model may add a weak second guess for one region: a footnote it also called body
+        # text was read into the middle of the sentence beside it
+        lines = [(50, 90 + 14 * k, f"Left {k} {TEXT}.", 10) for k in range(5)]
+        lines += [(50, 160, "The model is trained on the", 10)]
+        lines += [(50, 780, "1 The code is available online.", 8)]
+        lines += [(320, 90, "whole dataset for ten epochs.", 10)]
+        box = {"x0": 45, "y0": 770, "x1": 290, "y1": 785}
+        weak_body = [
+            {"role": "furniture", "conf": 0.71, **box},
+            {"role": "body", "conf": 0.33, **box},
+        ]
+        texts = [s["text"] for s in self._layout(lines, weak_body)]
+        self.assertIn(
+            "The model is trained on the whole dataset for ten epochs.", texts
+        )
+        self.assertEqual(texts[-1], "1 The code is available online.")
+        # a confident text box still keeps its lines in the text
+        strong_body = [
+            {"role": "furniture", "conf": 0.5, **box},
+            {"role": "body", "conf": 0.8, **box},
+        ]
+        sentences = self._layout(lines, strong_body)
+        footnote = next(s for s in sentences if s["text"].startswith("1 The code"))
+        self.assertFalse(footnote.get("aside"))
+
+    def test_a_heading_the_model_also_called_furniture_stays_a_heading(self):
+        lines = [(50, 60, "3 Preliminaries", 12)]
+        lines += [(50, 90 + 14 * k, f"Left {k} {TEXT}.", 10) for k in range(3)]
+        box = {"x0": 45, "y0": 48, "x1": 200, "y1": 64}
+        boxes = [
+            {"role": "furniture", "conf": 0.57, **box},
+            {"role": "title", "conf": 0.44, **box},
+        ]
+        sentences = self._layout(lines, boxes)
+        self.assertEqual(sentences[0]["text"], "3 Preliminaries")
+        self.assertTrue(sentences[0]["heading"])
+
     def test_page_numbers_and_a_sideways_stamp_in_furniture_go(self):
         lines = [(50, 300, TEXT, 10), (290, 820 - 40, "12", 10)]
         boxes = [

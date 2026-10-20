@@ -1525,10 +1525,23 @@ def _page_layout(
         title_rects = _rects({"title"})
         caption_rects = _rects({"caption"})
         formula_rects = _rects({"formula"})
+
         # The model's "abandon" class holds running heads and page numbers, but also footnotes
         # and now and then a heading it mistook, so a furniture box drops nothing by itself:
         # what goes is decided by the text (repetition, a bare page number) further down.
-        furniture = _rects({"furniture"})
+        def _conf_at(cx: float, cy: float, roles: set[str]) -> float:
+            """The highest confidence of a `roles` box over the point; 0 when there is none."""
+            return max(
+                (
+                    r.get("conf", 1.0)
+                    for r in yregions
+                    if r["role"] in roles
+                    and r["x0"] <= cx <= r["x1"]
+                    and r["y0"] <= cy <= r["y1"]
+                ),
+                default=0.0,
+            )
+
         regions = _rects({"figure", "table"})
 
         styled = _words_with_style(page)
@@ -1701,11 +1714,17 @@ def _page_layout(
         # across pages (`headers`) goes when it is in the page's top or bottom band, or inside a
         # model furniture box wherever that is; a bare page number ("12", "1:4", "xii"), a lone
         # symbol or text set sideways (the arXiv stamp) goes when it is in a furniture box. The
-        # rest of a furniture box is kept.
+        # rest of a furniture box is kept. A title or caption box over the line wins (the model
+        # now and then calls a heading furniture); a body box wins only when it is at least as
+        # confident: the model may add a weak second guess for one region, and a first-page
+        # footnote it also called body text (0.33 against 0.71) was read into the middle of the
+        # abstract beside it.
         for ln in lines:
-            ln["furniture"] = _in_rects(
-                ln["cx"], ln["cy"], furniture
-            ) and not _in_rects(ln["cx"], ln["cy"], keep_rects)
+            ln["furniture"] = not _in_rects(
+                ln["cx"], ln["cy"], title_rects + caption_rects
+            ) and _conf_at(ln["cx"], ln["cy"], {"furniture"}) > _conf_at(
+                ln["cx"], ln["cy"], {"body"}
+            )
         lines = [
             ln
             for ln in lines
