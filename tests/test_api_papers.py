@@ -211,3 +211,27 @@ class PaperApiTests(unittest.TestCase):
         self.assertNotEqual(fresh["pages"], ["stale text ~1!"])
         self.assertEqual(fresh["meta"]["paper_id"], meta["paper_id"])
         self.assertEqual(again["paper_id"], meta["paper_id"])
+
+    def test_record_title_is_shown_as_plain_text(self):
+        # arXiv titles carry TeX ("$\\alpha_1$-Net: ...")
+        tex = {**RECORD, "title": "$\\alpha_1$: " + TITLE}
+        with patch("app.main.biblio.lookup", new=AsyncMock(return_value=tex)):
+            meta = self.upload(make_pdf([PAGE]))
+        self.assertEqual(meta["title"], "α₁: " + TITLE)
+
+    def test_library_title_read_by_an_older_version_is_read_again(self):
+        lib = self.root / "lib"
+        lib.mkdir()
+        path = lib / "q.pdf"
+        path.write_bytes(make_pdf([PAGE]))
+        st = path.stat()
+        old = {
+            f"q.pdf:{int(st.st_mtime)}:{st.st_size}": {"title": "Stale", "doc_id": None}
+        }
+        with (
+            patch.object(main, "PAPERS_DIR", lib),
+            patch.object(main, "_titles", old),
+            patch.object(main, "_TITLES_FILE", self.root / "titles.json"),
+        ):
+            names = [p["name"] for p in self.client.get("/api/papers").json()["papers"]]
+        self.assertNotIn("Stale", names)

@@ -149,3 +149,69 @@ class FirstPageTests(unittest.TestCase):
         self.assertIn("We build a model for segmentation.", text)
         self.assertNotIn("Segment Anything", text)
         self.assertIn(TEXT, text)
+
+    def test_a_footnote_with_an_e_mail_address_is_front_matter(self):
+        # the authors' affiliation and contact address sit at the foot of page 0; a content
+        # footnote beside them is still read
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((150, 80), "A Model for Learning from Data", fontsize=14)
+        p.insert_text((50, 150), "Abstract", fontsize=12)
+        p.insert_text((50, 170), TEXT, fontsize=10)
+        p.insert_text((50, 760), "1 We call the controller a policy.", fontsize=8)
+        p.insert_text((50, 790), "Example Lab, Example City, Country.", fontsize=8)
+        p.insert_text((50, 800), "Correspondence to: research@example.com", fontsize=8)
+        data = doc.tobytes()
+        doc.close()
+        foot = [
+            {"role": "furniture", "x0": 45, "y0": 750, "x1": 400, "y1": 765},
+            {"role": "furniture", "x0": 45, "y0": 780, "x1": 400, "y1": 805},
+        ]
+        sentences = _layout(data, 0, {0: foot})
+        text = " ".join(s["text"] for s in sentences)
+        self.assertIn(TEXT, text)
+        self.assertIn("We call the controller a policy.", text)
+        self.assertNotIn("Example Lab", text)
+        self.assertNotIn("research@example.com", text)
+        # an address is an e-mail domain, not a metric at a cutoff
+        self.assertEqual(
+            pdf_utils._EMAIL.findall("mAP@0.5 and Recall@1, {a, b} @mit.edu"),
+            ["@mit.edu"],
+        )
+
+
+class PdfTitleTests(unittest.TestCase):
+    """The library title of an unopened PDF: the largest lines at the top of page 0."""
+
+    def _title(self, place) -> str:
+        doc = pymupdf.open()
+        p = doc.new_page(width=612, height=792)
+        tw = pymupdf.TextWriter(p.rect)
+        place(tw)
+        tw.write_text(p)
+        p.insert_text((256, 160), "Example Lab", fontsize=11)
+        data = doc.tobytes()
+        doc.close()
+        return pdf_utils.title_of(data)
+
+    def test_a_larger_symbol_does_not_set_the_title_size(self):
+        # a math symbol that opens the title is set larger than the rest of its line, and as
+        # the line's size it left out the title's second line
+        def place(tw):
+            _, end = tw.append((74, 80), "X", fontsize=26)
+            tw.append(end, "0: A Model for Learning", fontsize=24)
+            tw.append((194, 108), "from Many Small Tasks", fontsize=24)
+
+        self.assertEqual(
+            self._title(place), "X0: A Model for Learning from Many Small Tasks"
+        )
+
+    def test_lines_on_one_row_read_left_to_right(self):
+        # a small-caps title comes word by word, and a short word sits a hair lower
+        def place(tw):
+            tw.append((100, 100), "LEARNING", fontsize=14)
+            tw.append((200, 102), "FROM", fontsize=14)
+            tw.append((260, 100), "SMALL", fontsize=14)
+            tw.append((100, 120), "DATA", fontsize=14)
+
+        self.assertEqual(self._title(place), "LEARNING FROM SMALL DATA")

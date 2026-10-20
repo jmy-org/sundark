@@ -118,3 +118,31 @@ class LookupRobustnessTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.biblio._get", side_effect=http.client.IncompleteRead(b"")):
             self.assertIsNone(await biblio.lookup("doi:10.1/x"))
+
+
+class PlainTitleTests(unittest.TestCase):
+    def test_arxiv_tex_reads_as_text(self):
+        for tex, plain in (
+            ("$\\alpha_1$-Net: A Model", "α₁-Net: A Model"),
+            ("$β_2$-Net", "β₂-Net"),
+            ("$k$-means revisited", "k-means revisited"),
+            ("Model$^2$", "Model²"),
+            ("$\\text{CO}_2$ Emissions", "CO₂ Emissions"),
+            ("$\\mathcal{O}(n^2)$ attention", "O(n²) attention"),
+            ("Toward $\\infty$ Context", "Toward ∞ Context"),
+            ("Learning $\\pi_t$", "Learning πt"),
+            ("A \\$100 model", "A $100 model"),
+        ):
+            self.assertEqual(biblio.plain_title(tex), plain)
+
+    def test_crossref_tags_read_as_text(self):
+        self.assertEqual(
+            biblio.plain_title(
+                "Growth of <i>Drosophila</i> in H<sub>2</sub>O &amp; air"
+            ),
+            "Growth of Drosophila in H₂O & air",
+        )
+
+    def test_a_plain_title_is_unchanged(self):
+        title = CROSSREF["message"]["title"][0]
+        self.assertEqual(biblio.plain_title(title), biblio._squash(title))

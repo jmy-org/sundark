@@ -6,6 +6,7 @@ caller, so the next open retries."""
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import re
 import unicodedata
@@ -98,6 +99,76 @@ def title_matches(title: str, page_text: str) -> bool:
     page_words, page = set(_words(page_text)), _norm(page_text)
     hits = sum(w in page_words or (not w.isascii() and w in page) for w in words)
     return hits / len(words) >= 0.6
+
+
+_SUB = dict(zip("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎"))
+_SUP = dict(zip("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾"))
+_SYMBOLS = {
+    "infty": "∞",
+    "times": "×",
+    "cdot": "·",
+    "pm": "±",
+    "to": "→",
+    "rightarrow": "→",
+    "leq": "≤",
+    "geq": "≥",
+    "approx": "≈",
+    "sim": "∼",
+    "ell": "ℓ",
+    "varepsilon": "ε",
+    "varphi": "φ",
+}
+_STYLED = re.compile(
+    r"\\(?:text\w*|math\w+|emph|operatorname|boldsymbol|bm)\s*\{([^{}]*)\}"
+)
+
+
+def _script(text: str, table: dict[str, str]) -> str:
+    """A sub/superscript in Unicode when it has a form for every character ("₀"), else
+    plain ("π_t" reads "πt")."""
+    return "".join(table[c] for c in text) if set(text) <= table.keys() else text
+
+
+def _greek(m: re.Match) -> str:
+    name = m.group(1)
+    if name in _SYMBOLS:
+        return _SYMBOLS[name]
+    case = "CAPITAL" if name[0].isupper() else "SMALL"
+    try:
+        return unicodedata.lookup(f"GREEK {case} LETTER {name.upper()}")
+    except KeyError:
+        return m.group(0)
+
+
+def _plain_math(tex: str) -> str:
+    tex = _STYLED.sub(r"\1", tex)
+    tex = re.sub(r"\\([A-Za-z]+)", _greek, tex)
+    tex = re.sub(
+        r"([_^])(?:\{([^{}]*)\}|(\S))",
+        lambda m: _script(
+            m.group(2) if m.group(2) is not None else m.group(3),
+            _SUB if m.group(1) == "_" else _SUP,
+        ),
+        tex,
+    )
+    return tex.replace("{", "").replace("}", "")
+
+
+def plain_title(title: str) -> str:
+    """A record title as plain text. arXiv titles carry TeX ("$\\alpha_1$-Net" reads
+    "α₁-Net"), CrossRef titles HTML/JATS tags ("H<sub>2</sub>O")."""
+    title = re.sub(
+        r"(?<!\\)\$([^$]+)(?<!\\)\$", lambda m: _plain_math(m.group(1)), title
+    )
+    title = _STYLED.sub(r"\1", title).replace("\\$", "$")
+    title = re.sub(
+        r"<(sub|sup)>([^<]*)</\1>",
+        lambda m: _script(m.group(2), _SUB if m.group(1).lower() == "sub" else _SUP),
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"</?[A-Za-z][\w:.-]*(?:\s[^<>]*)?/?>", "", title)
+    return _squash(html.unescape(title))
 
 
 def byline(record: dict | None) -> str:

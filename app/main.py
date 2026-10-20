@@ -129,7 +129,8 @@ async def _ingest(data: bytes, zotero: dict | None = None) -> dict:
     return {
         "doc_id": doc_id,
         "paper_id": pid,
-        "title": (record or {}).get("title") or extracted["meta"]["title"],
+        "title": biblio.plain_title((record or {}).get("title") or "")
+        or extracted["meta"]["title"],
         "byline": biblio.byline(record),
         "num_pages": extracted["meta"]["num_pages"],
     }
@@ -197,15 +198,25 @@ def _paper_title(path: Path, rel: str) -> str:
     st = path.stat()
     key = f"{rel}:{int(st.st_mtime)}:{st.st_size}"
     entry = _titles.get(key)
-    if not (isinstance(entry, dict) and "doc_id" in entry):  # missing or older format
+    # missing, older format, or read by an older title_of() (pdf_utils.TEXT_VERSION)
+    if not (
+        isinstance(entry, dict)
+        and "doc_id" in entry
+        and entry.get("text_version") == pdf_utils.TEXT_VERSION
+    ):
         try:
             data = path.read_bytes()
             entry = {
                 "title": pdf_utils.title_of(data),
                 "doc_id": store.doc_id_for(data),
+                "text_version": pdf_utils.TEXT_VERSION,
             }
         except Exception:  # noqa: BLE001
-            entry = {"title": "", "doc_id": None}
+            entry = {
+                "title": "",
+                "doc_id": None,
+                "text_version": pdf_utils.TEXT_VERSION,
+            }
         _titles[key] = entry
         try:
             _TITLES_FILE.write_text(json.dumps(_titles, ensure_ascii=False), "utf-8")
@@ -214,7 +225,7 @@ def _paper_title(path: Path, rel: str) -> str:
     doc = store.load_doc(entry["doc_id"]) if entry["doc_id"] else None
     pid = (doc or {}).get("meta", {}).get("paper_id")
     record = store.paper_get(pid) if pid else None
-    return (record or {}).get("title") or entry["title"]
+    return biblio.plain_title((record or {}).get("title") or "") or entry["title"]
 
 
 @app.get("/api/papers")
@@ -339,8 +350,9 @@ _layout_lock = asyncio.Lock()
 # reference list is skipped, from a whole-line References heading to an appendix heading or
 # the first page that is not a reference list. v11: attach a lone equation number "(1)"
 # to the display equation beside it (as the sentence's "eqno") instead of dropping it as a
-# short fragment.)
-_LAYOUT_VERSION = 11
+# short fragment. v12: page 0 drops a footnote with an e-mail address, the authors' contact
+# block.)
+_LAYOUT_VERSION = 12
 
 
 def _page_layout_cached(doc_id: str, page: int) -> dict:
