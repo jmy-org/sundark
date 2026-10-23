@@ -538,6 +538,11 @@ async function openDoc(meta) {
   $("empty").classList.add("hidden");
   $("pdfcol").classList.remove("hidden");
   $("aipanel").classList.remove("hidden");
+  // On a narrow screen the AI pane hides the library, and a focused row with it. Give focus a
+  // visible home afterwards, but only if it fell to the page (the setChatGPTBusy guard).
+  const active = document.activeElement;
+  const opener = active && $("library").contains(active) ? active : null;
+  const focusLost = () => opener && document.activeElement === document.body && document.hasFocus();
   showPane("ai");
   $("summary").innerHTML = "";
   $("chatlog").innerHTML = "";
@@ -583,6 +588,7 @@ async function openDoc(meta) {
     $("empty").classList.remove("hidden");
     showPane("library");
     ov.classList.add("hidden");
+    if (focusLost() && opener.isConnected) opener.focus();
     throw err;
   }
   buildTrShells();          // producer reads S.pages[i], so it has to be fully built first.
@@ -617,6 +623,9 @@ async function openDoc(meta) {
   await sleep(150);
   if (!current()) return;
   $("prep-overlay").classList.add("hidden");
+  if (focusLost() && getComputedStyle($("panes")).display !== "none") {
+    document.querySelector('#panes button[aria-pressed="true"]')?.focus();
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

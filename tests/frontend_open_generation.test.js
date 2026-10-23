@@ -191,12 +191,31 @@ async function scenario(stage, rejected = false) {
     const elements = new Map(),
       gateB = deferred(),
       fail = { A: true };
+    // A focused library row, and the AI pane button focus moves to after a narrow open.
+    const control = () => ({
+      focused: 0,
+      isConnected: true,
+      focus() {
+        this.focused++;
+        doc.activeElement = this;
+      },
+    });
+    const row = control(),
+      aiButton = control();
+    const doc = {
+      createElement: () => element(),
+      body: {},
+      activeElement: row,
+      hasFocus: () => true,
+      querySelector: () => aiButton,
+    };
     const element = (id) => ({
       innerHTML: "",
       style: {},
       dataset: {},
       classList: classes(["prep-overlay", "pdfcol", "aipanel"].includes(id)),
       appendChild() {},
+      contains: (el) => id === "library" && el === row,
     });
     const S = { openGeneration: 0, trToken: 0, pages: [], aiConfig: null };
     let pane = "library";
@@ -235,10 +254,13 @@ async function scenario(stage, rejected = false) {
           };
         },
       },
-      document: { createElement: () => element() },
+      document: doc,
+      getComputedStyle: () => ({ display: "flex" }),
       setTitle() {},
       showPane(name) {
         pane = name;
+        // A narrow screen hides the library, and the focused row with it.
+        if (name !== "library" && doc.activeElement === row) doc.activeElement = doc.body;
       },
       updateReviewBtn() {},
       zoomScale: () => 1,
@@ -269,6 +291,8 @@ async function scenario(stage, rejected = false) {
       gateB.resolve();
       await b;
       assert.equal(hidden("prep-overlay"), true);
+      // Neither the superseded open nor B, which no library control opened, moves focus.
+      assert.equal(row.focused + aiButton.focused, 0, stage + ": focus moved");
       return;
     }
     await assert.rejects(a, /bridge lost|bad chunk|page failed/);
@@ -280,6 +304,7 @@ async function scenario(stage, rejected = false) {
     assert.equal(S.docId, null);
     assert.equal(S.pdf, null);
     assert.equal(S.pages.length, 0);
+    assert.equal(row.focused, 1, stage + ": focus not given back to the row");
     // Retrying the same paper (from the library or the host) opens it.
     fail.A = false;
     await ctx.openDoc({ doc_id: "A", num_pages: 1 });
@@ -287,6 +312,7 @@ async function scenario(stage, rejected = false) {
     assert.equal(hidden("pdfcol"), false);
     assert.equal(S.docId, "A");
     assert.equal(S.pages.length, 1);
+    assert.equal(aiButton.focused, 1, stage + ": focus not moved to the AI pane");
   }
   for (const stage of ["transfer", "loading", "first", "shell"]) {
     await run(stage);

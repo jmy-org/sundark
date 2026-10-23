@@ -110,3 +110,79 @@ test("a pointer click still opens the row and keeps its look", async ({ page }) 
     "rgba(0, 0, 0, 0)",
   );
 });
+
+// Below 900px the AI pane hides the library, and the focused row with it.
+const NARROW = { width: 700, height: 800 };
+const switcher = (page) => page.getByRole("navigation", { name: "Workspace panes" });
+const rowFocused = (page) =>
+  page.evaluate(
+    (file) => !!document.activeElement?.closest("#paperlist li")?.textContent.includes(file),
+    FILE,
+  );
+
+test("a narrow open moves focus to the AI pane button, one step from the library", async ({
+  page,
+}) => {
+  await page.setViewportSize(NARROW);
+  await tabToRow(page);
+  const opened = openRequest(page);
+  await page.keyboard.press("Enter");
+  await expectOpened(page, opened);
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  const ai = switcher(page).getByRole("button", { name: "AI" });
+  await expect(ai).toBeFocused();
+  await expect(ai).toBeVisible();
+  expect(await ai.evaluate((el) => el.matches(":focus-visible"))).toBe(true);
+
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(switcher(page).getByRole("button", { name: "Library" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#paperlist")).toBeVisible();
+  for (let i = 0; i < 10 && !(await rowFocused(page)); i++) await page.keyboard.press("Tab");
+  expect(await rowFocused(page)).toBe(true);
+});
+
+test("a failed narrow open gives focus back to the row", async ({ page }) => {
+  await page.setViewportSize(NARROW);
+  await page.route("**/api/pdf/**", (route) => route.fulfill({ status: 500, body: "broken" }));
+  await tabToRow(page);
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#title")).toContainText("Open failed");
+  await expect(page.locator("#paperlist")).toBeVisible();
+  expect(await rowFocused(page)).toBe(true);
+});
+
+test("a wide open leaves focus on the row", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await tabToRow(page);
+  const opened = openRequest(page);
+  await page.keyboard.press("Enter");
+  await expectOpened(page, opened);
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  expect(await rowFocused(page)).toBe(true);
+});
+
+test("a narrow open keeps focus where the user moved it while loading", async ({ page }) => {
+  await page.setViewportSize(NARROW);
+  // Hold the layout status so the loading screen stays up until the user has moved focus.
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  await page.route("**/api/status/**", async (route) => {
+    await held;
+    await route.continue();
+  });
+  await tabToRow(page);
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".workspace")).toHaveAttribute("data-pane", "ai");
+  await expect(page.locator("#prep-overlay")).toBeVisible();
+  await page.keyboard.press("Tab");
+  const chosen = await page.evaluate(() => {
+    window.__chosen = document.activeElement;
+    return document.activeElement.tagName;
+  });
+  expect(chosen).not.toBe("BODY");
+  release();
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  expect(await page.evaluate(() => document.activeElement === window.__chosen)).toBe(true);
+});
