@@ -21,6 +21,7 @@ import base64
 import binascii
 import functools
 import hmac
+import io
 import json
 import os
 import re
@@ -173,6 +174,28 @@ class _Uploads:
         return {"ok": True}
 
 
+class _BoundedWriter(io.RawIOBase):
+    """Writes through to `file` but never past `limit` bytes: the review ZIP is bounded while
+    it is produced, not after it was built in memory. Once refused, it refuses every write."""
+
+    def __init__(self, file: BinaryIO, limit: int):
+        self.file, self.limit, self.size = file, limit, 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data) -> int:
+        n = memoryview(data).nbytes
+        if self.size + n > self.limit:
+            self.size = self.limit + 1
+            raise service.InvalidRequestError(
+                "Review bundle exceeds the MCP plugin's 12 MiB export limit"
+            )
+        self.file.write(data)
+        self.size += n
+        return n
+
+
 class _Reviews(_Uploads):
     """Review bundles use the same temporary-file expiry and cleanup lifecycle."""
 
@@ -196,20 +219,16 @@ class _Reviews(_Uploads):
         )
         self.sessions[download_id] = session
         try:
-            slug, data = await service.review_bundle(doc_id, output_language)
-            if len(data) > REVIEW_MAX:
-                raise service.InvalidRequestError(
-                    "Review bundle exceeds the MCP plugin's 12 MiB export limit"
-                )
-            session.file.write(data)
-            session.size = len(data)
+            out = _BoundedWriter(session.file, REVIEW_MAX)
+            slug = await service.write_review_bundle(doc_id, output_language, out)
+            session.size = out.size
             session.finishing = False
             self.touch(download_id, session)
             return {
                 "download_id": download_id,
                 "slug": slug,
                 "filename": f"{slug}.zip",
-                "size": len(data),
+                "size": out.size,
             }
         except BaseException:
             self.discard(download_id)
@@ -291,6 +310,14 @@ _OPS = {
         idempotent_hint=False,
         open_world_hint=True,
     ),
+    # A step of a chunked upload: a repeated call starts another upload or, at an offset
+    # already written, cancels this one.
+    "transfer": ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=False,
+    ),
     "delete": ToolAnnotations(
         read_only_hint=False,
         destructive_hint=True,
@@ -298,7 +325,7 @@ _OPS = {
         open_world_hint=False,
     ),
 }
-_OPERATION = {"open": "cache", "delete": "write"}
+_OPERATION = {"open": "cache", "transfer": "cache", "delete": "write"}
 
 
 def _failure(exc: Exception) -> tuple[int, str, bool] | None:
@@ -466,13 +493,13 @@ def build_server(token: str | None = None, port: int = DEFAULT_PORT) -> MCPServe
     uploads = _Uploads()
     reviews = _Reviews()
 
-    @tool("cache", "Begin a temporary PDF upload (1 byte to 20 MiB).", app_only)
+    @tool("transfer", "Begin a temporary PDF upload (1 byte to 20 MiB).", app_only)
     @_core
     async def begin_upload(filename: str, size: int) -> Result:
         return uploads.begin(filename, size)
 
     @tool(
-        "cache",
+        "transfer",
         "Append up to 1 MiB of base64 PDF bytes at the exact next offset.",
         app_only,
     )

@@ -6,9 +6,11 @@ import os
 import secrets
 import socket
 import sys
+import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -25,6 +27,16 @@ from tests.test_service import DOC, _StoreDirs
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC_ID = "0123456789abcdef"
+
+
+def _writes(data: bytes, slug: str = "paper") -> AsyncMock:
+    """A `service.write_review_bundle` stand-in that writes `data` as the bundle."""
+
+    async def write(doc_id, language, out):
+        out.write(data)
+        return slug
+
+    return AsyncMock(side_effect=write)
 
 
 def _client(server=None) -> Client:
@@ -76,6 +88,10 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
             if ops[name] == "generate":
                 self.assertTrue(a.open_world_hint, name)
         self.assertTrue(tools["chat_reset"].annotations.destructive_hint)
+        # A retried upload step is not harmless: it opens another upload or cancels this one.
+        for name in ("begin_upload", "upload_chunk"):
+            self.assertFalse(tools[name].annotations.idempotent_hint, name)
+        self.assertTrue(tools["cancel_upload"].annotations.idempotent_hint)
         # The reader's page data and bytes serve only the reader; opening shows it.
         ui = {n: t.meta.get("ui", {}).get("visibility") for n, t in tools.items()}
         self.assertEqual(
@@ -279,8 +295,7 @@ class ParityTests(_StoreDirs, unittest.IsolatedAsyncioTestCase):
 
     async def test_review_bundle_is_the_same_zip(self):
         with patch(
-            "app.service.review_bundle",
-            new=AsyncMock(return_value=("a-paper", b"PK zip")),
+            "app.service.write_review_bundle", new=_writes(b"PK zip", "a-paper")
         ):
             async with _client() as c:
                 r = await self.call(c, "review", doc_id=DOC_ID)
@@ -693,15 +708,13 @@ class ReviewTransferTests(unittest.IsolatedAsyncioTestCase):
             self.reviews.discard(key)
 
     async def generate(self, data=b"PK zip"):
-        with patch.object(
-            mcp_server.service, "review_bundle", AsyncMock(return_value=("paper", data))
-        ):
+        with patch.object(mcp_server.service, "write_review_bundle", _writes(data)):
             return await self.reviews.generate(DOC_ID, None)
 
     async def test_large_zip_roundtrip_generates_once(self):
         data = b"PK" + bytes(range(256)) * 8192
         with patch.object(
-            mcp_server.service, "review_bundle", AsyncMock(return_value=("paper", data))
+            mcp_server.service, "write_review_bundle", _writes(data)
         ) as gen:
             async with _client() as c:
                 result = await c.call_tool("review", {"doc_id": DOC_ID})
@@ -733,7 +746,8 @@ class ReviewTransferTests(unittest.IsolatedAsyncioTestCase):
                     "review_chunk", {"download_id": meta["download_id"]}
                 )
                 self.assertTrue(result.is_error)
-            gen.assert_awaited_once_with(DOC_ID, None)
+            gen.assert_awaited_once()
+            self.assertEqual(gen.call_args.args[:2], (DOC_ID, None))
 
     async def test_file_count_aggregate_bounds_and_errors(self):
         with (
@@ -744,7 +758,9 @@ class ReviewTransferTests(unittest.IsolatedAsyncioTestCase):
                 await self.generate(b"1234")
             self.assertFalse(self.reviews.sessions)
             ids = [(await self.generate(b"123"))["download_id"] for _ in range(4)]
-            with patch.object(mcp_server.service, "review_bundle", AsyncMock()) as gen:
+            with patch.object(
+                mcp_server.service, "write_review_bundle", AsyncMock()
+            ) as gen:
                 with self.assertRaises(mcp_server.service.InvalidRequestError):
                     await self.reviews.generate(DOC_ID, None)
                 gen.assert_not_called()
@@ -755,11 +771,55 @@ class ReviewTransferTests(unittest.IsolatedAsyncioTestCase):
         for key in list(self.reviews.sessions):
             self.reviews.discard(key)
         with patch.object(
-            mcp_server.service, "review_bundle", AsyncMock(side_effect=RuntimeError)
+            mcp_server.service,
+            "write_review_bundle",
+            AsyncMock(side_effect=RuntimeError),
         ):
             with self.assertRaises(RuntimeError):
                 await self.reviews.generate(DOC_ID, None)
         self.assertFalse(self.reviews.sessions)
+
+    async def test_bundle_is_bounded_while_it_is_written(self):
+        sizes = []
+
+        async def write(doc_id, language, out):
+            out.write(b"12")
+            try:
+                out.write(b"34")
+            finally:
+                sizes.append(out.file.tell())
+            out.write(b"")  # refused for good once over the limit
+
+        with (
+            patch.object(mcp_server, "REVIEW_MAX", 3),
+            patch.object(
+                mcp_server.service,
+                "write_review_bundle",
+                AsyncMock(side_effect=write),
+            ),
+        ):
+            with self.assertRaises(mcp_server.service.InvalidRequestError):
+                await self.reviews.generate(DOC_ID, None)
+        self.assertEqual(sizes, [2])  # the file never held more than the limit
+        self.assertFalse(self.reviews.sessions)
+
+    def test_a_real_zip_streams_through_the_bounded_writer(self):
+        with tempfile.TemporaryFile() as f:
+            out = mcp_server._BoundedWriter(f, 1 << 20)
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("p/index.md", "# note\n")
+                z.writestr("p/fig1.png", os.urandom(4096))
+            f.seek(0)
+            self.assertEqual(len(f.read()), out.size)
+            f.seek(0)
+            with zipfile.ZipFile(f) as z:
+                self.assertEqual(z.read("p/index.md"), b"# note\n")
+        with tempfile.TemporaryFile() as f:
+            out = mcp_server._BoundedWriter(f, 2048)
+            with self.assertRaises(mcp_server.service.InvalidRequestError):
+                with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                    z.writestr("p/fig1.png", os.urandom(4096))
+            self.assertLessEqual(f.seek(0, 2), 2048)
 
     async def test_invalid_ranges_expiry_and_release_close_files(self):
         for offset, length in [
@@ -799,11 +859,7 @@ class ReviewTransferTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 mcp_server.tempfile, "TemporaryFile", side_effect=temporary_file
             ),
-            patch.object(
-                mcp_server.service,
-                "review_bundle",
-                AsyncMock(return_value=("paper", b"PK")),
-            ),
+            patch.object(mcp_server.service, "write_review_bundle", _writes(b"PK")),
         ):
             async with _client() as c:
                 await c.call_tool("begin_upload", {"filename": "paper.pdf", "size": 3})

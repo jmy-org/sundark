@@ -20,6 +20,7 @@ import tempfile
 import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import BinaryIO
 
 from . import ai, biblio, paper_id, pdf_utils, settings, store, zotero
 from .errors import AIError, RateLimitError
@@ -592,6 +593,14 @@ def _frontmatter(rv: dict, *, date: str, has_math: bool) -> str:
 
 async def review_bundle(doc_id: str, language: str | None = None) -> tuple[str, bytes]:
     """Generate the review note as a zipped Hugo page bundle; returns (slug, zip bytes)."""
+    buf = io.BytesIO()
+    slug = await write_review_bundle(doc_id, language, buf)
+    return slug, buf.getvalue()
+
+
+async def write_review_bundle(doc_id: str, language: str | None, out: BinaryIO) -> str:
+    """Write the review bundle's ZIP to `out` as it is produced (a bounded writer can stop it
+    before it grows past a limit); returns the slug."""
     language = output_language(language)
     doc = _require_doc(doc_id)
     pages = doc["pages"]
@@ -670,12 +679,11 @@ async def review_bundle(doc_id: str, language: str | None = None) -> tuple[str, 
     )
     slug = _slug(rv.get("title") or doc["meta"].get("title", ""), doc_id)
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(f"{slug}/index.md", index_md)
         for fid, png in crops.items():
             z.writestr(f"{slug}/{fid}.png", png)
-    return slug, buf.getvalue()
+    return slug
 
 
 # --- Translation ----------------------------------------------------------------------------
