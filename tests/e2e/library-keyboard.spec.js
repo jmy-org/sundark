@@ -186,3 +186,126 @@ test("a narrow open keeps focus where the user moved it while loading", async ({
   await expect(page.locator("#prep-overlay")).toBeHidden();
   expect(await page.evaluate(() => document.activeElement === window.__chosen)).toBe(true);
 });
+
+// The focus ring is an inset accent outline, so on the selected row (accent fill) it needs
+// its own color. Compare the focused row against the same row blurred, in one run.
+const rgb = (page, value) =>
+  page.evaluate((v) => {
+    const probe = document.createElement("span");
+    probe.style.color = v;
+    document.body.appendChild(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, value);
+
+// Read pixels from a row screenshot: the left edge at mid-height (inside the inset ring)
+// and a fill point inside the padding, away from the ring and the text.
+async function pixels(page, png) {
+  const blank = await page.context().newPage();
+  const out = await blank.evaluate(async (b64) => {
+    const blob = await (await fetch(`data:image/png;base64,${b64}`)).blob();
+    const img = await createImageBitmap(blob);
+    const ctx = new OffscreenCanvas(img.width, img.height).getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const at = (x, y) =>
+      `rgb(${Array.from(ctx.getImageData(x, y, 1, 1).data.slice(0, 3)).join(", ")})`;
+    return { edge: at(1, img.height >> 1), fill: at(6, 5), size: [img.width, img.height] };
+  }, png.toString("base64"));
+  await blank.close();
+  return out;
+}
+
+async function expectRing(page, { selected }, testInfo) {
+  const button = page.locator(":focus");
+  const li = row(page);
+  await page.mouse.move(0, 0);
+  const state = await button.evaluate((el) => {
+    const s = getComputedStyle(el);
+    const box = el.getBoundingClientRect();
+    return {
+      visible: el.matches(":focus-visible"),
+      active: el.closest("li").classList.contains("active"),
+      fill: getComputedStyle(el.closest("li")).backgroundColor,
+      outline: [s.outlineStyle, s.outlineWidth, s.outlineOffset],
+      color: s.outlineColor,
+      box: [box.x, box.y, box.width, box.height],
+    };
+  });
+  expect(state.visible).toBe(true);
+  expect(state.active).toBe(selected);
+  expect(state.outline).toEqual(["solid", "2px", "-2px"]);
+  const accent = await rgb(page, "var(--accent)");
+  const ring = selected ? await rgb(page, "var(--accent-ink)") : accent;
+  // Soft, so a wrong color still reports what the screenshots show.
+  expect.soft(state.color, "the focus ring differs from the row fill").not.toBe(state.fill);
+  expect.soft(state.color).toBe(ring);
+
+  const shot = (name) =>
+    li.screenshot({ animations: "disabled", path: testInfo.outputPath(`${name}.png`) });
+  const focused = await shot("focused");
+  await button.evaluate((el) => el.blur());
+  const blurred = await shot("blurred");
+  // Focus is drawn as an outline only: blurring moves nothing.
+  expect(
+    await li.evaluate((el) => {
+      const b = el.querySelector(".paper-action").getBoundingClientRect();
+      return [b.x, b.y, b.width, b.height];
+    }),
+  ).toEqual(state.box);
+  // Not enough alone: an accent ring on the accent fill still changes a few corner pixels.
+  expect.soft(Buffer.compare(focused, blurred), "focus changes the rendered row").not.toBe(0);
+  const a = await pixels(page, focused);
+  const b = await pixels(page, blurred);
+  expect(a.size).toEqual(b.size);
+  expect.soft(a.edge, "the ring is drawn in its own color").toBe(ring);
+  expect(b.edge, "without focus the edge is the row fill").toBe(b.fill);
+  expect(a.fill).toBe(b.fill);
+}
+
+test("the selected row shows a distinct keyboard focus ring (wide)", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await tabToRow(page);
+  const opened = openRequest(page);
+  await page.keyboard.press("Enter");
+  await expectOpened(page, opened);
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  expect(await rowFocused(page)).toBe(true);
+  await expectRing(page, { selected: true }, testInfo);
+});
+
+test("the selected row shows a distinct keyboard focus ring after a narrow open", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize(NARROW);
+  await tabToRow(page);
+  const opened = openRequest(page);
+  await page.keyboard.press("Enter");
+  await expectOpened(page, opened);
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(switcher(page).getByRole("button", { name: "Library" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#paperlist")).toBeVisible();
+  for (let i = 0; i < 10 && !(await rowFocused(page)); i++) await page.keyboard.press("Tab");
+  expect(await rowFocused(page)).toBe(true);
+  await expectRing(page, { selected: true }, testInfo);
+});
+
+test("an unselected row keeps its accent focus ring", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await tabToRow(page);
+  await expectRing(page, { selected: false }, testInfo);
+});
+
+test("a pointer selection does not show the keyboard ring", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  const opened = openRequest(page);
+  await row(page).locator(".paper-action").click();
+  await expectOpened(page, opened);
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  expect(await rowFocused(page)).toBe(true);
+  expect(await page.locator(":focus").evaluate((el) => el.matches(":focus-visible"))).toBe(false);
+});
