@@ -275,13 +275,16 @@ def _save_to_library(filename: str, data: bytes) -> None:
             Path(tmp).unlink(missing_ok=True)
 
 
-async def upload_paper(filename: str, data: bytes) -> dict:
+async def upload_paper(filename: str, data: bytes, library: bool = True) -> dict:
+    """Ingest an uploaded PDF; `library=False` skips the copy into the papers folder (a PDF
+    sent by the Site companion stays out of the user's local library)."""
     if not (filename or "").lower().endswith(".pdf"):
         raise InvalidRequestError("Please upload a .pdf file")
     if not data:
         raise InvalidRequestError("Empty file")
     meta = await _ingest_readable(data)
-    _save_to_library(filename, data)
+    if library:
+        _save_to_library(filename, data)
     return schedule_prewarm(meta)
 
 

@@ -207,6 +207,25 @@ MCP exports use the host's standard `ui/download-file` capability; unsupported
 hosts are reported before generating a review. UI preference storage falls back
 to session memory when a sandbox denies `localStorage`.
 
+#### Site companion (opt-in)
+
+To let your deployed Sundark Site use this core from your own browser, start the
+MCP server for that Site's exact origin:
+
+```sh
+uv run python -m app.mcp_server --http --site-origin https://<your-site>
+```
+
+Only that `https` origin may call it (answered CORS and Private Network Access
+preflights; never `*`, never a path or wildcard host). Every request still needs
+the bearer token, with or without an `Origin`, and the Host must be
+`127.0.0.1:<port>`. The companion offers only upload, layout, summary, anatomy
+and page translation, and only for PDFs uploaded through it while it runs; it
+cannot list or open your local library, Zotero, chat history, settings or
+sign-in, and an uploaded PDF is not copied into `papers/`. Paste the token into
+the Site's session only; the Site keeps it in memory. The reader on port 8743
+is never opened to another origin. Without `--site-origin` nothing changes.
+
 These commands do not connect ChatGPT web to a loopback address. Remote
 connectivity, production authorization and actual host rendering are separate
 deployment/verification steps; no public listener or tunnel is configured.

@@ -7,10 +7,17 @@ Settings, credentials and backend sign-in are deliberately not exposed here.
 
     python -m app.mcp_server                # stdio, for a local MCP client
     python -m app.mcp_server --http         # Streamable HTTP on 127.0.0.1 only, bearer token
+    python -m app.mcp_server --http --site-origin https://<site>   # opt-in Site companion
 
 The HTTP transport is standalone (it does not share the reader's port), binds loopback only,
 rejects a foreign Host/Origin (DNS rebinding) and requires `Authorization: Bearer <token>`,
 the token coming from SUNDARK_MCP_TOKEN or generated at start and printed to stderr.
+
+`--site-origin` turns that server into the Site companion instead: the one exact Site origin
+may call it from the owner's browser (CORS and Private Network Access preflights are answered
+for that origin only), the token is still required on every request with or without an
+Origin, only `SITE_TOOLS` exist, and they reach only PDFs uploaded through this server, which
+are not copied into the local library. The reader's own HTTP API is never opened this way.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import base64
 import binascii
 import functools
 import hmac
+import inspect
 import io
 import json
 import os
@@ -33,6 +41,7 @@ from contextlib import asynccontextmanager, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO
+from urllib.parse import urlsplit
 
 from mcp.server.apps import Apps, ResourceCsp
 from mcp.server.auth.provider import AccessToken
@@ -60,6 +69,32 @@ REVIEW_MAX = 12 * 1024 * 1024
 REVIEW_ACTIVE_MAX = 4
 REVIEW_AGGREGATE_MAX = REVIEW_MAX * REVIEW_ACTIVE_MAX
 
+# What the Site companion offers: a paper uploaded from the Site, its layout, and the
+# generated results. No library, Zotero, PDF download, chat, review, settings or sign-in.
+SITE_TOOLS = frozenset(
+    {
+        "begin_upload",
+        "upload_chunk",
+        "finish_upload",
+        "cancel_upload",
+        "layout_status",
+        "page_layout",
+        "summarize",
+        "anatomy",
+        "translate_page",
+    }
+)
+SITE_METHODS = ("GET", "POST", "DELETE")
+SITE_HEADERS = (
+    "accept",
+    "authorization",
+    "content-type",
+    "last-event-id",
+    "mcp-protocol-version",
+    "mcp-session-id",
+)
+SITE_BODY_MAX = 2 * 1024 * 1024
+
 
 @dataclass
 class _Upload:
@@ -75,8 +110,9 @@ class _Upload:
 class _Uploads:
     """Bounded transient transfers, never durable rows or partial documents."""
 
-    def __init__(self):
+    def __init__(self, library: bool = True):
         self.sessions: dict[str, _Upload] = {}
+        self.library = library
 
     def discard(self, upload_id: str) -> None:
         session = self.sessions.pop(upload_id, None)
@@ -162,7 +198,10 @@ class _Uploads:
             if session.timer:
                 session.timer.cancel()
             session.file.seek(0)
-            return await service.upload_paper(session.filename, session.file.read())
+            kwargs = {} if self.library else {"library": False}
+            return await service.upload_paper(
+                session.filename, session.file.read(), **kwargs
+            )
         finally:
             self.discard(upload_id)
 
@@ -420,8 +459,33 @@ class _BearerToken:
         return None
 
 
-def build_server(token: str | None = None, port: int = DEFAULT_PORT) -> MCPServer:
-    """The Sundark MCP server. `token` turns on bearer auth (required for HTTP)."""
+def _scoped(fn, opened: set[str]):
+    """A Site tool: refuse a doc_id this companion did not ingest, as an unknown one, and
+    remember the doc_id of each upload it finishes."""
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def call(*args, **kwargs):
+        doc_id = signature.bind_partial(*args, **kwargs).arguments.get("doc_id")
+        if doc_id is not None and doc_id not in opened:
+            return _error_result(404, "Unknown doc_id", False)
+        result = await fn(*args, **kwargs)
+        if fn.__name__ == "finish_upload" and isinstance(result, dict):
+            if isinstance(result.get("doc_id"), str):
+                opened.add(result["doc_id"])
+        return result
+
+    return call
+
+
+def build_server(
+    token: str | None = None,
+    port: int = DEFAULT_PORT,
+    site_origin: str | None = None,
+) -> MCPServer:
+    """The Sundark MCP server. `token` turns on bearer auth (required for HTTP).
+    `site_origin` builds the Site companion: `SITE_TOOLS` only, scoped to its own uploads."""
+    site = site_origin is not None
     auth = {}
     if token is not None:
         base = f"http://{HOST}:{port}"
@@ -444,6 +508,7 @@ def build_server(token: str | None = None, port: int = DEFAULT_PORT) -> MCPServe
         csp=_reader_csp(html),
     )
     plain: list[tuple[Any, dict]] = []
+    opened: set[str] = set()  # Site companion: the doc_ids it ingested
 
     def tool(op: str, description: str, ui: list[str] | None = None):
         kwargs = {
@@ -453,7 +518,10 @@ def build_server(token: str | None = None, port: int = DEFAULT_PORT) -> MCPServe
         }
 
         def register(fn):
-            if ui is None:
+            if site:
+                if fn.__name__ in SITE_TOOLS:
+                    plain.append((_scoped(fn, opened), kwargs))
+            elif ui is None:
                 plain.append((fn, kwargs))
             else:
                 apps.tool(resource_uri=READER_URI, visibility=ui, **kwargs)(fn)
@@ -490,7 +558,7 @@ def build_server(token: str | None = None, port: int = DEFAULT_PORT) -> MCPServe
             "concurrency": s["concurrency"],
         }
 
-    uploads = _Uploads()
+    uploads = _Uploads(library=not site)
     reviews = _Reviews()
 
     @tool("transfer", "Begin a temporary PDF upload (1 byte to 20 MiB).", app_only)
@@ -768,7 +836,7 @@ def build_server(token: str | None = None, port: int = DEFAULT_PORT) -> MCPServe
     mcp = MCPServer(
         "sundark",
         instructions=INSTRUCTIONS,
-        extensions=[apps],
+        extensions=[] if site else [apps],
         lifespan=lifespan,
         **auth,
     )
@@ -792,17 +860,122 @@ def _require_layout_model() -> None:
     pdf_utils.warm_sentence_model()
 
 
-def http_app(token: str, port: int = DEFAULT_PORT):
-    """Streamable HTTP app for 127.0.0.1:`port`: bearer auth plus Host/Origin checks."""
-    return build_server(token, port).streamable_http_app(
+_DNS_LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+
+def site_origin(value: str) -> str:
+    """The Site origin exactly as a browser sends it: https, a DNS name, an optional
+    non-default port, nothing else. Anything looser (a wildcard, a path, http) is refused."""
+    parts = urlsplit(value)
+    host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
+    labels = host.split(".")
+    if (
+        parts.scheme != "https"
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or "?" in value
+        or "#" in value
+        or len(labels) < 2
+        or not all(_DNS_LABEL.match(label) for label in labels)
+        or labels[-1].isdigit()
+        or port in (-1, 0, 443)
+        or value != f"https://{host}" + (f":{port}" if port else "")
+    ):
+        raise ValueError(f"Not an exact https Site origin: {value!r}")
+    return value
+
+
+class _SiteCors:
+    """CORS for exactly one Site origin, outside every other check. A preflight carries no
+    token (browsers never send one), so it is answered here, and only when its Origin, Host,
+    path, method and headers are all the companion's; it returns no data. Every other
+    request goes on to the bearer and Host/Origin checks; responses to the Site get the
+    headers its fetch needs to read them."""
+
+    def __init__(self, app, origin: str, port: int):
+        self.app = app
+        self.origin = origin
+        self.host = f"{HOST}:{port}"
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope["headers"]
+        }
+        origin = headers.get("origin")
+        if scope["method"] == "OPTIONS" and "access-control-request-method" in headers:
+            return await self._preflight(headers, scope["path"], send)
+        if origin != self.origin:
+            return await self.app(scope, receive, send)
+
+        async def cors_send(message):
+            if message["type"] == "http.response.start":
+                message["headers"] = [
+                    *message.get("headers", []),
+                    (b"access-control-allow-origin", self.origin.encode()),
+                    (b"access-control-expose-headers", b"mcp-session-id"),
+                    (b"vary", b"Origin"),
+                ]
+            await send(message)
+
+        return await self.app(scope, receive, cors_send)
+
+    async def _preflight(self, headers: dict[str, str], path: str, send) -> None:
+        asked = {
+            h.strip().lower()
+            for h in headers.get("access-control-request-headers", "").split(",")
+            if h.strip()
+        }
+        ok = (
+            headers.get("origin") == self.origin
+            and headers.get("host") == self.host
+            and path == PATH
+            and headers["access-control-request-method"] in SITE_METHODS
+            and asked <= set(SITE_HEADERS)
+        )
+        out = [(b"vary", b"Origin"), (b"content-length", b"0")]
+        if ok:
+            out += [
+                (b"access-control-allow-origin", self.origin.encode()),
+                (b"access-control-allow-methods", ", ".join(SITE_METHODS).encode()),
+                (b"access-control-allow-headers", ", ".join(SITE_HEADERS).encode()),
+                (b"access-control-max-age", b"600"),
+            ]
+            if headers.get("access-control-request-private-network") == "true":
+                out.append((b"access-control-allow-private-network", b"true"))
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 204 if ok else 403,
+                "headers": out,
+            }
+        )
+        await send({"type": "http.response.body", "body": b""})
+
+
+def http_app(token: str, port: int = DEFAULT_PORT, site: str | None = None):
+    """Streamable HTTP app for 127.0.0.1:`port`: bearer auth plus Host/Origin checks.
+    `site` (an exact origin) makes it the Site companion, see the module docstring."""
+    app = build_server(token, port, site).streamable_http_app(
         streamable_http_path=PATH,
         host=HOST,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=[f"{HOST}:{port}"],
-            allowed_origins=[f"http://{HOST}:{port}"],
+            allowed_origins=[f"http://{HOST}:{port}", *([site] if site else [])],
         ),
+        **({"max_request_body_size": SITE_BODY_MAX} if site else {}),
     )
+    return _SiteCors(app, site, port) if site else app
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -813,7 +986,20 @@ def main(argv: list[str] | None = None) -> None:
         help=f"serve Streamable HTTP on {HOST} instead of stdio",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--site-origin",
+        help="serve as the Site companion for this exact https origin (needs --http)",
+    )
     args = parser.parse_args(argv)
+    if args.site_origin is not None:
+        if not args.http:
+            parser.error("--site-origin needs --http")
+        if not 1024 <= args.port <= 65535:
+            parser.error("--port must be 1024-65535")
+        try:
+            site_origin(args.site_origin)
+        except ValueError as e:
+            parser.error(str(e))
     # Model imports and warm-up can print before the SDK redirects stdio itself.
     with redirect_stdout(sys.stderr):
         _require_layout_model()
@@ -828,7 +1014,11 @@ def main(argv: list[str] | None = None) -> None:
     print(
         f"Sundark MCP at http://{HOST}:{args.port}{PATH}", file=sys.stderr, flush=True
     )
-    uvicorn.run(http_app(token, args.port), host=HOST, port=args.port)
+    if args.site_origin:
+        print(
+            f"Site companion for {args.site_origin} only", file=sys.stderr, flush=True
+        )
+    uvicorn.run(http_app(token, args.port, args.site_origin), host=HOST, port=args.port)
 
 
 if __name__ == "__main__":

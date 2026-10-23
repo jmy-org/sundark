@@ -64,6 +64,10 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   Its MCP Apps resource embeds `web/`; `web/transport.js` changes transport, not
   parsing, prompts or storage rules. Keep subscription account management local.
   Temporary upload/download transfers are bounded and are not database records.
+  `--site-origin` (opt-in) serves the deployed Site from the owner's browser: one exact
+  https origin, the bearer on every request (also without an Origin), `SITE_TOOLS` only,
+  each scoped to PDFs uploaded through that companion, none copied into `papers/`. Never
+  widen it with `*`, more tools, or CORS on `app/main.py`.
 - **`app/store.py`** persists uploads + cached AI results under `data/`.
 
 ## Security (do not weaken)
