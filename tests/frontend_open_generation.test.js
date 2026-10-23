@@ -92,6 +92,7 @@ async function scenario(stage, rejected = false) {
     stopRender(P) {
       P.gen++;
     },
+    resetTrNav() {},
     buildTrShells() {
       assert.equal(S.docId, S.pdf.id);
       assert.equal(S.pages[0].w1, 222);
@@ -270,6 +271,7 @@ async function scenario(stage, rejected = false) {
         S.pageObs = S.dropObs = { observe() {}, disconnect() {} };
       },
       stopRender() {},
+      resetTrNav() {},
       buildTrShells() {},
       waitLayout: () =>
         stage === "reveal" && S.docId === "A" && !reveal.used
@@ -436,6 +438,7 @@ async function scenario(stage, rejected = false) {
     zoomScale: () => 1,
     showZoom() {},
     showPageNum() {},
+    resetTrNav() {},
     buildTrShells() {},
     ensureLayout: () => Promise.resolve(),
     attachPdfHover() {},
@@ -589,6 +592,7 @@ process.on("exit", () => {
         S.pageObs = S.dropObs = { observe() {}, disconnect() {} };
       },
       stopRender() {},
+      resetTrNav() {},
       buildTrShells() {},
       waitLayout: () =>
         stage === "reveal" && S.docId === "A" && !reveal.used

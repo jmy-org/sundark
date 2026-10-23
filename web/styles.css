@@ -161,6 +161,25 @@ button { font: inherit; }
   -webkit-box-decoration-break: clone; transition: background .1s; }
 .trseg:hover, .trseg.hl { background: var(--hl); }
 .trseg.pinned { background: var(--hl); box-shadow: inset 2px 0 0 var(--accent); }
+.trseg.selected { outline: 1px dashed var(--accent); outline-offset: 1px; }
+
+/* Sentence navigator: the keyboard route to a sentence's source (see app.js) */
+.trnav { flex: 0 0 auto; padding: 0 0 10px; }
+/* The list, not the tab, scrolls: a far sentence keeps the navigator in view above it. */
+#tab-translation .trlist { flex: 1 1 auto; min-height: 0; }
+.trnav-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.trnav-label { font-size: 12px; font-weight: 600; }
+.trnav-pos { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
+.trnav .btn-ghost { padding: 4px 10px; }
+.trnav .btn-ghost:disabled { opacity: .5; cursor: default; }
+.trnav .btn-ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.trnav .btn-ghost[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
+/* A short copy of the selected sentence; the sentence itself is marked in the list below. */
+.trnav-preview { margin-top: 6px; font-size: 12.5px; line-height: 1.5; max-height: 3em; overflow: hidden; }
+.trnav-preview:empty { display: none; }
+.trnav-preview .katex-display { display: inline; margin: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* ---------- Research Anatomy ---------- */
 .anat-card { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }

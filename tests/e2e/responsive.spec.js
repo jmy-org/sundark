@@ -207,3 +207,206 @@ test("desktop 1440px translation click keeps the AI panel beside the source", as
   await expect(page.locator("#trlist .trseg").last()).toHaveClass(/pinned/);
   await sourceInView(page);
 });
+
+// The sentence navigator is the keyboard route to a sentence's source: native buttons that share
+// the click's pin, so Tab reaches three controls instead of every sentence.
+for (const size of [
+  { width: 1440, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test(`${size.width}px keyboard sentence navigator pins the source`, async ({ page, request }) => {
+    await page.setViewportSize(size);
+    await openSample(page, request);
+    const nav = page.getByRole("group", { name: "Sentence" });
+    const prev = nav.getByRole("button", { name: "Previous sentence" });
+    const next = nav.getByRole("button", { name: "Next sentence" });
+    const pin = nav.getByRole("button", { name: "Pin source" });
+    await expect(prev).toBeDisabled();
+    await expect(pin).toBeDisabled();
+    await expect(page.locator("#trlist .trseg[tabindex]")).toHaveCount(0);
+
+    const second = page.locator("#trlist .trseg").nth(1);
+    await expect(second).toContainText(/\S/);
+    // The fixture translates every sentence and paints them in order: with the last one painted,
+    // Next stays enabled on the second instead of handing focus to Pin source at the frontier.
+    await expect(page.locator("#trlist .trseg").last()).toContainText(TRANSLATED);
+    await next.focus();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await expect(second).toHaveClass(/selected/);
+    await expect(page.locator("#trlist .trseg.selected")).toHaveCount(1);
+    await expect(page.locator("#trnav-status")).toHaveText(/^Page 1, sentence \d+$/);
+    await expect(page.locator("#trnav-preview")).toHaveText((await second.textContent()).trim());
+    await expect(prev).toBeEnabled();
+    await expect(next).toBeFocused();
+
+    await page.keyboard.press("Tab");
+    await expect(pin).toBeFocused();
+    await page.keyboard.press("Space");
+    await expect(second).toHaveClass(/pinned/);
+    await expect(page.locator("#trnav-pin")).toHaveAttribute("aria-pressed", "true");
+    await sourceInView(page);
+
+    const switcher = page.getByRole("navigation", { name: "Workspace panes" });
+    if (size.width < 900) {
+      // The AI pane is hidden now: focus lands on the visible PDF pane control, not the button.
+      const pdfPane = switcher.getByRole("button", { name: "PDF" });
+      await expect(pdfPane).toHaveAttribute("aria-pressed", "true");
+      await expect(pdfPane).toBeFocused();
+      await switcher.getByRole("button", { name: "AI" }).focus();
+      await page.keyboard.press("Enter");
+      await expect(second).toHaveClass(/selected/);
+      await expect(pin).toHaveAttribute("aria-pressed", "true");
+      await expect(second).toBeInViewport();
+    } else {
+      await expect(page.locator("#aipanel")).toBeVisible();
+      await expect(pin).toBeFocused();
+    }
+
+    await page.keyboard.press("Escape");
+    await expect(second).not.toHaveClass(/pinned/);
+    await expect(pin).toHaveAttribute("aria-pressed", "false");
+    await expect(second).toHaveClass(/selected/);
+    await noHorizontalOverflow(page, size.width);
+  });
+}
+
+// Far down a long list the navigator stays in view and clear of the selected sentence, and a
+// button that reaches the end hands its focus to Pin source instead of dropping it.
+for (const size of [
+  { width: 1440, height: 520 },
+  { width: 390, height: 520 },
+]) {
+  test(`${size.width}px sentence navigator stays in view and keeps focus at the ends`, async ({
+    page,
+    request,
+  }) => {
+    await page.setViewportSize(size);
+    await openSample(page, request);
+    // Large text makes the nine sentences overflow the list, so the last one is far away.
+    for (let i = 0; i < 10; i++) await page.locator("#tr-bigger").click();
+    await expect
+      .poll(() => page.locator("#trlist").evaluate((el) => el.scrollHeight > el.clientHeight + 40))
+      .toBe(true);
+    const nav = page.getByRole("group", { name: "Sentence" });
+    const prev = nav.getByRole("button", { name: "Previous sentence" });
+    const next = nav.getByRole("button", { name: "Next sentence" });
+    const pin = nav.getByRole("button", { name: "Pin source" });
+    // The navigator is in the viewport and the selected sentence lies below it, inside the list.
+    const visibleTogether = () =>
+      page.evaluate(() => {
+        const bar = document.querySelector(".trnav").getBoundingClientRect();
+        const list = document.querySelector("#trlist").getBoundingClientRect();
+        const sel = document.querySelector("#trlist .trseg.selected").getBoundingClientRect();
+        return (
+          bar.top >= 0 &&
+          bar.bottom <= window.innerHeight &&
+          bar.bottom <= list.top + 1 &&
+          sel.top >= list.top - 1 &&
+          sel.bottom <= list.bottom + 1
+        );
+      });
+
+    await next.focus();
+    for (let i = 0; i < 12 && !(await next.isDisabled()); i++) {
+      await page.keyboard.press("Enter");
+      await expect.poll(visibleTogether).toBe(true);
+    }
+    await expect(next).toBeDisabled();
+    await expect(page.locator("#trlist .trseg").last()).toHaveClass(/selected/);
+    await expect(pin).toBeFocused();
+    await expect(page.locator("#trnav-status")).toHaveText(/^Page 1, sentence \d+$/);
+
+    await prev.focus();
+    for (let i = 0; i < 12 && !(await prev.isDisabled()); i++) {
+      await page.keyboard.press("Enter");
+      await expect.poll(visibleTogether).toBe(true);
+    }
+    await expect(prev).toBeDisabled();
+    await expect(page.locator("#trlist .trseg").first()).toHaveClass(/selected/);
+    await expect(pin).toBeFocused();
+    await noHorizontalOverflow(page, size.width);
+  });
+}
+
+// By id, not role: a failed open hides the AI panel, and a hidden button has no role to find.
+async function navCleared(page) {
+  for (const id of ["#trnav-prev", "#trnav-pin"]) {
+    await expect(page.locator(id)).toBeDisabled();
+  }
+  await expect(page.locator("#trnav-pin")).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#trnav-pos")).toHaveText("None selected");
+  await expect(page.locator("#trnav-preview")).toBeEmpty();
+  await expect(page.locator("#trnav-status")).toBeEmpty();
+  await expect(page.locator("#trlist .trseg.selected, #trlist .trseg.pinned")).toHaveCount(0);
+}
+
+// A keyboard pin has no mouseleave to take its PDF highlight down: retranslating releases it, and
+// opening another paper forgets the old sentence at once, also when that paper fails to load.
+test("desktop 1440px navigator resets on retranslate and on a new or failing paper", async ({
+  page,
+  request,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSample(page, request);
+  const nav = page.getByRole("group", { name: "Sentence" });
+  const next = nav.getByRole("button", { name: "Next sentence" });
+  const pin = nav.getByRole("button", { name: "Pin source" });
+  // A retranslation empties every span and disables Next until the fixture paints again: wait for
+  // the last sentence, or focus() skips the disabled button and Enter lands elsewhere.
+  const pinSecond = async () => {
+    await expect(page.locator("#trlist .trseg").last()).toContainText(TRANSLATED);
+    await expect(next).toBeEnabled();
+    await next.focus();
+    await expect(next).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await pin.focus();
+    await page.keyboard.press("Space");
+    await expect(pin).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#pdfview .hlrect").first()).toBeVisible();
+  };
+
+  await pinSecond();
+  await page.locator("#retranslate").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+  await expect(page.locator("#trlist .trseg")).toHaveCount(9);
+  await navCleared(page);
+
+  // The next paper's PDF is held, then fails: the navigator is cleared while it loads and after.
+  await pinSecond();
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  await page.route("**/api/pdf/**", async (route) => {
+    await held;
+    await route.fulfill({ status: 500, body: "fixture failure" });
+  });
+  const other = await request.get("/__e2e/sample.pdf?variant=Failing");
+  await page.locator("#file").setInputFiles({
+    name: "failing-study.pdf",
+    mimeType: "application/pdf",
+    buffer: await other.body(),
+  });
+  await expect(page.locator("#prep-overlay")).toBeVisible();
+  await navCleared(page);
+  await expect(next).toBeDisabled();
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+  release();
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  await expect(page.locator("#paperlist")).toBeVisible();
+  await navCleared(page);
+  await expect(page.locator("#trnav-next")).toBeDisabled();
+  await page.unroute("**/api/pdf/**");
+
+  // The sample opens cleanly again and its sentences are navigable from the start.
+  const pdf = await request.get("/__e2e/sample.pdf");
+  await page.locator("#file").setInputFiles({
+    name: "responsive-study.pdf",
+    mimeType: "application/pdf",
+    buffer: await pdf.body(),
+  });
+  await expect(page.locator("#trlist .trseg")).toHaveCount(9);
+  await navCleared(page);
+  await expect(next).toBeEnabled();
+});

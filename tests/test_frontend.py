@@ -77,6 +77,9 @@ class FrontendTests(unittest.TestCase):
             css, r"\.upload-btn:has\(input:focus-visible\)\s*\{[^}]*outline:"
         )
 
+    def test_sentence_navigator_shares_the_pin(self):
+        self.node("tests/frontend_sentence_nav.test.js")
+
     def test_unrenderable_math_is_not_swapped_in(self):
         self.node("tests/frontend_math_guard.test.js")
 

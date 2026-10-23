@@ -113,6 +113,18 @@
             <button id="tr-bigger" class="btn-ghost" title="Larger text">A+</button>
             <button id="retranslate" class="btn-ghost" title="Translate again, ignoring the cache">⟳ 다시 번역</button>
           </div>
+          <!-- Keyboard route to a sentence's source: the sentences stay plain text (see app.js) -->
+          <div class="trnav" role="group" aria-labelledby="trnav-label">
+            <div class="trnav-bar">
+              <span id="trnav-label" class="trnav-label">Sentence</span>
+              <span id="trnav-pos" class="trnav-pos">None selected</span>
+              <button id="trnav-prev" type="button" class="btn-ghost" aria-label="Previous sentence" disabled>Previous</button>
+              <button id="trnav-next" type="button" class="btn-ghost" aria-label="Next sentence" disabled>Next</button>
+              <button id="trnav-pin" type="button" class="btn-ghost" aria-pressed="false" disabled>Pin source</button>
+            </div>
+            <div id="trnav-preview" class="trnav-preview"></div>
+            <span id="trnav-status" class="sr-only" role="status"></span>
+          </div>
           <div id="trlist" class="trlist"></div>
         </div>
         <div class="tabpane" id="tab-anatomy">

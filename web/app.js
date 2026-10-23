@@ -524,6 +524,7 @@ async function openDoc(meta) {
   $("pdfview").innerHTML = "";
   if (S.translationAbort) S.translationAbort.abort();
   S.trToken += 1;
+  resetTrNav();  // before any await: the old paper's sentences must not be navigable meanwhile
   S.docId = meta.doc_id;
   S.numPages = meta.num_pages;
   setTitle(meta.title + (meta.byline ? "  ·  " + meta.byline : "") + "  ·  " + meta.num_pages + " pages");
@@ -564,6 +565,7 @@ async function openDoc(meta) {
     S.pdf = null;
     S.pages = [];
     S.docId = null;
+    resetTrNav();
     $("pdfview").innerHTML = "";
     $("pdfcol").classList.add("hidden");
     $("aipanel").classList.add("hidden");
@@ -1008,8 +1010,8 @@ function lineRects(words, foldScripts = true) {
 
 // ================= Translation =================
 function buildTrShells() {
+  resetTrNav();
   const list = $("trlist");
-  list.innerHTML = "";
   S.frontier = 0; // earliest page not yet fully displayed (strict top-to-bottom reveal)
   for (let i = 0; i < S.numPages; i++) {
     const wrap = document.createElement("div");
@@ -1072,9 +1074,12 @@ function paintFrontier() {
     if (P.loadingEl) { P.loadingEl.remove(); P.loadingEl = null; }
     const wrap = $("trlist").children[S.frontier];
     if (wrap) renderMath(wrap);
+    if (wrap && S.trSel && wrap.contains(S.trSel)) showTrPreview();
     P.translated = true;
     S.frontier += 1;
   }
+  // Painting only adds sentences after the frontier, so it can only enable a disabled Next.
+  if ($("trnav-next").disabled) syncTrNav();
   // Every page is displayed (or the whole document has no translatable sentences, e.g. a scanned
   // PDF): release the loading cover even though nothing was painted, so it can never hang open.
   if (S.frontier >= S.numPages && S.onFirstPaint) {
@@ -1213,6 +1218,7 @@ async function fetchMath(i, wrap) {
       if (tag && no && no.classList.contains("treqno")) no.remove();
     }
     renderMath(wrap);
+    if (S.trSel && wrap.contains(S.trSel)) showTrPreview();
   } catch { /* best-effort: keep the original text if math fetch fails */ }
 }
 
@@ -1229,22 +1235,34 @@ function makeTrSeg(i, k, tr) {
     if (d.classList.contains("pinned") && getComputedStyle(d).visibility === "hidden") return;
     setHover(i, k, false);
   });
-  d.addEventListener("click", () => {
-    // A second click on the pinned sentence releases it (so does Esc, below).
-    if (d.classList.contains("pinned")) { d.classList.remove("pinned"); return; }
-    unpinTr();
-    d.classList.add("pinned");
-    showPane("source");  // on a narrow screen the source is the hidden pane
-    highlightSource(i, k, true, "center");
-  });
+  d.addEventListener("click", () => { selectTr(d); toggleTrPin(d); });
   return d;
 }
 
-// Release the translation sentence pinned by a click.
-function unpinTr() {
-  document.querySelectorAll(".trseg.pinned").forEach((x) => x.classList.remove("pinned"));
+// Pin a sentence and scroll the PDF to its source; on the pinned one, release it (so does Esc,
+// below). A click on the sentence and the navigator's Pin source button both come here.
+function toggleTrPin(d) {
+  if (d.classList.contains("pinned")) unpinTr();
+  else {
+    unpinTr();
+    d.classList.add("pinned");
+    showPane("source");  // on a narrow screen the source is the hidden pane
+    highlightSource(Number(d.dataset.page), Number(d.dataset.i), true, "center");
+  }
+  syncTrNav();
 }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") unpinTr(); });
+
+// Release the pinned translation sentence. A pin made from the keyboard keeps its highlight drawn
+// (no mouseleave clears it), so clear it here unless the pointer is on it and owns the hover.
+function unpinTr() {
+  document.querySelectorAll(".trseg.pinned").forEach((x) => {
+    x.classList.remove("pinned");
+    if (x.classList.contains("hl") && !x.matches(":hover")) {
+      setHover(Number(x.dataset.page), Number(x.dataset.i), false);
+    }
+  });
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { unpinTr(); syncTrNav(); } });
 
 // Unified: highlight one sentence on BOTH sides — a continuous bar over its lines on
 // the PDF, and its translation segment in the panel.
@@ -1484,6 +1502,94 @@ function retranslateAll(force) {
   });
   translateAll(force);
 }
+
+// ================= Sentence navigator =================
+// Native Previous/Next/Pin source buttons give the keyboard (and a screen reader) the sentence
+// click: the sentences stay plain text, so math, paragraphs and selection read as before.
+// S.trSel is the selected sentence: a click or Previous/Next selects it, Pin source pins it.
+function selectTr(d) {
+  if (S.trSel === d) return;
+  if (S.trSel) S.trSel.classList.remove("selected");
+  S.trSel = d;
+  if (d) d.classList.add("selected");
+  showTrPreview();
+}
+
+// The translation list is going (a new paper, a failed one, a retranslation): release its pin
+// and PDF highlight while the spans are still there, then forget the selection with them.
+function resetTrNav() {
+  unpinTr();
+  $("trlist").innerHTML = "";
+  S.trSel = null;
+  $("trnav-status").textContent = "";
+  syncTrNav();
+}
+
+// Sentences that can be selected, in document order: painted and not empty (an unpainted
+// sentence is an empty span, and a translation can come back empty).
+function trNavEntries() {
+  return [...$("trlist").querySelectorAll(".trseg")].filter((d) => d.textContent.trim());
+}
+
+function trNavStep(entries, cur, dir) {
+  const at = entries.indexOf(cur);
+  if (at < 0) return dir > 0 ? entries[0] || null : null;
+  return entries[at + dir] || null;
+}
+
+function trNavPlace(d) {
+  return "Page " + (Number(d.dataset.page) + 1) + ", sentence " + (Number(d.dataset.i) + 1);
+}
+
+// A copy of the selected sentence beside the buttons, math kept as rendered math.
+function showTrPreview() {
+  const box = $("trnav-preview");
+  box.replaceChildren();
+  if (!S.trSel) return;
+  for (const n of S.trSel.childNodes) box.appendChild(n.cloneNode(true));
+  // A sentence painted before its page finished is still raw TeX.
+  if (!box.querySelector(".katex")) renderMath(box);
+}
+
+// Bring the buttons and the visible context in line with S.trSel. Never moves focus or speaks.
+function syncTrNav() {
+  const d = S.trSel && S.trSel.isConnected ? S.trSel : null;
+  const entries = trNavEntries();
+  $("trnav-prev").disabled = !trNavStep(entries, d, -1);
+  $("trnav-next").disabled = !trNavStep(entries, d, 1);
+  const pin = $("trnav-pin");
+  pin.disabled = !d;
+  pin.setAttribute("aria-pressed", String(!!d && d.classList.contains("pinned")));
+  $("trnav-pos").textContent = d ? trNavPlace(d) : "None selected";
+  if (!d) $("trnav-preview").replaceChildren();
+}
+
+// Moving the selection releases a pin, so only one sentence is ever marked as shown in the PDF.
+// A button that reaches the end disables itself and would drop its focus to the page: the user
+// who pressed it keeps focus in the group, on Pin source (enabled once a sentence is selected).
+function moveTr(dir) {
+  const d = trNavStep(trNavEntries(), S.trSel, dir);
+  if (!d) return;
+  const from = $(dir > 0 ? "trnav-next" : "trnav-prev");
+  const pressed = document.activeElement === from;
+  unpinTr();
+  selectTr(d);
+  d.scrollIntoView({ block: "nearest" });
+  syncTrNav();
+  if (pressed && from.disabled) $("trnav-pin").focus();
+  $("trnav-status").textContent = trNavPlace(d);
+}
+
+$("trnav-prev").addEventListener("click", () => moveTr(-1));
+$("trnav-next").addEventListener("click", () => moveTr(1));
+$("trnav-pin").addEventListener("click", (e) => {
+  if (!S.trSel) return;
+  toggleTrPin(S.trSel);
+  // On a narrow screen the source pane replaced this one: give focus its visible pane control.
+  if (getComputedStyle(e.currentTarget).visibility === "hidden") {
+    document.querySelector('#panes [data-pane="source"]').focus();
+  }
+});
 
 // ================= Tabs =================
 document.querySelectorAll(".tab").forEach((btn) => {
