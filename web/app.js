@@ -470,8 +470,11 @@ async function loadLibrary() {
     list.innerHTML = "";
     for (const p of r.papers) {
       const li = document.createElement("li");
-      li.innerHTML = `${esc(p.name)}<span class="meta">${esc(p.file || "")} · ${fmtSize(p.size)}</span>`;
-      li.addEventListener("click", () => openFromLibrary(p.rel, li));
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "paper-action";
+      button.innerHTML = `${esc(p.name)}<span class="meta">${esc(p.file || "")} · ${fmtSize(p.size)}</span>`;
+      button.addEventListener("click", () => openFromLibrary(p.rel, li));
+      li.appendChild(button);
       list.appendChild(li);
     }
   } catch (err) {
