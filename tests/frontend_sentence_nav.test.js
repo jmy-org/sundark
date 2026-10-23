@@ -12,6 +12,16 @@ function fn(name) {
   assert.ok(start >= 0, `${name} exists`);
   return src.slice(start, src.indexOf("\n}\n", start) + 3);
 }
+function block(head) {
+  const start = src.indexOf(head);
+  assert.ok(start >= 0, `${head.trim()} exists`);
+  return src.slice(start, src.indexOf("\n}\n", start) + 3);
+}
+function line(head) {
+  const start = src.indexOf(head);
+  assert.ok(start >= 0, `${head} exists`);
+  return src.slice(start).split("\n")[0];
+}
 const navStart = src.indexOf("// ================= Sentence navigator");
 assert.ok(navStart >= 0, "sentence navigator section exists");
 const navSrc = src.slice(navStart, src.indexOf("\n// ================= ", navStart + 10));
@@ -28,6 +38,14 @@ const code = [
     .slice(src.indexOf('document.addEventListener("keydown", (e) => { if (e.key === "Escape")'))
     .split("\n")[0],
   navSrc,
+  // The Auto-translate checkbox and the translation run it starts.
+  line('$("autotr").addEventListener("change"'),
+  line("const trPool = "),
+  line("const BULLET_RE = "),
+  block("\nasync function translateAll("),
+  fn("paragraphBatches"),
+  fn("preparePage"),
+  fn("retranslateAll"),
 ].join("\n");
 
 class El {
@@ -66,6 +84,7 @@ class El {
     this._text = String(v);
   }
   set innerHTML(_) {
+    for (const c of this.children) c.parent = null;
     this.children = [];
     this._text = "";
   }
@@ -135,10 +154,11 @@ class El {
 }
 
 function setup({ narrow = false } = {}) {
-  const calls = { highlight: [], hover: [], panes: [], math: 0 };
+  const calls = { highlight: [], hover: [], panes: [], math: 0, batches: [] };
   const doc = { listeners: {}, activeElement: null };
   doc.body = new El("body", doc);
   doc.createElement = (tag) => new El(tag, doc);
+  doc.createTextNode = (text) => Object.assign(new El("#text", doc), { _text: text });
   doc.addEventListener = (type, f) => (doc.listeners[type] = doc.listeners[type] || []).push(f);
   doc.querySelectorAll = (sel) => doc.body.querySelectorAll(sel);
   const ids = {};
@@ -221,6 +241,18 @@ function setup({ narrow = false } = {}) {
     },
     waitLayout: () => Promise.resolve(),
     sleep: () => Promise.resolve(),
+    // A translation run over saved results: every batch answers at once, nothing is forced.
+    lang: () => "ko",
+    hide() {},
+    ensureLayout: async () => {},
+    fetchMath: async () => {},
+    translateBatch: async (page, b, force, token) => {
+      calls.batches.push([page, b.start, force]);
+      const P = S.pages[page];
+      if (token !== S.trToken || !P.trBuf) return;
+      b.texts.forEach((text, j) => (P.trBuf[b.start + j] = "번역 " + text));
+      ctx.paintFrontier();
+    },
   };
   vm.createContext(ctx);
   vm.runInContext(code, ctx);
@@ -547,7 +579,99 @@ async function lifecycle() {
   assert.deepEqual(t.where(), [0, 0], "a stale failure reset the open paper's navigator");
 }
 
+// Auto-translate off and on again over a finished, keyboard-pinned document: the list is rebuilt
+// from saved results (nothing forced), the old sentence and its PDF highlight go with it, and the
+// newly painted sentences are navigable.
+async function autotrToggle() {
+  const t = setup();
+  const autotr = t.ids.autotr;
+  autotr.checked = true;
+  t.S.docId = "A";
+  t.S.aiConfig = { backend: "claude", concurrency: { claude: 2 } };
+  t.S.numPages = 2;
+  t.ctx.buildTrShells();
+  const seg = (text, para) => ({ text, para, size: 10 });
+  t.S.pages = [{ segs: [seg("a", 0), seg("b", 0)] }, { segs: [seg("c", 0)] }];
+  await t.ctx.translateAll();
+  assert.equal(t.S.frontier, 2, "the first run painted the whole document");
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-pin"].fire("click");
+  const old = t.S.trSel;
+  assert.deepEqual(t.where(), [0, 1]);
+  assert.ok(old.cls.has("pinned") && old.cls.has("hl"), "the keyboard pin drew the highlight");
+
+  // Off changes nothing on screen.
+  t.calls.batches = [];
+  autotr.checked = false;
+  autotr.fire("change");
+  await tick();
+  assert.equal(t.S.trSel, old, "turning it off keeps the selection");
+  assert.ok(old.isConnected && old.cls.has("pinned"));
+  assert.deepEqual(t.calls.batches, [], "turning it off starts nothing");
+
+  t.calls.hover = [];
+  autotr.checked = true;
+  autotr.fire("change");
+  await tick();
+  assert.ok(!old.isConnected, "the old sentence's span was replaced");
+  assert.ok(!old.cls.has("pinned") && !old.cls.has("hl"), "and released");
+  assert.deepEqual(t.calls.hover, [[0, 1, false]], "the keyboard pin's PDF highlight was cleared");
+  assert.ok(
+    t.calls.batches.length > 0 && t.calls.batches.every(([, , force]) => !force),
+    "saved translations are reused, not regenerated",
+  );
+  assert.equal(t.S.frontier, 2, "the frontier ran over the rebuilt list");
+  assert.deepEqual(
+    t.spans().map((d) => d.textContent),
+    ["번역 a", "번역 b", "번역 c"],
+    "the rebuilt list is painted",
+  );
+  assert.deepEqual(
+    t.navState(),
+    { ...t.cleared, spans: 3, next: false },
+    "no stale source bar: nothing selected, Next ready",
+  );
+
+  // The detached sentence cannot be pinned, even if something still holds it.
+  t.calls.highlight = [];
+  t.S.trSel = old;
+  t.ids["trnav-pin"].fire("click");
+  assert.deepEqual(t.calls.highlight, [], "a removed sentence was pinned");
+  assert.equal(t.S.trSel, null, "the removed sentence is forgotten");
+  assert.equal(t.ids["trnav-pin"].disabled, true);
+  assert.equal(t.ids["trnav-pos"].textContent, "None selected");
+
+  // The new sentences take the keyboard path end to end.
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-next"].fire("click");
+  assert.deepEqual(t.where(), [1, 0]);
+  assert.ok(t.S.trSel.isConnected);
+  t.ids["trnav-pin"].fire("click");
+  assert.deepEqual(t.calls.highlight, [[1, 0, "center"]]);
+  assert.equal(t.ids["trnav-pin"].getAttribute("aria-pressed"), "true");
+  assert.equal(t.ids["trnav-preview"].textContent, "번역 c");
+
+  // A run that rebuilds a page in place (no new shells) also lets the selection go with it.
+  t.calls.hover = [];
+  const pinned = t.S.trSel;
+  await t.ctx.translateAll();
+  assert.ok(!pinned.isConnected && !pinned.cls.has("pinned"));
+  assert.deepEqual(t.calls.hover, [[1, 0, false]]);
+  assert.equal(t.S.trSel, null);
+  assert.equal(t.ids["trnav-pin"].disabled, true);
+  assert.equal(t.ids["trnav-preview"].textContent, "");
+}
+
+// Source check only (geometry needs a browser): the position text never shares a row with the
+// buttons, so a longer position cannot wrap beside them and grow the bar.
+const css = fs.readFileSync("web/styles.css", "utf8");
+assert.match(css, /\.trnav-bar \{[^}]*flex-wrap: wrap;/, "navigator wraps at narrow widths");
+assert.match(css, /\.trnav-pos \{[^}]*flex: 1 1 calc\(100% - 8em\);/, "position fills the label's row");
+
 lifecycle()
+  .then(autotrToggle)
   .then(() => console.log("sentence navigator ok"))
   .catch((e) => {
     console.error(e);

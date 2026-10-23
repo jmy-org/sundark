@@ -202,9 +202,26 @@ test("desktop 1440px translation click keeps the AI panel beside the source", as
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openSample(page, request);
-  await page.locator("#trlist .trseg").last().click();
+  const seg = page.locator("#trlist .trseg").last();
+  const preview = page.locator("#trnav-preview");
+  await expect(seg).toContainText(/\S/);
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  const before = await seg.boundingBox();
+  const previewBefore = await preview.boundingBox();
+  await seg.click();
   await expect(page.locator("#aipanel")).toBeVisible();
-  await expect(page.locator("#trlist .trseg").last()).toHaveClass(/pinned/);
+  await expect(seg).toHaveClass(/pinned/);
+  // Selecting fills the preview; the list must not move, or the pointer leaves the sentence
+  // and its mouseleave clears the highlight.
+  await expect(preview).toContainText(/\S/);
+  const after = await seg.boundingBox();
+  for (const key of ["x", "y", "width", "height"]) {
+    expect(Math.abs(after[key] - before[key])).toBeLessThanOrEqual(0.5);
+  }
+  // The empty preview already holds its two lines.
+  expect(previewBefore).not.toBeNull();
+  const previewAfter = await preview.boundingBox();
+  expect(Math.abs(previewAfter.height - previewBefore.height)).toBeLessThanOrEqual(0.5);
   await sourceInView(page);
 });
 
@@ -409,4 +426,58 @@ test("desktop 1440px navigator resets on retranslate and on a new or failing pap
   await expect(page.locator("#trlist .trseg")).toHaveCount(9);
   await navCleared(page);
   await expect(next).toBeEnabled();
+});
+
+// Auto-translate off and on again after a keyboard pin: the list is rebuilt from the saved
+// translations (no new provider call), the old sentence's pin and PDF highlight go with it, and
+// the repainted sentences are navigable.
+test("desktop 1440px auto-translate off and on resets the navigator", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSample(page, request);
+  const autotr = page.getByRole("checkbox", { name: "Auto-translate" });
+  const nav = page.getByRole("group", { name: "Sentence" });
+  const next = nav.getByRole("button", { name: "Next sentence" });
+  const pin = nav.getByRole("button", { name: "Pin source" });
+  const translateCalls = async () => {
+    const calls = await (await request.get("/__e2e/calls")).json();
+    return Object.entries(calls)
+      .filter(([key]) => key.startsWith("translate:"))
+      .reduce((sum, [, n]) => sum + n, 0);
+  };
+  await expect(page.locator("#trlist .trseg").last()).toContainText(TRANSLATED);
+  await expect(next).toBeEnabled();
+  await next.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await pin.focus();
+  await page.keyboard.press("Space");
+  await expect(pin).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#pdfview .hlrect").first()).toBeVisible();
+  const pinnedText = await page.locator("#trnav-preview").textContent();
+  const callsBefore = await translateCalls();
+
+  // Off leaves the list, the selection and the pin as they are.
+  await autotr.uncheck();
+  await expect(pin).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#trnav-preview")).toHaveText(pinnedText);
+
+  await autotr.check();
+  await expect(page.locator("#trlist .trseg")).toHaveCount(9);
+  await expect(page.locator("#trlist .trseg").last()).toContainText(TRANSLATED);
+  await expect(page.locator("#trlist .trseg.pinned")).toHaveCount(0);
+  await expect(page.locator("#trlist .trseg.selected")).toHaveCount(0);
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+  await navCleared(page);
+  expect(await translateCalls()).toBe(callsBefore);
+
+  // The repainted sentences take the keyboard path again.
+  await expect(next).toBeEnabled();
+  await next.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#trnav-status")).toHaveText("Page 1, sentence 1");
+  await expect(page.locator("#trnav-preview")).toContainText(TRANSLATED);
+  await pin.focus();
+  await page.keyboard.press("Space");
+  await expect(pin).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#pdfview .hlrect").first()).toBeVisible();
 });

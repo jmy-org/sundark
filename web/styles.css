@@ -169,14 +169,16 @@ button { font: inherit; }
 #tab-translation .trlist { flex: 1 1 auto; min-height: 0; }
 .trnav-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 .trnav-label { font-size: 12px; font-weight: 600; }
-.trnav-pos { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
+/* The position text changes length ("None selected" -> "Page 3, sentence 12"); beside the buttons
+   it wrapped and grew the bar. Its basis leaves room for the label only, so the buttons always
+   take the next row and the bar's height never depends on the text. */
+.trnav-pos { flex: 1 1 calc(100% - 8em); min-width: 0; color: var(--muted); font-size: 12px; }
 .trnav .btn-ghost { padding: 4px 10px; }
 .trnav .btn-ghost:disabled { opacity: .5; cursor: default; }
 .trnav .btn-ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .trnav .btn-ghost[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
 /* A short copy of the selected sentence; the sentence itself is marked in the list below. */
-.trnav-preview { margin-top: 6px; font-size: 12.5px; line-height: 1.5; max-height: 3em; overflow: hidden; }
-.trnav-preview:empty { display: none; }
+.trnav-preview { margin-top: 6px; font-size: 12.5px; line-height: 1.5; height: 3em; overflow: hidden; }
 .trnav-preview .katex-display { display: inline; margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

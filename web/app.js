@@ -1113,7 +1113,11 @@ function preparePage(i) {
   const P = S.pages[i];
   if (!P) return [];
   const wrap = $("trlist").children[i];
+  // The selected (and maybe pinned) sentence is about to go: release it with its span.
+  const owned = wrap && S.trSel && wrap.contains(S.trSel);
+  if (owned) { unpinTr(); selectTr(null); }
   if (wrap) wrap.innerHTML = "";
+  if (owned) syncTrNav();
   P.spanByK = []; P.trBuf = []; P.frontK = 0; P.loadingEl = null;
   if (!P.segs || !P.segs.length) return [];
   // Paragraph structure: sentences of the same block flow inline in one <p>. Paragraph font-size
@@ -1425,7 +1429,9 @@ function scrollTrTo(t, mid) {
 }
 
 // Auto-translate toggle and explicit retranslation. Settings changes reload the page.
-$("autotr").addEventListener("change", () => { if ($("autotr").checked) translateAll(); });
+// Turning it back on rebuilds the list like a retranslation (fresh shells, frontier, selection),
+// but without force, so saved translations are reused.
+$("autotr").addEventListener("change", () => { if ($("autotr").checked) retranslateAll(false); });
 $("retranslate").addEventListener("click", () => retranslateAll(true));
 
 // Translation panel text-size control (dynamic, persisted)
@@ -1583,6 +1589,8 @@ function moveTr(dir) {
 $("trnav-prev").addEventListener("click", () => moveTr(-1));
 $("trnav-next").addEventListener("click", () => moveTr(1));
 $("trnav-pin").addEventListener("click", (e) => {
+  // A sentence whose span is gone cannot be pinned: forget it instead.
+  if (S.trSel && !S.trSel.isConnected) { selectTr(null); syncTrNav(); }
   if (!S.trSel) return;
   toggleTrPin(S.trSel);
   // On a narrow screen the source pane replaced this one: give focus its visible pane control.
