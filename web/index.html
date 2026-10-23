@@ -62,9 +62,16 @@
     </form>
   </dialog>
 
-  <main class="workspace">
+  <!-- Narrow screens show one pane at a time -->
+  <nav id="panes" class="panes" aria-label="Workspace panes">
+    <button type="button" data-pane="library" aria-controls="library" aria-pressed="true">Library</button>
+    <button type="button" data-pane="source" aria-controls="pdfcol" aria-pressed="false">PDF</button>
+    <button type="button" data-pane="ai" aria-controls="aipanel" aria-pressed="false">AI</button>
+  </nav>
+
+  <main class="workspace" data-pane="library">
     <!-- Library -->
-    <aside class="library">
+    <aside id="library" class="library">
       <div class="lib-head"><span>Library</span><button id="refresh" title="Reload the list">⟳</button></div>
       <div class="lib-src" role="tablist">
         <button id="src-folder" type="button" class="active">Folder</button>

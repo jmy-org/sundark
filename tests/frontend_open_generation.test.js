@@ -81,6 +81,7 @@ async function scenario(stage, rejected = false) {
     },
     document: { createElement: element },
     setTitle() {},
+    showPane() {},
     updateReviewBtn() {},
     zoomScale: () => 1,
     showZoom() {},

@@ -535,6 +535,7 @@ async function openDoc(meta) {
   $("empty").classList.add("hidden");
   $("pdfcol").classList.remove("hidden");
   $("aipanel").classList.remove("hidden");
+  showPane("ai");
   $("summary").innerHTML = "";
   $("chatlog").innerHTML = "";
   S.summaryLoaded = false;
@@ -1689,6 +1690,7 @@ $("btn-ask").addEventListener("click", () => {
   hide($("selpop"));
   if (!lastSelection) return;
   setChatCite(lastSelection);                               // show as a citation block
+  showPane("ai");
   document.querySelector('.tab[data-tab="chat"]').click();  // auto-switch to Chat
   $("chatinput").value = "";
   fitChatInput();
@@ -1738,7 +1740,8 @@ function zoomScale() {
     // a whole page plus the gaps above and below it
     if (S.zoom.mode === "page") s = Math.min(s, (view.clientHeight - 40) / S.page1.h);
   }
-  const lo = ZOOM_STEPS[0] / 100 * PT_PX, hi = ZOOM_STEPS[ZOOM_STEPS.length - 1] / 100 * PT_PX;
+  // a fit mode may go below the smallest step, so a phone-width pane still fits the page
+  const lo = (S.zoom.mode === "pct" ? ZOOM_STEPS[0] : 25) / 100 * PT_PX, hi = ZOOM_STEPS[ZOOM_STEPS.length - 1] / 100 * PT_PX;
   return Math.min(hi, Math.max(lo, s));
 }
 
@@ -1876,6 +1879,17 @@ function refitPdf() {
   drag($("rz1"), "--c1", false);
   drag($("rz2"), "--c3", true);
 })();
+
+// ================= Narrow-screen panes =================
+// Below the CSS breakpoint one pane shows at a time; on wider screens the switcher is hidden
+// and this only records the choice.
+function showPane(name) {
+  document.querySelector(".workspace").dataset.pane = name;
+  document.querySelectorAll("#panes button").forEach((b) =>
+    b.setAttribute("aria-pressed", String(b.dataset.pane === name)));
+}
+document.querySelectorAll("#panes button").forEach((b) =>
+  b.addEventListener("click", () => showPane(b.dataset.pane)));
 
 let resizeT;
 window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(refitPdf, 300); });
