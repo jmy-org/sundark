@@ -1,5 +1,23 @@
 "use strict";
 
+const readerTransport = window.SundarkTransport;
+const fetch = (url, options) => readerTransport.fetch(url, options);
+
+// UI preferences survive for this reader session when an opaque host denies storage.
+const uiStorage = (() => {
+  const memory = new Map();
+  return {
+    getItem(key) {
+      if (memory.has(key)) return memory.get(key);
+      try { return globalThis.localStorage.getItem(key); } catch { return null; }
+    },
+    setItem(key, value) {
+      memory.set(key, String(value));
+      try { globalThis.localStorage.setItem(key, String(value)); } catch {}
+    },
+  };
+})();
+
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
@@ -11,6 +29,7 @@ const lang = () => {
 
 const S = {
   docId: null,
+  openGeneration: 0,
   pdf: null,
   numPages: 0,
   scale: 1.4,
@@ -119,6 +138,7 @@ async function getChatGPTJSON(path) {
 }
 
 async function refreshChatGPT() {
+  if (readerTransport.mode === "mcp") return;
   if (chatGPT.busy || $("set-backend").value !== "chatgpt" || !$("settings").open) return;
   setChatGPTBusy(true);
   const generation = chatGPT.generation;
@@ -227,7 +247,7 @@ function fillModels(backend) {
   const row = S.aiConfig.backends.find((b) => b.id === backend);
   const listId = "suggest-" + backend;
   const list = document.createElement("datalist"); list.id = listId;
-  for (const m of row.suggestions) { const o = document.createElement("option"); o.value = m; list.appendChild(o); }
+  for (const m of row.suggestions || []) { const o = document.createElement("option"); o.value = m; list.appendChild(o); }
   box.appendChild(list);
   for (const task of S.aiConfig.tasks) {
     const label = document.createElement("label");
@@ -254,11 +274,21 @@ function openSettings() {
   sel.innerHTML = "";
   for (const b of S.aiConfig.backends) {
     const o = document.createElement("option");
-    o.value = b.id; o.textContent = b.label + (b.installed ? "" : " (not installed)");
-    o.disabled = !b.installed; sel.appendChild(o);
+    o.value = b.id; o.textContent = b.label + (b.installed === false ? " (not installed)" : "");
+    o.disabled = b.installed === false; sel.appendChild(o);
   }
   const first = S.aiConfig.backend || (S.aiConfig.backends.find((b) => b.installed) || {}).id;
   if (first) { sel.value = first; fillModels(first); }
+  if (readerTransport.mode === "mcp") {
+    $("settings-reason").textContent = [S.aiConfig.reason, window.SundarkTransports.LOCAL_SETTINGS].filter(Boolean).join(" ");
+    show($("settings-reason"));
+    for (const input of $("settings-form").querySelectorAll("input, select, button[type=submit]")) input.disabled = true;
+    hide($("chatgpt-settings"));
+    hide($("chatgpt-save-hint"));
+    hide($("settings-error"));
+    $("settings").showModal();
+    return;
+  }
   $("settings-reason").textContent = S.aiConfig.reason || "";
   (S.aiConfig.reason ? show : hide)($("settings-reason"));
   hide($("settings-error"));
@@ -290,11 +320,11 @@ $("settings-form").addEventListener("submit", async (e) => {
 // ================= Library =================
 // Two sources: the papers folder, or the user's Zotero library (read-only, via Zotero's local API).
 let libSource = "folder";
-try { libSource = localStorage.getItem("libSource") || "folder"; } catch {}
+try { libSource = uiStorage.getItem("libSource") || "folder"; } catch {}
 
 function setLibSource(src) {
   libSource = src;
-  try { localStorage.setItem("libSource", src); } catch {}
+  try { uiStorage.setItem("libSource", src); } catch {}
   $("src-folder").classList.toggle("active", src === "folder");
   $("src-zotero").classList.toggle("active", src === "zotero");
   $("zot-controls").classList.toggle("hidden", src !== "zotero");
@@ -446,7 +476,7 @@ async function loadLibrary() {
     }
   } catch (err) {
     if (stale()) return;
-    list.innerHTML = '<li class="emptylib">Error: ' + err.message + "</li>";
+    list.innerHTML = '<li class="emptylib">Error: ' + esc(err.message) + "</li>";
   }
 }
 $("refresh").addEventListener("click", () => { zotCollectionsLoaded = false; loadLibrary(); });
@@ -476,6 +506,20 @@ $("file").addEventListener("change", async (e) => {
 
 // ================= Open document =================
 async function openDoc(meta) {
+  const generation = ++S.openGeneration;
+  const current = () => S.openGeneration === generation;
+  if (S.openAbort) S.openAbort.abort();
+  const controller = S.openAbort = new AbortController();
+  if (S.pdfLoading) S.pdfLoading.destroy().catch(() => {});
+  S.pdfLoading = null;
+  if (S.pageObs) S.pageObs.disconnect();
+  if (S.dropObs) S.dropObs.disconnect();
+  for (const P of S.pages) stopRender(P, true);
+  S.pdf = null;
+  S.pages = [];
+  $("pdfview").innerHTML = "";
+  if (S.translationAbort) S.translationAbort.abort();
+  S.trToken += 1;
   S.docId = meta.doc_id;
   S.numPages = meta.num_pages;
   setTitle(meta.title + (meta.byline ? "  ·  " + meta.byline : "") + "  ·  " + meta.num_pages + " pages");
@@ -494,28 +538,40 @@ async function openDoc(meta) {
   $("summary").innerHTML = "";
   $("chatlog").innerHTML = "";
   S.summaryLoaded = false;
-  S.anatomyLoaded = false; S.anatomyModel = null;
+  S.anatomyLoaded = false; S.anatomyModel = null; S.anatomyLoading = false;
   updateReviewBtn();
   $("anatomy").innerHTML = '<p class="hint" style="padding:6px">Open the Anatomy tab to analyze the paper (grounded in the source).</p>';
 
-  S.pdf = await pdfjsLib.getDocument("/api/pdf/" + meta.doc_id).promise;
+  try {
+    const source = await readerTransport.pdfSource(meta.doc_id, { signal: controller.signal });
+    if (!current()) return;
+    const loading = S.pdfLoading = pdfjsLib.getDocument(source);
+    const pdf = await loading.promise;
+    if (!current()) return;
+    S.pdf = pdf;
+  } catch (err) {
+    if (!current()) return;
+    throw err;
+  }
 
   // page 1 sizes the fit modes (scale 1 = 1 CSS px per PDF point)
-  const first = await S.pdf.getPage(1);
+  const first = await S.pdf.getPage(1).catch((err) => { if (current()) throw err; });
+  if (!current()) return;
   const vw = first.getViewport({ scale: 1 });
   S.page1 = { w: vw.width, h: vw.height };
   S.scale = zoomScale();
   showZoom();
 
-  await buildPageShells();  // MUST await: it fills S.pages (one getPage per page); translateAll's
+  await buildPageShells(generation);  // MUST await: it fills S.pages (one getPage per page); translateAll's
+  if (!current()) return;
   buildTrShells();          // producer reads S.pages[i], so it has to be fully built first.
   showPageNum();
   // Don't wait for the whole document's layout, or even for the whole first page. Reveal as soon
   // as (a) the FIRST translated sentence is painted and (b) a few pages of layout are buffered so
   // scrolling right away stays smooth. Translation (parallel pool) and layout prewarm both keep
   // running in the background after the reveal.
-  const token = S.docId;
   const setBar = (f) => {
+    if (!current()) return;
     const p = Math.round(100 * Math.max(0, Math.min(1, f)));
     $("prep-fill").style.width = p + "%";
     $("prep-text").textContent = p + "%";
@@ -535,9 +591,10 @@ async function openDoc(meta) {
     loadChat();     // this paper's saved Chat History
   }
   await Promise.all([firstSentence, waitLayout(Math.min(3, S.numPages))]);
-  if (S.docId !== token) return;
+  if (!current()) return;
   setBar(1);
   await sleep(150);
+  if (!current()) return;
   $("prep-overlay").classList.add("hidden");
 }
 
@@ -569,13 +626,17 @@ function resetObserver() {
   S.dropObs = new IntersectionObserver(onPageFar, { root: $("pdfview"), rootMargin: "3000px 0px" });
 }
 
-async function buildPageShells() {
+async function buildPageShells(generation = S.openGeneration) {
+  const pdf = S.pdf;
+  const count = S.numPages;
+  if (generation !== S.openGeneration) return;
   const view = $("pdfview");
   view.innerHTML = "";
   S.pages = [];
   resetObserver();
-  for (let i = 0; i < S.numPages; i++) {
-    const page = await S.pdf.getPage(i + 1);
+  for (let i = 0; i < count; i++) {
+    const page = await pdf.getPage(i + 1).catch((err) => { if (generation === S.openGeneration) throw err; });
+    if (generation !== S.openGeneration) return;
     const vp = page.getViewport({ scale: 1 });  // in points; setScale() resizes the shell
     const el = document.createElement("div");
     el.className = "pdfpage";
@@ -755,6 +816,8 @@ const trPool = () => (S.aiConfig && S.aiConfig.backend ? S.aiConfig.concurrency[
 async function translateAll(force) {
   if (!S.aiConfig || !S.aiConfig.backend) return;
   if (!S.docId || !$("autotr").checked) return;
+  if (S.translationAbort) S.translationAbort.abort();
+  S.translationAbort = new AbortController();
   const token = ++S.trToken;
   const targetLanguage = lang();
   S.rateLimited = null; hide($("ai-banner"));
@@ -899,6 +962,7 @@ async function streamTranslate(page, offset, texts, force, write, targetLanguage
   const res = await fetch("/api/translate_stream", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ doc_id: S.docId, page, target_lang: targetLanguage, segments: texts, force: !!force }),
+    signal: S.translationAbort && S.translationAbort.signal,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -907,18 +971,23 @@ async function streamTranslate(page, offset, texts, force, write, targetLanguage
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-      if (!line.trim()) continue;
-      let obj; try { obj = JSON.parse(line); } catch { continue; }
-      if (obj.error) throw obj.rate_limited ? new RateLimited(obj.error) : new Error(obj.error);
-      write(offset + obj.i, obj.tr);
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let obj; try { obj = JSON.parse(line); } catch { continue; }
+        if (obj.error) throw obj.rate_limited ? new RateLimited(obj.error) : new Error(obj.error);
+        write(offset + obj.i, obj.tr);
+      }
     }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 
@@ -1273,11 +1342,11 @@ $("autotr").addEventListener("change", () => { if ($("autotr").checked) translat
 $("retranslate").addEventListener("click", () => retranslateAll(true));
 
 // Translation panel text-size control (dynamic, persisted)
-let trScale = parseFloat(localStorage.getItem("trScale") || "1") || 1;
+let trScale = parseFloat(uiStorage.getItem("trScale") || "1") || 1;
 function applyTrScale() { try { $("trlist").style.zoom = trScale; } catch (e) {} }
 function bumpTrScale(d) {
   trScale = Math.max(0.7, Math.min(2.0, Math.round((trScale + d) * 10) / 10));
-  try { localStorage.setItem("trScale", String(trScale)); } catch (e) {}
+  try { uiStorage.setItem("trScale", String(trScale)); } catch (e) {}
   applyTrScale();
 }
 $("tr-smaller").addEventListener("click", () => bumpTrScale(-0.1));
@@ -1294,7 +1363,9 @@ function mdMath(text) {
     return "@@MATH" + (spans.length - 1) + "@@";
   });
   const escape = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return marked.parse(shielded).replace(/@@MATH(\d+)@@/g, (_, k) => escape(spans[Number(k)]));
+  if (!window.DOMPurify) throw new Error("Safe Markdown rendering is unavailable. Reload to try again.");
+  const html = marked.parse(shielded).replace(/@@MATH(\d+)@@/g, (_, k) => escape(spans[Number(k)] || ""));
+  return window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_TAGS: ["style"], FORBID_ATTR: ["style"] });
 }
 
 // copy-tex writes LaTeX to text/plain but keeps rendered math in text/html.
@@ -1368,6 +1439,7 @@ const ANAT = [
 const EV_SUB = [["dataset_test", "Dataset/Test"], ["metric", "Metric"], ["baseline", "Baseline"], ["ablation", "Ablation"]];
 
 async function loadAnatomy(force) {
+  const generation = S.openGeneration;
   if (!S.docId) return;
   if (!force && S.anatomyLoaded) return;
   if (S.anatomyLoading) return;  // already in flight (open + a tab click would double-fire)
@@ -1376,12 +1448,16 @@ async function loadAnatomy(force) {
   box.innerHTML = '<p class="loading" style="padding:6px">Analyzing structure… (grounded in the source, ~10-30s)</p>';
   try {
     const d = await postJSON("/api/anatomy", { output_language: lang(), doc_id: S.docId, force: !!force });
+    if (generation !== S.openGeneration) return;
     renderAnatomy(d); S.anatomyLoaded = true;
   } catch (err) {
-    box.innerHTML = '<p class="loading" style="padding:6px">Error: ' + err.message + "</p>";
+    if (generation !== S.openGeneration) return;
+    box.innerHTML = '<p class="loading" style="padding:6px">Error: ' + esc(err.message) + "</p>";
   } finally {
-    S.anatomyLoading = false;
-    updateReviewBtn();
+    if (generation === S.openGeneration) {
+      S.anatomyLoading = false;
+      updateReviewBtn();
+    }
   }
 }
 $("re-anatomy").addEventListener("click", () => { S.anatomyLoaded = false; loadAnatomy(true); });
@@ -1459,16 +1535,19 @@ function highlightQuote(quote) {
 // ================= Summary =================
 function resetSummary() { if (S.docId) { S.summaryLoaded = false; $("summary").innerHTML = ""; } }
 async function genSummary() {
+  const generation = S.openGeneration;
   if (!S.docId || S.summaryLoaded) return;
   S.summaryLoaded = true;
   $("summary").innerHTML = '<p class="loading">Summarizing… (first run can take a bit)</p>';
   try {
     const r = await postJSON("/api/summarize", { output_language: lang(), doc_id: S.docId });
+    if (generation !== S.openGeneration) return;
     $("summary").innerHTML = mdMath(r.summary);
     renderMath($("summary"));
   } catch (err) {
+    if (generation !== S.openGeneration) return;
     S.summaryLoaded = false;
-    $("summary").innerHTML = '<p class="loading">Error: ' + err.message + "</p>";
+    $("summary").innerHTML = '<p class="loading">Error: ' + esc(err.message) + "</p>";
   }
   updateReviewBtn();
 }
@@ -1487,9 +1566,12 @@ function updateReviewBtn() {
 
 $("export-review").addEventListener("click", async () => {
   if (!S.docId) return;
+  const error = $("review-error");
+  error.textContent = ""; hide(error);
   const btn = $("export-review"), label = btn.textContent;
   btn.disabled = true; btn.textContent = "생성 중…";
   try {
+    await readerTransport.assertDownloadSupported();
     const res = await fetch(`/api/review/${S.docId}?output_language=${encodeURIComponent(lang())}`, { method: "POST" });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
@@ -1498,22 +1580,20 @@ $("export-review").addEventListener("click", async () => {
     }
     const blob = await res.blob();
     const m = (res.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/);
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = m ? m[1] : "review.zip";
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(a.href);
+    await readerTransport.download(blob, m ? m[1] : "review.zip");
   } catch (e) {
-    alert("리뷰 생성 실패: " + e.message);
+    error.textContent = "리뷰 생성 실패: " + e.message; show(error);
   } finally {
     btn.disabled = false; btn.textContent = label;
   }
 });
 
 async function loadChat() {
+  const generation = S.openGeneration;
   $("chatlog").innerHTML = "";
   try {
     const r = await (await fetch(`/api/chat/${S.docId}`)).json();
+    if (generation !== S.openGeneration) return;
     for (const t of r.turns) {
       const div = addMsg(t.role === "user" ? "user" : "bot", t.text);
       if (t.role !== "user") { div.innerHTML = mdMath(t.text); renderMath(div); }
@@ -1645,7 +1725,7 @@ async function postForm(url, fd) {
 const PT_PX = 96 / 72;
 const ZOOM_STEPS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
 try {
-  const z = JSON.parse(localStorage.getItem("pdfZoom"));
+  const z = JSON.parse(uiStorage.getItem("pdfZoom"));
   if (z && ["width", "page", "pct"].includes(z.mode) && z.pct > 0) S.zoom = z;
 } catch (e) {}
 
@@ -1670,7 +1750,7 @@ function showZoom() {
 
 function setZoom(z, anchor) {
   S.zoom = z;
-  try { localStorage.setItem("pdfZoom", JSON.stringify(z)); } catch (e) {}
+  try { uiStorage.setItem("pdfZoom", JSON.stringify(z)); } catch (e) {}
   if (S.pdf && S.pages.length) setScale(zoomScale(), anchor);
   showZoom();
 }
@@ -1770,7 +1850,7 @@ function refitPdf() {
 
 (function initResizers() {
   const ws = document.querySelector(".workspace");
-  const c1 = localStorage.getItem("c1"), c3 = localStorage.getItem("c3");
+  const c1 = uiStorage.getItem("c1"), c3 = uiStorage.getItem("c3");
   try { if (c1) ws.style.setProperty("--c1", c1); if (c3) ws.style.setProperty("--c3", c3); } catch (e) {}
 
   function drag(handle, varName, fromRight) {
@@ -1786,7 +1866,7 @@ function refitPdf() {
         handle.classList.remove("active");
         document.removeEventListener("pointermove", move);
         document.removeEventListener("pointerup", up);
-        try { localStorage.setItem(varName === "--c1" ? "c1" : "c3", ws.style.getPropertyValue(varName)); } catch (e) {}
+        try { uiStorage.setItem(varName === "--c1" ? "c1" : "c3", ws.style.getPropertyValue(varName)); } catch (e) {}
         refitPdf();
       };
       document.addEventListener("pointermove", move);
@@ -1801,4 +1881,9 @@ let resizeT;
 window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(refitPdf, 300); });
 
 window.S = S; // expose for debugging
-loadConfig().finally(() => setLibSource(libSource));
+const configReady = loadConfig();
+configReady.finally(() => setLibSource(libSource));
+if (readerTransport.onDocument) readerTransport.onDocument((meta) => {
+  configReady.then(() => { if (S.docId !== meta.doc_id) return openDoc(meta); })
+    .catch((err) => setTitle("Open failed: " + err.message));
+});

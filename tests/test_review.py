@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from app import main, settings, store
+from app import main, service, settings, store
 
 DOC = {"pages": ["PAPER TEXT"], "meta": {"num_pages": 2, "title": "Fallback Title"}}
 
@@ -17,27 +17,28 @@ DOC = {"pages": ["PAPER TEXT"], "meta": {"num_pages": 2, "title": "Fallback Titl
 class ReviewHelperTests(unittest.TestCase):
     def test_slug_kebab_and_fallback(self):
         self.assertEqual(
-            main._slug("Attention Is All You Need", "d1"), "attention-is-all-you-need"
+            service._slug("Attention Is All You Need", "d1"),
+            "attention-is-all-you-need",
         )
-        self.assertEqual(main._slug("ReAlign: v2.0!", "d1"), "realign-v2-0")
+        self.assertEqual(service._slug("ReAlign: v2.0!", "d1"), "realign-v2-0")
         self.assertEqual(
-            main._slug("한글만", "deadbeef"), "deadbeef"
+            service._slug("한글만", "deadbeef"), "deadbeef"
         )  # no ASCII -> fallback
-        self.assertEqual(main._slug("", "deadbeef"), "deadbeef")
+        self.assertEqual(service._slug("", "deadbeef"), "deadbeef")
 
     def test_referenced_ids_first_seen_order_no_dupes(self):
         body = (
             "## 방법\n![구조](fig-p3-1.png)\n보조 표 ![](tbl-p8-2.png)\n"
             "다시 ![재언급](fig-p3-1.png)\n"
         )
-        self.assertEqual(main._referenced_ids(body), ["fig-p3-1", "tbl-p8-2"])
+        self.assertEqual(service._referenced_ids(body), ["fig-p3-1", "tbl-p8-2"])
 
     def test_yaml_value(self):
-        self.assertEqual(main._yaml_value(None), "")
-        self.assertEqual(main._yaml_value(True), "true")
-        self.assertEqual(main._yaml_value(2017), "2017")
-        self.assertEqual(main._yaml_value(["NLP", "CV"]), '["NLP", "CV"]')
-        self.assertEqual(main._yaml_value('a "b"'), '"a \\"b\\""')
+        self.assertEqual(service._yaml_value(None), "")
+        self.assertEqual(service._yaml_value(True), "true")
+        self.assertEqual(service._yaml_value(2017), "2017")
+        self.assertEqual(service._yaml_value(["NLP", "CV"]), '["NLP", "CV"]')
+        self.assertEqual(service._yaml_value('a "b"'), '"a \\"b\\""')
 
     def test_frontmatter_shape(self):
         rv = {
@@ -49,7 +50,7 @@ class ReviewHelperTests(unittest.TestCase):
             "tags": ["NLP"],
             "summary": "한 줄 요약",
         }
-        fm = main._frontmatter(rv, date="2026-10-12T09:00:00+09:00", has_math=True)
+        fm = service._frontmatter(rv, date="2026-10-12T09:00:00+09:00", has_math=True)
         self.assertTrue(fm.startswith("---\n"))
         self.assertIn('title: "ReAlign"', fm)
         self.assertIn("date: 2026-10-12T09:00:00+09:00", fm)  # unquoted
@@ -61,7 +62,7 @@ class ReviewHelperTests(unittest.TestCase):
         self.assertTrue(fm.rstrip().endswith("---"))
 
     def test_frontmatter_empty_year_and_lists(self):
-        fm = main._frontmatter({"title": "X"}, date="D", has_math=False)
+        fm = service._frontmatter({"title": "X"}, date="D", has_math=False)
         self.assertIn("year: \n", fm)  # None -> blank value
         self.assertIn("authors: []", fm)
         self.assertIn("tags: []", fm)
@@ -78,13 +79,13 @@ class ReviewEndpointTests(unittest.TestCase):
             patch.dict(os.environ, {"SUNDARK_SETTINGS": str(root / "settings.json")}),
             patch.object(store, "CACHE", root / "cache"),
             patch.object(store, "CHATS", root / "chats"),
-            patch("app.main._require_doc", return_value=DOC),
-            patch("app.main.store.pdf_path", return_value=pdf),
-            patch("app.main._get_brief", new=AsyncMock(return_value="")),
+            patch("app.service._require_doc", return_value=DOC),
+            patch("app.service.store.pdf_path", return_value=pdf),
+            patch("app.service._get_brief", new=AsyncMock(return_value="")),
             patch("app.main.ai.summarize", new=AsyncMock(return_value="SUMMARY")),
             patch("app.main.ai.anatomy", new=AsyncMock(return_value={})),
             patch(
-                "app.main.pdf_utils.figure_catalog",
+                "app.service.pdf_utils.figure_catalog",
                 return_value={
                     "figures": [
                         {
@@ -105,7 +106,7 @@ class ReviewEndpointTests(unittest.TestCase):
                     "has_math": True,
                 },
             ),
-            patch("app.main.pdf_utils.crop_region_png", return_value=b"PNGDATA"),
+            patch("app.service.pdf_utils.crop_region_png", return_value=b"PNGDATA"),
         ]
         for p in self.patches:
             p.start()
@@ -190,7 +191,7 @@ class ReviewEndpointTests(unittest.TestCase):
 
     def test_math_is_on_when_the_note_has_equations(self):
         catalog = {"figures": [], "has_math": False}
-        with patch("app.main.pdf_utils.figure_catalog", return_value=catalog):
+        with patch("app.service.pdf_utils.figure_catalog", return_value=catalog):
             for body, flag in (
                 ("손실은 $$L = x$$ 이다.", "true"),
                 ("인라인 \\(x\\) 수식.", "true"),

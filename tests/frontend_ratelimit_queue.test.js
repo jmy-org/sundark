@@ -19,7 +19,7 @@ const code = [line("class RateLimited"), fn("async function streamTranslate("), 
     $: () => el, hide: () => {}, lang: () => "Korean", sleep: async () => {}, paintFrontier: () => {},
     showRateLimit: () => {}, ensureLayout: async () => {}, fetchMath: async () => {}, trPool: () => 1,
     preparePage: (i) => [{ start: 0, texts: pages[i].segs.map((s) => s.text) }],
-    TextDecoder, JSON, Error, Array, Promise,
+    TextDecoder, JSON, Error, Array, Promise, AbortController,
     fetch: async () => { calls++; return new Response('{"error":"limit","rate_limited":true}\n'); },
   };
   vm.createContext(context);

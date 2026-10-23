@@ -39,7 +39,7 @@ class PaperStoreTests(unittest.TestCase):
         store.paper_put(pid, {"title": "T"})
         store.chat_put(pid, [{"role": "user", "text": "q"}])
         files = list((self.root / "papers").iterdir()) + list(
-            (self.root / "chats").iterdir()
+            (self.root / "chats").glob("*.json")
         )
         self.assertEqual(len(files), 2)
         for f in files:
@@ -75,3 +75,49 @@ class PaperStoreTests(unittest.TestCase):
             {"brief": "G"},
         )
         self.assertNotEqual(cid, store.paper_cache_id("arxiv:2506.09763"))
+
+    def test_json_replacement_keeps_old_complete_record_until_publication(self):
+        with patch.object(store, "DOCS", self.root / "docs"):
+            operations = (
+                (
+                    lambda value: store.cache_put("doc", "summary", value),
+                    lambda: store.cache_get("doc", "summary"),
+                ),
+                (
+                    lambda value: store.save_doc("doc", value),
+                    lambda: store.load_doc("doc"),
+                ),
+                (
+                    lambda value: store.paper_put("doi:example", value),
+                    lambda: store.paper_get("doi:example"),
+                ),
+            )
+            for write, read in operations:
+                with self.subTest(write=write):
+                    write({"text": "old"})
+                    replace = store.os.replace
+
+                    def inspect_then_fail(source, destination):
+                        self.assertEqual(read()["text"], "old")
+                        self.assertEqual(
+                            json.loads(Path(source).read_text())["text"], "new"
+                        )
+                        raise OSError("injected publication failure")
+
+                    with patch.object(
+                        store.os, "replace", side_effect=inspect_then_fail
+                    ):
+                        with self.assertRaises(OSError):
+                            write({"text": "new"})
+                    self.assertEqual(read()["text"], "old")
+
+                    def inspect_then_publish(source, destination):
+                        self.assertEqual(read()["text"], "old")
+                        return replace(source, destination)
+
+                    with patch.object(
+                        store.os, "replace", side_effect=inspect_then_publish
+                    ):
+                        write({"text": "new"})
+                    self.assertEqual(read()["text"], "new")
+            self.assertEqual(list(self.root.rglob("*.tmp")), [])

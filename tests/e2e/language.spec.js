@@ -11,6 +11,9 @@ test.beforeEach(async ({ page }) => {
       throw new Error(`Unexpected external request: ${url.hostname}`);
     return route.continue();
   });
+  await page.route("https://cdn.jsdelivr.net/npm/dompurify@3.4.17/dist/purify.min.js", async (route) => {
+    await route.fulfill({ path: require.resolve("dompurify/dist/purify.min.js") });
+  });
   await page.route("https://cdnjs.cloudflare.com/**", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     let file;

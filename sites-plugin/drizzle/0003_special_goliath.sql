@@ -1,1 +1,0 @@
-ALTER TABLE `analysis_artifacts` ADD `request_hash` text DEFAULT '' NOT NULL;

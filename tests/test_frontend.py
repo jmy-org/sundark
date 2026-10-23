@@ -27,6 +27,18 @@ class FrontendTests(unittest.TestCase):
     def test_output_language_settings_and_run_snapshot(self):
         self.node("tests/frontend_output_language.test.js")
 
+    def test_preferences_handle_denied_browser_storage(self):
+        self.node("tests/frontend_preference_storage.test.js")
+
+    def test_errors_are_rendered_as_text(self):
+        self.node("tests/frontend_error_html.test.js")
+
+    def test_document_open_fences_late_pdf_and_panel_results(self):
+        self.node("tests/frontend_open_generation.test.js")
+
+    def test_reader_transport_contract(self):
+        self.node("tests/frontend_transport.test.js")
+
     def test_markdown_keeps_latex_for_katex(self):
         self.node("tests/frontend_markdown_math.test.js")
 

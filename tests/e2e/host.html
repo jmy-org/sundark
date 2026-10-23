@@ -1,0 +1,56 @@
+<!doctype html>
+<title>Synthetic MCP Apps host</title>
+<style>body{margin:0}iframe{width:100vw;height:100vh;border:0}</style>
+<script>
+window.bridgeLog = [];
+window.forwardProgress = new URLSearchParams(location.search).get('progress') !== 'off';
+addEventListener('message', async (event) => {
+  const frame = document.querySelector('iframe');
+  if (event.source !== frame.contentWindow || event.data?.jsonrpc !== '2.0') return;
+  const message = event.data;
+  bridgeLog.push(message);
+  const send = (data) => frame.contentWindow.postMessage({jsonrpc:'2.0', ...data}, "*");
+  if (message.method === 'ui/initialize') {
+    send({id:message.id,result:{protocolVersion:'2026-01-26',hostInfo:{name:'synthetic-test-host',version:'1'},hostCapabilities:{downloadFile:{}}}});
+  } else if (message.method === 'ui/download-file') {
+    try {
+      const contents = message.params.contents;
+      if (!Array.isArray(contents) || contents.length !== 1) throw new Error('Invalid download contents');
+      const item = contents[0];
+      const resource = item.resource;
+      if (item.type !== 'resource' || resource.mimeType !== 'application/zip'
+          || !/^file:\/\/\/[a-zA-Z0-9_.-]+\.zip$/i.test(resource.uri)
+          || typeof resource.blob !== 'string') throw new Error('Invalid embedded ZIP');
+      const bytes = Uint8Array.from(atob(resource.blob), (c) => c.charCodeAt(0));
+      if (bytes.length > 12 * 1024 * 1024) throw new Error('Download too large');
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([bytes], {type:resource.mimeType}));
+      a.download = resource.uri.slice('file:///'.length);
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+      send({id:message.id,result:{}});
+    } catch (error) { send({id:message.id,error:{code:-32602,message:error.message}}); }
+  } else if (message.method === 'tools/call') {
+    try {
+      const response = await fetch('/__e2e/tool', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(message.params)});
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let pending = '';
+      for (;;) {
+        const {done,value} = await reader.read();
+        if (done) break;
+        pending += value;
+        let newline;
+        while ((newline = pending.indexOf('\n')) >= 0) {
+          const data = JSON.parse(pending.slice(0,newline));
+          pending = pending.slice(newline+1);
+          if (data.result) send({id:message.id,result:data.result});
+          else if (forwardProgress && message.params._meta?.progressToken) {
+            send({method:'notifications/progress',params:{...data,progressToken:message.params._meta.progressToken}});
+          }
+          bridgeLog.push({tool:message.params.name,...data});
+        }
+      }
+    } catch (error) { send({id:message.id,error:{code:-32603,message:error.message}}); }
+  }
+});
+</script>
+<iframe sandbox="allow-scripts allow-forms" title="Sundark embedded reader" src="/__e2e/reader"></iframe>

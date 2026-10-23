@@ -145,17 +145,74 @@ AI features stay off.
 
 ```
 app/
-  main.py        FastAPI routes + static serving + library/open/pdf endpoints
+  main.py        HTTP routes and static serving
+  mcp_server.py  MCP tools, shared reader resource and bounded file transfers
+  service.py     shared document, task, cache and chat use cases; no HTTP framework
   ai.py          every prompt; picks the model for each task from settings
   settings.py    AI Backend, model per task, concurrency (data/settings.json)
   backends/      one module per AI Backend (claude.py, hermes.py, chatgpt.py); only place AI runs
   pdf_utils.py   PyMuPDF text extraction
   store.py       local PDF + result cache
-web/             static reader UI (pdf.js + marked, no build step)
+web/             shared static reader UI and transport adapters (no build step)
 site/            public landing page, deployed separately to GitHub Pages
 papers/          your PDFs (gitignored)
 data/            runtime cache (gitignored)
 ```
+
+The reader presentation and AI backend are independent choices. Local ChatGPT
+sign-in, Claude Code and Hermes execute through the same service and prompt
+boundary. Plugin adapters use that service rather than implementing another
+parser, prompt set or permanent batch-result database.
+
+The personal core needs no SQL database: PDFs and derived results use file
+storage, while chat belongs to the Paper ID. A hosted owner-scoped library may
+need a small metadata index; large document and result payloads do not belong in
+that index. See [the shared-core and storage decision](docs/adr/0003-shared-core-and-storage.md)
+for existing port limits, durability requirements and outstanding validation.
+
+### MCP presentation
+
+The MCP adapter calls the same application service and selected AI backend as
+the HTTP reader. It returns the `web/` reader as an MCP Apps resource rather than
+maintaining a separate reader implementation. No D1 or R2 binding is needed.
+
+For a local MCP client that supports stdio, configure its server command to run
+from this checkout:
+
+```sh
+uv run python -m app.mcp_server
+```
+
+For local Streamable HTTP testing:
+
+```sh
+uv run python -m app.mcp_server --http
+```
+
+This starts a separate loopback-only MCP server on port 8744. It requires a
+bearer token (generated at startup if `SUNDARK_MCP_TOKEN` is unset) and does not
+serve the unauthenticated reader HTTP routes. This is a server access credential,
+not an inference API key. Keep subscription account sign-in and backend settings
+in the local reader. Both entrypoints require the same layout model as the
+reader; missing model dependencies fail startup rather than selecting another
+parser.
+
+PDF uploads and review ZIP downloads use temporary, bounded chunk transfers:
+20 MiB per uploaded PDF, 12 MiB per review bundle, and at most 1 MiB per chunk.
+Transfers are not permanent analysis-history records. The local HTTP upload and
+export paths keep their existing behavior. Native MCP progress can reveal
+translation events immediately when the host forwards it; otherwise each
+completed paragraph batch replays the same events through the ordered frontier.
+MCP exports use the host's standard `ui/download-file` capability; unsupported
+hosts are reported before generating a review. UI preference storage falls back
+to session memory when a sandbox denies `localStorage`.
+
+These commands do not connect ChatGPT web to a loopback address. Remote
+connectivity, production authorization and actual host rendering are separate
+deployment/verification steps; no public listener or tunnel is configured.
+The independent Sites runtime has been retired from this checkout. Its source
+remains in [the original port commit](https://github.com/jmy-org/sundark/tree/df174cacf924c31df710750219b058199d254391/sites-plugin)
+and Git history. No deployed D1/R2 data is deleted or migrated by this change.
 
 ## Config
 

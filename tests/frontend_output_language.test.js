@@ -9,6 +9,7 @@ const fn = (name) => { const i = src.indexOf(name); assert.ok(i >= 0, name); ret
   let language = "Japanese";
   const received = [];
   const context = {
+    AbortController,
     S: { aiConfig: { backend: "claude" }, docId: "doc", trToken: 0, numPages: 3, pages: [{}, {}, {}] },
     $: () => ({ checked: true }), hide() {}, lang: () => language,
     ensureLayout: async () => { language = "English"; },
@@ -22,12 +23,17 @@ const fn = (name) => { const i = src.indexOf(name); assert.ok(i >= 0, name); ret
   await context.translateAll();
   assert.deepEqual(received, ["Japanese", "Japanese", "Japanese"], "every queued batch uses the run's original language");
 
+  const previous = context.S.translationAbort;
+  await context.translateAll();
+  assert.equal(previous.signal.aborted, true, "a new translation run cancels the previous transport");
+
   const nodes = new Map();
   const node = (id) => {
     if (!nodes.has(id)) nodes.set(id, { value: "", textContent: "", innerHTML: "", appendChild() {}, replaceChildren(...children) { this.children = children; }, showModal() {} });
     return nodes.get(id);
   };
   const settings = {
+    readerTransport: { mode: "http" },
     S: { aiConfig: { backend: "claude", output_language: "French", output_languages: ["Korean", "French"], backends: [{ id: "claude", label: "Claude", installed: true }] } },
     $: node, document: { createElement: () => ({}) }, lang: () => "French", fillModels() {}, hide() {}, show() {}, refreshChatGPT() {},
   };

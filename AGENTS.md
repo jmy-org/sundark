@@ -19,7 +19,7 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   (`app/paper_id.py`: `doi:`, `arxiv:`, `zotero:`, or `file:<doc_id>`) keys Chat History and
   the translation glossary. `app/biblio.py` fetches the Bibliographic Record and rejects a
   DOI whose record title is not on the first page (a cited work's DOI). Zotero integration
-  calls `main._ingest(data, {"key": ..., "doi": ...})`; Zotero's DOI wins. A record title is
+  calls `service._ingest(data, {"key": ..., "doi": ...})`; Zotero's DOI wins. A record title is
   shown through `biblio.plain_title` (arXiv titles carry TeX, "$\alpha_1$-Net", CrossRef
   titles HTML tags). Before a paper is opened, the library title is `pdf_utils.title_of`:
   page 0's largest lines, a line sized by the size most of its characters use (a larger
@@ -55,9 +55,15 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   torchvision must come from the SAME index (mixing a CPU torch with a default
   torchvision fails at import with `torchvision::nms does not exist`).
 - **`app/main.py`** is FastAPI: upload/library, `/api/layout`, streaming
-  translation, summarize, anatomy, chat. **`web/`** is plain JS + pdf.js + KaTeX,
+  translation, summarize, anatomy, chat. These routes delegate document and task
+  use cases to **`app/service.py`**, which is independent of HTTP response types.
+  **`web/`** is plain JS + pdf.js + KaTeX,
   no build step. Highlighting maps server word coordinates (PDF points) to the
   viewport, so highlights are sentence-accurate.
+- **`app/mcp_server.py`** is a thin MCP adapter over the same application service.
+  Its MCP Apps resource embeds `web/`; `web/transport.js` changes transport, not
+  parsing, prompts or storage rules. Keep subscription account management local.
+  Temporary upload/download transfers are bounded and are not database records.
 - **`app/store.py`** persists uploads + cached AI results under `data/`.
 
 ## Security (do not weaken)
@@ -183,7 +189,7 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   `formula` box; consecutive such lines (one box spans the whole equation) group into
   one segment, which gives a whole-equation crop.
 - Results are cached per paper/model under `data/`, so reopening is instant. The
-  layout cache key carries `_LAYOUT_VERSION` (in `main.py`) — bump it when `layout()`
+  layout cache key carries `_LAYOUT_VERSION` (in `service.py`) — bump it when `layout()`
   changes what it emits, and old cached pages are bypassed instead of silently
   reused. Translation caches on a signature of the exact segments, so it follows a
   layout change automatically. Wipe `data/` only when you want a clean rebuild.
