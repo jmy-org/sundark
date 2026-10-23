@@ -55,6 +55,25 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(len(versions), 1, versions)
         self.assertIn(f"KaTeX/{versions.pop()}/contrib/copy-tex.min.js", html)
 
+    def test_upload_is_reachable_by_keyboard(self):
+        # A `hidden` file input is display:none, so Tab skipped Upload. The input stays
+        # rendered (visually hidden) and the label shows its keyboard focus.
+        import re
+
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+        label = re.search(r'<label class="upload-btn">(.*?)</label>', html, re.S)
+        assert label, "the file input sits inside the Upload label"
+        tag = re.search(r'<input id="file"[^>]*>', label.group(1))
+        assert tag
+        self.assertNotRegex(tag.group(0), r"\s(hidden|tabindex|role)[\s=/>]")
+        rule = re.search(r"\.upload-btn input\s*\{([^}]*)\}", css)
+        assert rule, "the file input is visually hidden, not display:none"
+        self.assertNotRegex(rule.group(1), r"display:\s*none|visibility:\s*hidden")
+        self.assertRegex(
+            css, r"\.upload-btn:has\(input:focus-visible\)\s*\{[^}]*outline:"
+        )
+
     def test_unrenderable_math_is_not_swapped_in(self):
         self.node("tests/frontend_math_guard.test.js")
 
