@@ -97,9 +97,11 @@ class _Fake:
     def __init__(self, block=False):
         self.block = block
         self.calls = 0
+        self.model = None
 
     async def run(self, prompt, *, model, system=None, images=()):
         self.calls += 1
+        self.model = model
         if self.block:
             await asyncio.sleep(3600)
         return "ok"
@@ -255,6 +257,34 @@ class AiLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.free("ai-hermes-0.lock"))
         blocked.block = False
         self.assertEqual(await asyncio.wait_for(ai.explain("x"), DEADLINE), "ok")
+
+    async def test_a_probe_waits_for_a_slot_of_its_own_backend(self):
+        fake = _Fake()
+        self.use(1, fake)
+        await self.spawn("hold")
+        await self.wait_for(lambda: self.count("held-*") == 1)
+
+        # Cancelled while it waits on the gate, it leaves the gate free and never ran.
+        waiter = asyncio.create_task(ai.probe("hermes", "m1"))
+        await self.wait_for(lambda: not self.free("ai-hermes.gate"))
+        waiter.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+        self.assertTrue(self.free("ai-hermes.gate"))
+        self.assertEqual(fake.calls, 0)
+
+        # Another backend has slots of its own.
+        await asyncio.wait_for(ai.probe("claude", "m2"), DEADLINE)
+        self.assertEqual((fake.calls, fake.model), (1, "m2"))
+
+        probe = asyncio.create_task(ai.probe("hermes", "m1"))
+        await asyncio.sleep(0.3)
+        self.assertFalse(probe.done())
+        self.assertEqual(fake.calls, 1)
+        self.procs[0].kill()
+        await asyncio.wait_for(probe, DEADLINE)
+        self.assertEqual((fake.calls, fake.model), (2, "m1"))
+        self.assertTrue(self.free("ai-hermes-0.lock"))
 
     async def test_a_busy_process_does_not_starve_another(self):
         self.use(1)

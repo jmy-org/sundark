@@ -278,7 +278,8 @@ async def _run(task: str, prompt: str, system: str | None, images=()) -> str:
 
 
 async def probe(backend: str, model_id: str) -> None:
-    await backends.get(backend).run("Reply with: ok", model=model_id, system=None)
+    async with _limit(backend):
+        await backends.get(backend).run("Reply with: ok", model=model_id, system=None)
 
 
 def _language(target_lang: str) -> str:

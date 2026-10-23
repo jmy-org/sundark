@@ -140,7 +140,7 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   arrival (`{"i": len(collected)}`). A drifted stream therefore errors instead of being shown or
   cached. A failed batch falls back to the source text for its range so it cannot stall the
   frontier. Every AI call is bounded per backend in `app/ai.py` by the same concurrency
-  setting, which also covers summary/anatomy, across every process that shares the settings
+  setting, which also covers summary/anatomy and the Settings model check, across every process that shares the settings
   file (the reader and MCP servers): an in-process semaphore, then file-lock slots in `.locks`
   next to the settings file. Never start an AI call while holding a slot. A rate limit
   (`RateLimitError`, HTTP 429, or a stream line with `rate_limited`) stops the remaining
