@@ -357,6 +357,14 @@ _OPS = {
         idempotent_hint=False,
         open_world_hint=False,
     ),
+    # The last step of a chunked upload: it opens the paper, as "open" does, but consumes
+    # the upload ID, so a retry finds it gone.
+    "ingest": ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
     "delete": ToolAnnotations(
         read_only_hint=False,
         destructive_hint=True,
@@ -364,7 +372,12 @@ _OPS = {
         open_world_hint=False,
     ),
 }
-_OPERATION = {"open": "cache", "transfer": "cache", "delete": "write"}
+_OPERATION = {
+    "open": "cache",
+    "transfer": "cache",
+    "ingest": "cache",
+    "delete": "write",
+}
 
 
 def _failure(exc: Exception) -> tuple[int, str, bool] | None:
@@ -576,7 +589,7 @@ def build_server(
         return uploads.chunk(upload_id, offset, data_base64)
 
     @tool(
-        "open", "Validate and ingest a complete upload; consumes upload_id.", app_only
+        "ingest", "Validate and ingest a complete upload; consumes upload_id.", app_only
     )
     @_core
     async def finish_upload(upload_id: str) -> Result:

@@ -88,9 +88,12 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
             if ops[name] == "generate":
                 self.assertTrue(a.open_world_hint, name)
         self.assertTrue(tools["chat_reset"].annotations.destructive_hint)
-        # A retried upload step is not harmless: it opens another upload or cancels this one.
-        for name in ("begin_upload", "upload_chunk"):
+        # A retried upload step is not harmless: it opens another upload or cancels this
+        # one, and finishing consumes the upload ID, so a retry finds it gone.
+        for name in ("begin_upload", "upload_chunk", "finish_upload"):
             self.assertFalse(tools[name].annotations.idempotent_hint, name)
+        # Finishing ingests the paper, which looks its DOI/arXiv record up online.
+        self.assertTrue(tools["finish_upload"].annotations.open_world_hint)
         self.assertTrue(tools["cancel_upload"].annotations.idempotent_hint)
         # The reader's page data and bytes serve only the reader; opening shows it.
         ui = {n: t.meta.get("ui", {}).get("visibility") for n, t in tools.items()}

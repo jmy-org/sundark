@@ -550,21 +550,38 @@ async function openDoc(meta) {
     const pdf = await loading.promise;
     if (!current()) return;
     S.pdf = pdf;
+
+    // page 1 sizes the fit modes (scale 1 = 1 CSS px per PDF point)
+    const first = await S.pdf.getPage(1).catch((err) => { if (current()) throw err; });
+    if (!current()) return;
+    const vw = first.getViewport({ scale: 1 });
+    S.page1 = { w: vw.width, h: vw.height };
+    S.scale = zoomScale();
+    showZoom();
+
+    await buildPageShells(generation);  // MUST await: it fills S.pages (one getPage per page); translateAll's
+    if (!current()) return;
   } catch (err) {
     if (!current()) return;
+    // The paper could not be read (lost bridge, bad chunk, broken page): give the library back
+    // instead of leaving the loading screen over it, and forget the paper so a retry reopens it.
+    if (S.pdfLoading) S.pdfLoading.destroy().catch(() => {});
+    S.pdfLoading = null;
+    // A later page can fail after the earlier shells are observed and drawing: stop them first.
+    if (S.pageObs) S.pageObs.disconnect();
+    if (S.dropObs) S.dropObs.disconnect();
+    for (const P of S.pages) stopRender(P, true);
+    S.pdf = null;
+    S.pages = [];
+    S.docId = null;
+    $("pdfview").innerHTML = "";
+    $("pdfcol").classList.add("hidden");
+    $("aipanel").classList.add("hidden");
+    $("empty").classList.remove("hidden");
+    showPane("library");
+    ov.classList.add("hidden");
     throw err;
   }
-
-  // page 1 sizes the fit modes (scale 1 = 1 CSS px per PDF point)
-  const first = await S.pdf.getPage(1).catch((err) => { if (current()) throw err; });
-  if (!current()) return;
-  const vw = first.getViewport({ scale: 1 });
-  S.page1 = { w: vw.width, h: vw.height };
-  S.scale = zoomScale();
-  showZoom();
-
-  await buildPageShells(generation);  // MUST await: it fills S.pages (one getPage per page); translateAll's
-  if (!current()) return;
   buildTrShells();          // producer reads S.pages[i], so it has to be fully built first.
   showPageNum();
   // Don't wait for the whole document's layout, or even for the whole first page. Reveal as soon
@@ -656,16 +673,24 @@ async function buildPageShells(generation = S.openGeneration) {
   }
 }
 
+// An entry queued before a disconnect can still arrive; it names a shell that is gone, or one of
+// the previous paper, so it is only acted on while its target is still that page's shell.
+function shellOf(e) {
+  const P = S.pages[+e.target.dataset.page];
+  return P && P.el === e.target ? P : null;
+}
+
 function onPageVisible(entries) {
   for (const e of entries) {
-    if (!e.isIntersecting) continue;
+    if (!e.isIntersecting || !shellOf(e)) continue;
     ensureRendered(+e.target.dataset.page);
   }
 }
 
 function onPageFar(entries) {
   for (const e of entries) {
-    if (!e.isIntersecting) stopRender(S.pages[+e.target.dataset.page], true);
+    const P = shellOf(e);
+    if (!e.isIntersecting && P) stopRender(P, true);
   }
 }
 

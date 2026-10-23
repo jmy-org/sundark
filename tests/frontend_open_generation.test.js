@@ -179,3 +179,280 @@ async function scenario(stage, rejected = false) {
   console.error(e);
   process.exitCode = 1;
 });
+
+// A failed open must not leave the full-screen loading overlay over the library, and a stale
+// failure must not clear the overlay of the paper opened after it.
+(async () => {
+  const classes = (hidden) => {
+    const set = new Set(hidden ? ["hidden"] : []);
+    return { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c) };
+  };
+  async function run(stage, { stale = false } = {}) {
+    const elements = new Map(),
+      gateB = deferred(),
+      fail = { A: true };
+    const element = (id) => ({
+      innerHTML: "",
+      style: {},
+      dataset: {},
+      classList: classes(["prep-overlay", "pdfcol", "aipanel"].includes(id)),
+      appendChild() {},
+    });
+    const S = { openGeneration: 0, trToken: 0, pages: [], aiConfig: null };
+    let pane = "library";
+    const broken = (id, at) => fail[id] && stage === at;
+    const pdf = (id) => ({
+      id,
+      async getPage(n) {
+        if (id === "B") await gateB.promise;
+        if (broken(id, "first") || (n === 1 && broken(id, "shell") && this.firstDone))
+          throw new Error("page failed");
+        this.firstDone = true;
+        return { getViewport: () => ({ width: 100, height: 100 }) };
+      },
+    });
+    const ctx = {
+      S,
+      AbortController,
+      Promise,
+      $: (id) => {
+        if (!elements.has(id)) elements.set(id, element(id));
+        return elements.get(id);
+      },
+      readerTransport: {
+        async pdfSource(id) {
+          if (broken(id, "transfer")) throw new Error("bridge lost");
+          return id;
+        },
+      },
+      pdfjsLib: {
+        getDocument(id) {
+          return {
+            promise: broken(id, "loading")
+              ? Promise.reject(new Error("bad chunk"))
+              : Promise.resolve(pdf(id)),
+            destroy: () => Promise.resolve(),
+          };
+        },
+      },
+      document: { createElement: () => element() },
+      setTitle() {},
+      showPane(name) {
+        pane = name;
+      },
+      updateReviewBtn() {},
+      zoomScale: () => 1,
+      showZoom() {},
+      showPageNum() {},
+      resetObserver() {
+        S.pageObs = S.dropObs = { observe() {}, disconnect() {} };
+      },
+      stopRender() {},
+      buildTrShells() {},
+      waitLayout: () => Promise.resolve(),
+      sleep: () => Promise.resolve(),
+    };
+    vm.createContext(ctx);
+    vm.runInContext(fn("openDoc") + fn("buildPageShells"), ctx);
+    const hidden = (id) => ctx.$(id).classList.contains("hidden");
+    const a = ctx.openDoc({ doc_id: "A", num_pages: 1 });
+    if (stale) {
+      // B opens while A is still in flight, then A fails: B's overlay must stay up.
+      const b = ctx.openDoc({ doc_id: "B", num_pages: 1 });
+      const settled = await a.then(
+        () => null,
+        (e) => e,
+      );
+      assert.equal(hidden("prep-overlay"), false, stage + ": stale failure cleared the overlay");
+      assert.equal(settled, null, stage + ": stale failure surfaced");
+      assert.equal(S.docId, "B");
+      gateB.resolve();
+      await b;
+      assert.equal(hidden("prep-overlay"), true);
+      return;
+    }
+    await assert.rejects(a, /bridge lost|bad chunk|page failed/);
+    assert.equal(hidden("prep-overlay"), true, stage + ": overlay left over the screen");
+    assert.equal(hidden("empty"), false);
+    assert.equal(hidden("pdfcol"), true);
+    assert.equal(hidden("aipanel"), true);
+    assert.equal(pane, "library");
+    assert.equal(S.docId, null);
+    assert.equal(S.pdf, null);
+    assert.equal(S.pages.length, 0);
+    // Retrying the same paper (from the library or the host) opens it.
+    fail.A = false;
+    await ctx.openDoc({ doc_id: "A", num_pages: 1 });
+    assert.equal(hidden("prep-overlay"), true);
+    assert.equal(hidden("pdfcol"), false);
+    assert.equal(S.docId, "A");
+    assert.equal(S.pages.length, 1);
+  }
+  for (const stage of ["transfer", "loading", "first", "shell"]) {
+    await run(stage);
+    await run(stage, { stale: true });
+  }
+  console.log("Failed open clears the overlay; stale failures leave it PASS");
+})().catch((e) => {
+  console.error(e);
+  process.exitCode = 1;
+});
+
+// A later page can fail after earlier shells are observed and drawing: the failed open must stop
+// those observers and renders, and a callback the old observers had already queued must not touch
+// the cleared pages or the pages of the paper opened next.
+(async () => {
+  const plain = (name) => {
+    const start = src.indexOf(`function ${name}(`);
+    return src.slice(start, src.indexOf("\n}\n", start) + 3);
+  };
+  const gate = deferred(),
+    renders = [],
+    observers = [];
+  let failing = true,
+    drawn = 0;
+  const element = () => ({
+    innerHTML: "",
+    style: {},
+    dataset: {},
+    classList: { add() {}, remove() {}, contains: () => false },
+    appendChild() {},
+    querySelector: () => null,
+    insertBefore() {
+      drawn++;
+    },
+    remove() {},
+    getContext: () => ({}),
+  });
+  const elements = new Map();
+  const S = { openGeneration: 0, trToken: 0, pages: [], aiConfig: null };
+  class IntersectionObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.targets = new Set();
+      observers.push(this);
+    }
+    observe(el) {
+      this.targets.add(el);
+    }
+    unobserve(el) {
+      this.targets.delete(el);
+    }
+    disconnect() {
+      this.targets.clear();
+      this.disconnected = true;
+    }
+    // An entry the browser queued for this observer, delivered now.
+    fire(target, isIntersecting) {
+      this.callback([{ target, isIntersecting }], this);
+    }
+  }
+  const page = {
+    getViewport: () => ({ width: 100, height: 100 }),
+    render() {
+      const task = deferred();
+      const r = {
+        promise: task.promise,
+        cancel() {
+          r.cancelled = true;
+          task.reject(new Error("cancelled"));
+        },
+        finish: task.resolve,
+      };
+      renders.push(r);
+      return r;
+    },
+  };
+  const ctx = {
+    S,
+    AbortController,
+    Promise,
+    IntersectionObserver,
+    MAX_CANVAS_PX: 2 ** 24,
+    window: { devicePixelRatio: 1 },
+    $: (id) => {
+      if (!elements.has(id)) elements.set(id, element());
+      return elements.get(id);
+    },
+    readerTransport: { pdfSource: async (id) => id },
+    pdfjsLib: {
+      getDocument: () => ({
+        promise: Promise.resolve({
+          async getPage(n) {
+            if (n === 2 && failing && ++this.calls === 1) {
+              await gate.promise;
+              throw new Error("page 2 failed");
+            }
+            return page;
+          },
+          calls: 0,
+        }),
+        destroy: () => Promise.resolve(),
+      }),
+    },
+    document: { createElement: element },
+    setTitle() {},
+    showPane() {},
+    updateReviewBtn() {},
+    zoomScale: () => 1,
+    showZoom() {},
+    showPageNum() {},
+    buildTrShells() {},
+    ensureLayout: () => Promise.resolve(),
+    attachPdfHover() {},
+    waitLayout: () => Promise.resolve(),
+    sleep: () => Promise.resolve(),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    fn("openDoc") +
+      fn("buildPageShells") +
+      fn("ensureRendered") +
+      ["resetObserver", "shellOf", "onPageVisible", "onPageFar", "stopRender"].map(plain).join(""),
+    ctx,
+  );
+  const tick = async () => {
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+  };
+  const a = ctx.openDoc({ doc_id: "A", num_pages: 2 });
+  await tick();
+  // Page 1's shell is built and observed, and its drawing starts, while page 2 is still loading.
+  const [visible, far] = observers;
+  const shell = S.pages[0].el;
+  assert.equal(visible.targets.has(shell) && far.targets.has(shell), true);
+  visible.fire(shell, true);
+  await tick();
+  assert.equal(renders.length, 1);
+  gate.resolve();
+  await assert.rejects(a, /page 2 failed/);
+  assert.equal(visible.disconnected && far.disconnected, true, "page observers left attached");
+  assert.equal(renders[0].cancelled, true, "page 1 render left running");
+  // Entries the old observers queued before the failure arrive after it.
+  far.fire(shell, false);
+  visible.fire(shell, true);
+  await tick();
+  assert.equal(renders.length, 1, "a cleared page started drawing");
+  assert.equal(drawn, 0, "a cleared page was drawn");
+
+  // The same paper opens on retry, and the old observers' queued entries leave it alone.
+  failing = false;
+  await ctx.openDoc({ doc_id: "A", num_pages: 2 });
+  assert.equal(S.pages.length, 2);
+  const [nextVisible] = observers.slice(2);
+  nextVisible.fire(S.pages[0].el, true);
+  await tick();
+  renders[1].finish();
+  await tick();
+  assert.equal(drawn, 1);
+  const P = S.pages[0],
+    gen = P.gen;
+  far.fire(shell, false);
+  visible.fire(shell, true);
+  await tick();
+  assert.equal(P.gen, gen, "a stale entry released the new paper's page");
+  assert.equal(renders.length, 2);
+  console.log("A later page failure stops the earlier pages' observers and renders PASS");
+})().catch((e) => {
+  console.error(e);
+  process.exitCode = 1;
+});
