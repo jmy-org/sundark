@@ -1,11 +1,15 @@
+import asyncio
 import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -228,6 +232,151 @@ class ServiceTests(_StoreDirs, unittest.IsolatedAsyncioTestCase):
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             self.assertEqual(z.namelist(), ["my-note/index.md"])
             self.assertIn("Body.", z.read("my-note/index.md").decode())
+
+
+_HOLD_CHAT_LOCK = """
+import select, sys
+from pathlib import Path
+from app import store
+store.CHATS = Path(sys.argv[1])
+with store._chat_lock(store.CHATS / sys.argv[2]):
+    print("held", flush=True)
+    select.select([sys.stdin], [], [], float(sys.argv[3]))
+"""
+
+
+class ChatMigrationLoopTests(_StoreDirs, unittest.IsolatedAsyncioTestCase):
+    """Another process holding a chat lock must not stall the event loop."""
+
+    async def while_chat_lock_held(self, name, make_call):
+        """Run `make_call()` while another process holds `name`'s chat lock; return its
+        result and the longest stall a ticker on the loop saw."""
+        store.CHATS.mkdir(exist_ok=True)
+        # The holder lets go by itself after 3s, so a blocked loop still ends.
+        holder = subprocess.Popen(
+            [sys.executable, "-c", _HOLD_CHAT_LOCK, str(store.CHATS), name, "3"],
+            cwd=ROOT,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        ticks = []
+
+        async def ticker():
+            while True:
+                ticks.append(time.monotonic())
+                await asyncio.sleep(0.02)
+
+        tick = asyncio.create_task(ticker())
+        try:
+            line = await asyncio.wait_for(asyncio.to_thread(holder.stdout.readline), 30)
+            self.assertEqual(line.strip(), "held")
+            call = asyncio.create_task(make_call())
+            await asyncio.sleep(0.5)
+            self.assertFalse(call.done())
+            holder.stdin.write("go\n")
+            holder.stdin.flush()
+            result = await asyncio.wait_for(call, 10)
+            await asyncio.to_thread(holder.wait, 10)
+        finally:
+            tick.cancel()
+            if holder.poll() is None:
+                holder.kill()
+            holder.communicate()
+        return result, max(b - a for a, b in zip(ticks, ticks[1:]))
+
+    async def reopen_from_zotero(self, held):
+        pdf = make_pdf(["Locked Paper\nBody."])
+        doc_id = store.doc_id_for(pdf)
+        with patch("app.biblio.lookup", new=AsyncMock(return_value=None)):
+            await service._ingest(pdf)
+            legacy, previous = held(doc_id)
+            meta, stall = await self.while_chat_lock_held(
+                legacy.name,
+                lambda: service._ingest(pdf, {"key": "K", "doi": "10.5555/z"}),
+            )
+        self.assertLess(stall, 0.25)
+        self.assertEqual(meta["paper_id"], "doi:10.5555/z")
+        self.assertEqual(store.load_doc(doc_id)["meta"]["paper_id"], "doi:10.5555/z")
+        self.assertEqual(store.chat_get("doi:10.5555/z"), [{"text": "kept"}])
+        return doc_id, previous
+
+    async def test_identity_waits_for_a_held_legacy_chat_off_the_loop(self):
+        def held(doc_id):
+            legacy = store.CHATS / f"{doc_id}.json"
+            legacy.write_text(json.dumps([{"text": "kept"}]))
+            return legacy, legacy
+
+        _, legacy = await self.reopen_from_zotero(held)
+        self.assertFalse(legacy.exists())
+
+    async def test_identity_waits_for_a_held_previous_chat_off_the_loop(self):
+        def held(doc_id):
+            store.chat_put(f"file:{doc_id}", [{"text": "kept"}])
+            path = store._chat_path(f"file:{doc_id}")
+            return path, path
+
+        doc_id, _ = await self.reopen_from_zotero(held)
+        self.assertEqual(store.chat_get(f"file:{doc_id}"), [])
+
+    async def test_identity_cancelled_while_queued_keeps_paper_and_chat_together(self):
+        pdf = make_pdf(["Locked Paper\nBody."])
+        doc_id = store.doc_id_for(pdf)
+        loop = asyncio.get_running_loop()
+        pool = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(pool)
+        busy = threading.Event()
+        with patch("app.biblio.lookup", new=AsyncMock(return_value=None)):
+            await service._ingest(pdf)
+            store.chat_put(f"file:{doc_id}", [{"text": "kept"}])
+            occupied = asyncio.ensure_future(asyncio.to_thread(busy.wait, 10))
+            try:
+                opening = asyncio.create_task(
+                    service._ingest(pdf, {"key": "K", "doi": "10.5555/z"})
+                )
+                for _ in range(200):
+                    if pool._work_queue.qsize() or opening.done():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(pool._work_queue.qsize(), 1)
+                opening.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await opening
+            finally:
+                busy.set()
+                await occupied
+                pool.shutdown(wait=True)
+        pid = store.load_doc(doc_id)["meta"]["paper_id"]
+        self.assertEqual(store.chat_get(pid), [{"text": "kept"}])
+
+    async def test_review_waits_for_a_held_legacy_chat_off_the_loop(self):
+        self.put_doc()
+        store.CHATS.mkdir()
+        legacy = store.CHATS / "d.json"
+        legacy.write_text(json.dumps([{"text": "kept"}]))
+        pdf = self.root / "x.pdf"
+        pdf.write_bytes(b"%PDF")
+        review = AsyncMock(return_value={"title": "My Note", "body": "Body."})
+        with (
+            patch("app.store.pdf_path", return_value=pdf),
+            patch("app.ai.summarize", new=AsyncMock(return_value="S")),
+            patch("app.ai.anatomy", new=AsyncMock(side_effect=AIError("bad json"))),
+            patch("app.service._get_brief", new=AsyncMock(return_value="")),
+            patch(
+                "app.pdf_utils.figure_catalog",
+                return_value={"figures": [], "has_math": False},
+            ),
+            patch("app.ai.review", new=review),
+        ):
+            (slug, _), stall = await self.while_chat_lock_held(
+                "d.json", lambda: service.review_bundle("d")
+            )
+        self.assertLess(stall, 0.25)
+        self.assertEqual(slug, "my-note")
+        self.assertEqual(review.await_args.kwargs["chat_turns"], [{"text": "kept"}])
+        self.assertFalse(legacy.exists())
+        self.assertEqual(store.chat_get("file:d"), [{"text": "kept"}])
 
 
 class TranslateStreamTests(_StoreDirs, unittest.IsolatedAsyncioTestCase):

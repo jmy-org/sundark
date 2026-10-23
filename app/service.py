@@ -134,10 +134,16 @@ async def _identify(doc_id: str, data: bytes, extracted: dict, zotero: dict) -> 
             break
     previous = extracted["meta"].get("paper_id") or f"file:{doc_id}"
     extracted["meta"]["paper_id"] = pid
+    # One thread job publishes the Paper ID and carries its chat: cancelled while queued,
+    # none of it runs; once started, all of it runs, in this order.
+    await asyncio.to_thread(_publish_identity, doc_id, extracted, previous, pid)
+    return pid
+
+
+def _publish_identity(doc_id: str, extracted: dict, previous: str, pid: str) -> None:
     store.save_doc(doc_id, extracted)
     store.chat_migrate(doc_id, pid)
     store.chat_move(previous, pid)
-    return pid
 
 
 def _paper_of(doc_id: str, doc: dict) -> str:
@@ -636,7 +642,8 @@ async def write_review_bundle(doc_id: str, language: str | None, out: BinaryIO) 
         except AIError:
             anat = {}
 
-    chat_turns = store.chat_get(_paper_of(doc_id, doc))
+    pid = await asyncio.to_thread(_paper_of, doc_id, doc)
+    chat_turns = store.chat_get(pid)
     glossary = await _get_brief(doc_id, doc, language)
 
     # Figures + display-math presence (heavy: the layout model runs on every page).
