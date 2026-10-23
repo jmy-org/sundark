@@ -36,25 +36,31 @@ def doc_id_for(pdf_bytes: bytes) -> str:
 
 
 def save_pdf(doc_id: str, pdf_bytes: bytes) -> None:
-    (PDFS / f"{doc_id}.pdf").write_bytes(pdf_bytes)
+    _atomic_write(PDFS / f"{doc_id}.pdf", pdf_bytes)
 
 
 def pdf_path(doc_id: str) -> Path:
     return PDFS / f"{doc_id}.pdf"
 
 
-def _atomic_json_write(path: Path, value: object) -> None:
-    """Publish one complete JSON value; concurrent writers are last-complete-wins."""
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Publish complete bytes; concurrent writers are last-complete-wins."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".json-", suffix=".tmp")
+    fd, name = tempfile.mkstemp(
+        dir=path.parent, prefix=f"{path.suffix}-", suffix=".tmp"
+    )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
     finally:
         Path(name).unlink(missing_ok=True)
+
+
+def _atomic_json_write(path: Path, value: object) -> None:
+    _atomic_write(path, json.dumps(value, ensure_ascii=False).encode("utf-8"))
 
 
 def save_doc(doc_id: str, extracted: dict) -> None:
