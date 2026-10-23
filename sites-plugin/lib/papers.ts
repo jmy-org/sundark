@@ -1,0 +1,17 @@
+import {env} from 'cloudflare:workers';
+import {getChatGPTUser} from '../app/chatgpt-auth';
+export class ApiError extends Error {constructor(public status:number,message:string){super(message)}}
+export async function identity(){const u=await getChatGPTUser();if(!u)throw new ApiError(401,'로그인이 필요합니다.');return u.userId}
+export function database(){if(!env.DB)throw new ApiError(503,'데이터베이스 연결을 확인해 주세요.');return env.DB}
+export function bucket(){if(!env.BUCKET)throw new ApiError(503,'파일 저장소 연결을 확인해 주세요.');return env.BUCKET}
+export function csrf(r:Request){const origin=r.headers.get('origin');if(!origin||origin!==new URL(r.url).origin)throw new ApiError(403,'다른 사이트에서 보낸 요청은 허용하지 않습니다.')}
+export function validId(id:string){if(!/^[a-f0-9-]{36}$/.test(id))throw new ApiError(404,'논문을 찾을 수 없습니다.');return id}
+export function reply(data:unknown,status=200){return Response.json(data,{status,headers:{'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}})}
+export function failure(e:unknown){return reply({error:e instanceof ApiError?e.message:'처리 중 오류가 발생했습니다. 다시 시도해 주세요.'},e instanceof ApiError?e.status:500)}
+export function publicPaper(r:any){return {id:r.id,title:r.title,authors:r.authors,year:r.year,doi:r.doi,collection:r.collection,tags:r.tags,notes:r.notes||'',page:r.page,zoom:r.zoom,fileName:r.file_name,fileVersion:r.file_key?String(r.file_key).split('/').pop():null,size:r.size,updatedAt:r.updated_at}}
+export async function owned(owner:string,id:string){validId(id);const p=await database().prepare('SELECT * FROM papers WHERE id=? AND owner=?').bind(id,owner).first();if(!p)throw new ApiError(404,'논문을 찾을 수 없습니다.');return p}
+export async function list(owner:string){const r=await database().prepare('SELECT id,title,authors,year,doi,collection,tags,page,zoom,file_name,file_key,size,updated_at FROM papers WHERE owner=? ORDER BY updated_at DESC LIMIT 2000').bind(owner).all();return r.results.map(publicPaper)}
+const lengths:Record<string,number>={title:500,authors:2000,year:20,doi:300,collection:100,tags:1000,notes:100000};
+export function fields(x:any,create=false){if(!x||typeof x!=='object'||Array.isArray(x))throw new ApiError(400,'잘못된 입력입니다.');const out:Record<string,string|number>={};for(const [key,max] of Object.entries(lengths)){if(x[key]!==undefined){if(typeof x[key]!=='string'||x[key].length>max)throw new ApiError(400,`${key} 길이 또는 형식을 확인해 주세요.`);out[key]=key==='notes'?x[key]:x[key].trim()}}if(create&&!out.title||out.title==='')throw new ApiError(400,'제목을 입력해 주세요.');for(const key of ['page','zoom'])if(x[key]!==undefined){const n=x[key];if(!Number.isInteger(n)||n<1||n>(key==='page'?100000:400))throw new ApiError(400,'페이지 또는 확대 값을 확인해 주세요.');out[key]=n}return out}
+export async function boundedText(r:Request,limit=400000){if(Number(r.headers.get('content-length')||0)>limit)throw new ApiError(413,'입력이 너무 큽니다.');if(!r.body)return '';const reader=r.body.getReader();const chunks:Uint8Array[]=[];let size=0;while(true){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>limit){await reader.cancel();throw new ApiError(413,'입력이 너무 큽니다.')}chunks.push(value)}const data=new Uint8Array(size);let n=0;for(const c of chunks){data.set(c,n);n+=c.length}return new TextDecoder().decode(data)}
+export async function jsonBody(r:Request){try{return JSON.parse(await boundedText(r))}catch(e){if(e instanceof ApiError)throw e;throw new ApiError(400,'올바른 JSON이 아닙니다.')}}

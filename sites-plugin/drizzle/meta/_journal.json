@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1792665061730,
+      "tag": "0000_complete_sharon_carter",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792666105687,
+      "tag": "0001_married_vengeance",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792673738768,
+      "tag": "0002_bitter_norrin_radd",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792674027818,
+      "tag": "0003_special_goliath",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792674995637,
+      "tag": "0004_old_morlun",
+      "breakpoints": true
+    }
+  ]
+}
