@@ -104,6 +104,9 @@ A reset advances a durable generation marker. An answer started before that
 reset is rejected instead of restoring cleared turns, and legacy migration must
 respect the marker. Public chat history stays a list; legacy list files remain
 readable. Lock acquisition in async request paths runs off the event loop.
+Processes sharing the store also share admission: AI calls take one of the
+concurrency setting's slot files next to the settings file, layout inference
+takes one lock in `data/.locks`, and the kernel frees either when a process exits.
 Identity moves carry a distinct lineage marker so a later identity correction can
 move history back without overwriting a reset or independent history. Interrupted
 moves may leave duplicate complete records; no automatic merge or reconciliation

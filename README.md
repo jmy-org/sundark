@@ -195,7 +195,8 @@ serve the unauthenticated reader HTTP routes. This is a server access credential
 not an inference API key. Keep subscription account sign-in and backend settings
 in the local reader. Both entrypoints require the same layout model as the
 reader; missing model dependencies fail startup rather than selecting another
-parser.
+parser. The reader and every MCP server on this checkout share the concurrency
+setting's bound and run layout inference one at a time.
 
 PDF uploads and review ZIP downloads use temporary, bounded chunk transfers:
 20 MiB per uploaded PDF, 12 MiB per review bundle, and at most 1 MiB per chunk.

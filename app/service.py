@@ -298,8 +298,10 @@ def pdf_path(doc_id: str) -> Path:
 # --- Layout and math ------------------------------------------------------------------------
 
 # Layout (which now runs the YOLO model) is heavy and synchronous. Run it one page at a time
-# so the CPU is not thrashed by parallel inference, and always off the event loop (via a
-# thread) so one page's layout never blocks the server from serving the PDF or other requests.
+# per process, and always off the event loop (via a thread) so one page's layout never blocks
+# the server from serving the PDF or other requests. A waiter then finds the page another task
+# just cached. Inference itself is serialized across threads and processes (the figure catalog,
+# other readers) in layout_model.detect_page.
 _layout_lock = asyncio.Lock()
 
 

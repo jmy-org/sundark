@@ -6,6 +6,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import asynccontextmanager
+
+from filelock import AsyncFileLock, Timeout
 
 from . import backends, settings
 from .errors import AIError
@@ -209,12 +212,61 @@ def _register(target_lang: str) -> str:
     return rule + "\n\n"
 
 
-def _limit(name: str) -> asyncio.Semaphore:
+# The concurrency setting bounds every process that shares the settings file (the reader,
+# each MCP server, the Site companion), not just this one. A call takes an in-process
+# semaphore slot, then one of n slot files in the settings file's .locks directory. Never
+# start an AI call while holding a slot: at full load the nested call waits forever.
+@asynccontextmanager
+async def _limit(name: str):
     n = settings.concurrency_for(settings.load(), name)
     key = (asyncio.get_running_loop(), name, n)
     if key not in _limits:
         _limits[key] = asyncio.Semaphore(n)
-    return _limits[key]
+    async with _limits[key]:
+        async with _slot(name, n):
+            yield
+
+
+def _file_lock(path) -> AsyncFileLock:
+    # A fresh instance per admission: one shared instance is reentrant across tasks.
+    return AsyncFileLock(
+        path, run_in_executor=False, fallback_to_soft=False, preserve_lock_file=True
+    )
+
+
+@asynccontextmanager
+async def _slot(name: str, n: int):
+    """Hold one of the n cross-process slot files. The kernel frees a crashed holder's slot.
+    Waiters queue on a gate first: without it a busy process re-took the slot it had just
+    freed before another process's poll came round, and that process waited for all of
+    its calls."""
+    slot = None
+    # The release covers the gate's exit too: a gate that fails to let go after the slot
+    # was taken must not leave the slot held.
+    try:
+        try:
+            locks = settings.settings_path().parent / ".locks"
+            locks.mkdir(parents=True, exist_ok=True)
+            slots = [_file_lock(locks / f"ai-{name}-{i}.lock") for i in range(n)]
+            async with _file_lock(locks / f"ai-{name}.gate"):
+                slot = await _free_slot(slots)
+        except OSError as exc:
+            raise AIError("Could not coordinate AI requests") from exc
+        yield
+    finally:
+        if slot is not None:
+            await slot.release()
+
+
+async def _free_slot(slots: list[AsyncFileLock]) -> AsyncFileLock:
+    while True:
+        for slot in slots:
+            try:
+                await slot.acquire(blocking=False)
+                return slot
+            except Timeout:
+                pass
+        await asyncio.sleep(0.05)
 
 
 async def _run(task: str, prompt: str, system: str | None, images=()) -> str:

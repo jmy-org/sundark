@@ -51,7 +51,10 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   loaded at startup; if it can't load, startup FAILS with a clear message (see
   `app/main.py`) instead of serving a degraded parser. The text and word coordinates
   still come from PyMuPDF, so **highlighting is unchanged** — the model only says
-  WHAT each area is, never replaces the text layer. Install gotcha: torch and
+  WHAT each area is, never replaces the text layer. Inference runs one at a time
+  across every thread and process sharing `data/` (a file lock around `predict` in
+  `detect_page`), so page layout and the review's figure catalog never overlap; a lock
+  failure fails the page instead of caching a layout without regions. Install gotcha: torch and
   torchvision must come from the SAME index (mixing a CPU torch with a default
   torchvision fails at import with `torchvision::nms does not exist`).
 - **`app/main.py`** is FastAPI: upload/library, `/api/layout`, streaming
@@ -136,8 +139,10 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   renumbered line would otherwise shift every later segment), and the server numbers results by
   arrival (`{"i": len(collected)}`). A drifted stream therefore errors instead of being shown or
   cached. A failed batch falls back to the source text for its range so it cannot stall the
-  frontier. Every AI call is bounded by a per-backend semaphore in `app/ai.py`
-  sized by the same concurrency setting, which also covers summary/anatomy. A rate limit
+  frontier. Every AI call is bounded per backend in `app/ai.py` by the same concurrency
+  setting, which also covers summary/anatomy, across every process that shares the settings
+  file (the reader and MCP servers): an in-process semaphore, then file-lock slots in `.locks`
+  next to the settings file. Never start an AI call while holding a slot. A rate limit
   (`RateLimitError`, HTTP 429, or a stream line with `rate_limited`) stops the remaining
   batches and leaves source text; the user lowers concurrency in Settings if it repeats. The server stays generic (it
   translates whatever segment list it is given and caches by a signature of those segments,
