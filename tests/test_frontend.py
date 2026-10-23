@@ -36,6 +36,9 @@ class FrontendTests(unittest.TestCase):
     def test_document_open_fences_late_pdf_and_panel_results(self):
         self.node("tests/frontend_open_generation.test.js")
 
+    def test_upload_repick(self):
+        self.node("tests/frontend_upload_repick.test.js")
+
     def test_reader_transport_contract(self):
         self.node("tests/frontend_transport.test.js")
 

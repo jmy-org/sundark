@@ -505,6 +505,7 @@ $("file").addEventListener("change", async (e) => {
     await openDoc(meta);
     loadLibrary();  // the upload is now also saved under papers/, so refresh the list
   } catch (err) { setTitle("Upload failed: " + err.message); }
+  finally { e.target.value = ""; }  // so picking the same file again fires change
 });
 
 // ================= Open document =================
