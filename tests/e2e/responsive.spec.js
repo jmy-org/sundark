@@ -142,3 +142,68 @@ test("desktop 1440px keeps all three panes side by side", async ({ page, request
   await expect(page.locator("#rz1")).toBeVisible();
   await noHorizontalOverflow(page, 1440);
 });
+
+async function sourceInView(page) {
+  // The selected sentence's highlight is drawn and scrolled into the visible PDF pane.
+  await expect(page.locator("#pdfview .hlrect").first()).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const view = document.querySelector("#pdfview").getBoundingClientRect();
+        const r = document.querySelector("#pdfview .hlrect:not(.hlring)").getBoundingClientRect();
+        return r.width > 0 && r.top >= view.top && r.bottom <= view.bottom;
+      }),
+    )
+    .toBe(true);
+}
+
+for (const size of [
+  { width: 390, height: 844 },
+  { width: 564, height: 603 },
+]) {
+  test(`narrow ${size.width}px translation click shows its source sentence`, async ({
+    page,
+    request,
+  }) => {
+    await page.setViewportSize(size);
+    await openSample(page, request);
+    const switcher = page.getByRole("navigation", { name: "Workspace panes" });
+    const seg = page.locator("#trlist .trseg").last();
+    await seg.click();
+    await expect(switcher.getByRole("button", { name: "PDF" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(page.locator("#pdfcol")).toBeVisible();
+    await expect(page.locator("#aipanel")).not.toBeVisible();
+    await withinViewport(page, "#pdfcol");
+    await sourceInView(page);
+    await noHorizontalOverflow(page, size.width);
+
+    // Back on the AI pane the sentence is still the pinned one.
+    await switcher.getByRole("button", { name: "AI" }).click();
+    await expect(seg).toHaveClass(/pinned/);
+    await expect(seg).toBeInViewport();
+
+    // An anatomy quote looks up its source the same way.
+    await page.locator('[data-tab="anatomy"]').click();
+    await page.locator("#tab-anatomy .anat-quote").first().click();
+    await expect(switcher.getByRole("button", { name: "PDF" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await sourceInView(page);
+  });
+}
+
+test("desktop 1440px translation click keeps the AI panel beside the source", async ({
+  page,
+  request,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSample(page, request);
+  await page.locator("#trlist .trseg").last().click();
+  await expect(page.locator("#aipanel")).toBeVisible();
+  await expect(page.locator("#trlist .trseg").last()).toHaveClass(/pinned/);
+  await sourceInView(page);
+});

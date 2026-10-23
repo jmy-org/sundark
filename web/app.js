@@ -1161,12 +1161,18 @@ function makeTrSeg(i, k, tr) {
   // Hover only highlights (both sides); the PDF is scrolled on CLICK, not on hover, so the
   // eyes are not yanked around while skimming the translation.
   d.addEventListener("mouseenter", () => setHover(i, k, true));
-  d.addEventListener("mouseleave", () => setHover(i, k, false));
+  d.addEventListener("mouseleave", () => {
+    // A click on a narrow screen swaps this panel for the source, which hides the sentence from
+    // under the pointer; the pinned sentence keeps its highlight there.
+    if (d.classList.contains("pinned") && getComputedStyle(d).visibility === "hidden") return;
+    setHover(i, k, false);
+  });
   d.addEventListener("click", () => {
     // A second click on the pinned sentence releases it (so does Esc, below).
     if (d.classList.contains("pinned")) { d.classList.remove("pinned"); return; }
     unpinTr();
     d.classList.add("pinned");
+    showPane("source");  // on a narrow screen the source is the hidden pane
     highlightSource(i, k, true, "center");
   });
   return d;
@@ -1524,6 +1530,7 @@ function highlightQuote(quote) {
     if (!P.segs) continue;
     for (let k = 0; k < P.segs.length; k++) {
       if (P.segs[k].text.replace(/\s+/g, " ").toLowerCase().includes(nq)) {
+        showPane("source");
         setHover(pi, k, true);
         scrollPdfToSeg(pi, k, true);
         return true;
