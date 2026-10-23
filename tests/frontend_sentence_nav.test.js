@@ -876,6 +876,54 @@ async function hoverOwners() {
     t.open(texts);
     assert.deepEqual(t.drawn(0), [], "a rebuilt list left the keyboard pin drawn");
   }
+
+  // A PDF hover over another sentence takes the page's one layer from the pin; when the pointer
+  // leaves, the pinned sentence is drawn again. Without a pin, or once it is released, nothing is.
+  {
+    const t = setup({ real: true });
+    const texts = [["a", "b", "c"], ["d"]];
+    t.open(texts);
+    t.layers({ next: true });
+    paintAll(t, texts);
+    const leave = (p) => t.S.pages[p].textEl.fire("mouseleave");
+    const hl = () => t.spans().filter((x) => x.cls.has("hl")).map((x) => [x.dataset.page, x.dataset.i]);
+    t.pointAt(0, 0, 1);
+    leave(0);
+    assert.deepEqual([t.drawn(0), hl()], [[], []], "a hover with no pin left a bar behind");
+    pinAt(t, 2);
+    const pinned = t.S.trSel;
+    assert.deepEqual(t.drawn(0), bar("10px"));
+    t.pointAt(0, 0, 2);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("20px"), bar("50px")], "the hover is drawn as before");
+    leave(0);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("10px"), []], "the pin was not drawn again");
+    assert.deepEqual(hl(), [[0, 1]]);
+    assert.equal(t.S.trSel, pinned);
+    assert.ok(pinned.cls.has("pinned"));
+    assert.equal(t.ids["trnav-pin"].getAttribute("aria-pressed"), "true");
+    // The pointer leaving the pinned sentence itself.
+    t.pointAt(0, 0, 1);
+    leave(0);
+    assert.deepEqual([t.drawn(0), hl()], [bar("10px"), [[0, 1]]], "leaving the pinned sentence cleared it");
+    // A pin across the page break; the hover on the next page takes its second half there.
+    pinAt(t, 1);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("20px"), bar("50px")]);
+    t.pointAt(1, 1, 0);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("20px"), bar("0px")]);
+    leave(1);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("20px"), bar("50px")], "the pin's second half was lost");
+    // Released with Escape, or with a rebuilt list, while the pointer is on the PDF.
+    t.pointAt(0, 0, 0);
+    t.escape();
+    leave(0);
+    assert.deepEqual([t.drawn(0), t.drawn(1), hl()], [[], [], []], "a released pin came back");
+    t.ids["trnav-pin"].fire("click");
+    t.pointAt(0, 0, 0);
+    t.open(texts);
+    paintAll(t, texts);
+    leave(0);
+    assert.deepEqual([t.drawn(0), t.drawn(1), hl()], [[], [], []], "a rebuilt list's pin came back");
+  }
 }
 
 lifecycle()

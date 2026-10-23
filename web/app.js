@@ -1411,7 +1411,12 @@ function attachPdfHover(page, textEl) {
   textEl.addEventListener("mouseleave", clearPdfHover);
 }
 function clearPdfHover() {
-  if (pdfHoverCur) { setHover(pdfHoverCur.page, pdfHoverCur.k, false); pdfHoverCur = null; }
+  if (!pdfHoverCur) return;
+  setHover(pdfHoverCur.page, pdfHoverCur.k, false);
+  pdfHoverCur = null;
+  // The hover took the page's one highlight layer from the pinned sentence: draw that again.
+  const pin = $("trlist").querySelector(".trseg.pinned");
+  if (pin) setHover(Number(pin.dataset.page), Number(pin.dataset.i), true);
 }
 
 // Scroll the translation panel so the middle of translation `t` is level with screen y `mid`
