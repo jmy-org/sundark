@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -241,23 +242,36 @@ def _save_to_library(filename: str, data: bytes) -> None:
     """Also keep an uploaded PDF in the papers folder so it shows up in the Library and can be
     reopened later. Best-effort: a failure here must not fail the upload (the doc is already
     ingested and opens from data/). The name is reduced to a basename, so no path can escape
-    PAPERS_DIR."""
+    PAPERS_DIR. The reader and the MCP server are separate processes, so a name is claimed by
+    hard-linking a fully written temporary file: the link fails if the name exists, and a
+    reader never sees a half-written PDF."""
     name = Path(filename or "upload.pdf").name
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
     dest = PAPERS_DIR / name
+    tmp = None
     try:
+        fd, tmp = tempfile.mkstemp(prefix=".upload-", suffix=".part", dir=PAPERS_DIR)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
         stem, suffix = dest.stem, dest.suffix
         i = 1
-        while dest.exists() and dest.read_bytes() != data:
+        while True:
+            try:
+                os.link(tmp, dest)
+                break
+            except FileExistsError:
+                if dest.read_bytes() == data:
+                    break
             dest = (
                 PAPERS_DIR / f"{stem}-{i}{suffix}"
             )  # keep a same-named, different file
             i += 1
-        if not dest.exists():
-            dest.write_bytes(data)
     except OSError:
         pass
+    finally:
+        if tmp is not None:
+            Path(tmp).unlink(missing_ok=True)
 
 
 async def upload_paper(filename: str, data: bytes) -> dict:
