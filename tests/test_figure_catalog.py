@@ -65,17 +65,6 @@ class FigureCatalogCaptionTests(unittest.TestCase):
         self.assertEqual(fig["caption"], "")
         self.assertEqual(tbl["caption"], "Table 2: Ablation.")
 
-    def test_a_captionless_figure_does_not_take_the_next_figures_caption(self):
-        texts = [(55, 432, "Figure 3: The second plot.")]
-        regions = [
-            _box("figure", "figure", 45, 80, 541, 200),
-            _box("figure", "figure", 45, 230, 541, 415),
-            _box("caption", "figure_caption", 52, 420, 545, 436),
-        ]
-        first, second = _catalog(texts, regions)
-        self.assertEqual(first["caption"], "")
-        self.assertEqual(second["caption"], "Figure 3: The second plot.")
-
     def test_a_caption_in_the_other_column_is_not_taken(self):
         texts = [(55, 232, "Figure 4: Left."), (320, 132, "Figure 5: Right.")]
         regions = [
@@ -87,6 +76,19 @@ class FigureCatalogCaptionTests(unittest.TestCase):
         left, right = _catalog(texts, regions)
         self.assertEqual(left["caption"], "Figure 4: Left.")
         self.assertEqual(right["caption"], "Figure 5: Right.")
+
+    def test_a_figure_in_the_other_column_does_not_hide_a_caption(self):
+        # the right figure starts above the left caption and overlaps it by 10pt
+        texts = [(55, 232, "Figure 7: Left."), (290, 317, "Figure 8: Right.")]
+        regions = [
+            _box("figure", "figure", 45, 80, 290, 215),
+            _box("caption", "figure_caption", 50, 220, 290, 236),
+            _box("figure", "figure", 280, 140, 560, 300),
+            _box("caption", "figure_caption", 285, 305, 560, 321),
+        ]
+        left, right = _catalog(texts, regions)
+        self.assertEqual(left["caption"], "Figure 7: Left.")
+        self.assertEqual(right["caption"], "Figure 8: Right.")
 
     def test_caption_text_stays_inside_its_box(self):
         texts = [

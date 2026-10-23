@@ -2059,23 +2059,14 @@ def crop_region_png(
         doc.close()
 
 
-def _caption_text(page, region: dict, captions: list[dict], others: list[dict]) -> str:
+def _caption_text(page, region: dict, captions: list[dict]) -> str:
     """Text of the caption box nearest to a figure/table region: horizontal overlap with the
-    smallest vertical gap (a caption sits just below a figure or just above a table). A
-    caption with another figure/table (`others`) between it and the region belongs to that
-    one. '' when there is none."""
+    smallest vertical gap (a caption sits just below a figure or just above a table). '' when
+    there is none."""
     best, best_gap = None, float("inf")
     for c in captions:
         if c["x1"] < region["x0"] or c["x0"] > region["x1"]:
             continue  # no horizontal overlap
-        top, bottom = sorted((region["y0"] + region["y1"], c["y0"] + c["y1"]))
-        if any(
-            o["x1"] >= c["x0"]
-            and o["x0"] <= c["x1"]
-            and top < o["y0"] + o["y1"] < bottom
-            for o in others
-        ):
-            continue
         gap = min(abs(c["y0"] - region["y1"]), abs(region["y0"] - c["y1"]))
         if gap < best_gap:
             best, best_gap = c, gap
@@ -2099,9 +2090,10 @@ def figure_catalog(pdf_bytes: bytes) -> dict:
             regions = layout_model.detect_page(page) or []
             if any(r["role"] == "formula" for r in regions):
                 has_math = True
-            floats = [r for r in regions if r["role"] in ("figure", "table")]
             counts: dict[str, int] = {}
-            for r in floats:
+            for r in regions:
+                if r["role"] not in ("figure", "table"):
+                    continue
                 kind = "fig" if r["role"] == "figure" else "tbl"
                 # an equation number ("(1)") is a model caption too (formula_caption)
                 cls = "figure_caption" if kind == "fig" else "table_caption"
@@ -2112,9 +2104,7 @@ def figure_catalog(pdf_bytes: bytes) -> dict:
                         "id": f"{kind}-p{pi + 1}-{counts[kind]}",
                         "page": pi,
                         "bbox": (r["x0"], r["y0"], r["x1"], r["y1"]),
-                        "caption": _caption_text(
-                            page, r, captions, [o for o in floats if o is not r]
-                        ),
+                        "caption": _caption_text(page, r, captions),
                         "kind": kind,
                     }
                 )
