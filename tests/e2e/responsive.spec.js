@@ -656,6 +656,88 @@ test("desktop 1440px retranslating keeps the PDF-hovered bar when a pin on its p
   await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
 });
 
+// A PDF hover over another sentence takes the page's one layer from the pin; when the pointer
+// leaves the PDF, the pinned sentence is drawn again. A pin released while hovering stays gone.
+test("desktop 1440px leaving a PDF hover draws the pinned sentence again", async ({
+  page,
+  request,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSample(page, request);
+  const segs = page.locator("#trlist .trseg");
+  const nav = page.getByRole("group", { name: "Sentence" });
+  const next = nav.getByRole("button", { name: "Next sentence" });
+  const pin = nav.getByRole("button", { name: "Pin source" });
+  const header = page.locator(".topbar .brand");
+  await expect(segs.last()).toContainText(TRANSLATED);
+  await expect(next).toBeEnabled();
+  await next.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await pin.focus();
+  await page.keyboard.press("Space");
+  await expect(pin).toHaveAttribute("aria-pressed", "true");
+  await expect(segs.nth(1)).toHaveClass(/pinned/);
+  const preview = await page.locator("#trnav-preview").textContent();
+  const pinned = await layerRects(page);
+  expect(pinned.length).toBeGreaterThan(0);
+  const pinKept = async () => {
+    await expect(page.locator("#trlist .trseg.hl")).toHaveCount(1);
+    await expect(segs.nth(1)).toHaveClass(/\bhl\b/);
+    await expect(page.locator("#trlist .trseg.pinned")).toHaveCount(1);
+    await expect(segs.nth(1)).toHaveClass(/pinned/);
+    await expect(page.locator("#trlist .trseg.selected")).toHaveCount(1);
+    await expect(segs.nth(1)).toHaveClass(/selected/);
+    await expect(pin).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#trnav-preview")).toHaveText(preview);
+  };
+
+  // Another sentence on the same page: the hover is drawn in the pin's place.
+  const word = page.locator("#pdfview .textlayer span", { hasText: /^\s*evidence\s*$/ }).last();
+  await word.hover();
+  await expect(segs.last()).toHaveClass(/\bhl\b/);
+  const owned = await layerRects(page);
+  expect(owned.length).toBeGreaterThan(0);
+  expect(owned).not.toEqual(pinned);
+  expect(owned.every((r) => r[0] === pinned[0][0])).toBe(true);
+  expect(await barUnder(word)).toBe(true);
+  await header.hover();
+  await expect(segs.last()).not.toHaveClass(/\bhl\b/);
+  await expect.poll(() => layerRects(page)).toEqual(pinned);
+  expect(await barUnder(word)).toBe(false);
+  await pinKept();
+
+  // The pinned sentence itself: leaving it keeps it drawn.
+  const own = await page.locator("#pdfview .textlayer span").evaluateAll((els) => {
+    const bars = [...document.querySelectorAll("#pdfview .hllayer .hlrect:not(.hlring)")].map((e) =>
+      e.getBoundingClientRect(),
+    );
+    return els.findIndex((el) => {
+      const w = el.getBoundingClientRect();
+      const x = w.left + w.width / 2;
+      const y = w.top + w.height / 2;
+      return bars.some((r) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
+    });
+  });
+  expect(own).toBeGreaterThanOrEqual(0);
+  await page.locator("#pdfview .textlayer span").nth(own).hover();
+  await expect.poll(() => layerRects(page)).toEqual(pinned);
+  await pinKept();
+  await header.hover();
+  await expect.poll(() => layerRects(page)).toEqual(pinned);
+  await pinKept();
+
+  // Released with Escape while the pointer is on another sentence: leaving draws nothing.
+  await word.hover();
+  await expect(segs.last()).toHaveClass(/\bhl\b/);
+  await page.keyboard.press("Escape");
+  await expect(pin).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#trlist .trseg.pinned")).toHaveCount(0);
+  await header.hover();
+  await expect(page.locator("#trlist .trseg.hl, #trlist .trseg.pinned")).toHaveCount(0);
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+});
+
 // The pointer owns a PDF sentence when another paper opens without a pointer move: the old text
 // layer goes with no mouseleave, and the pointer leaves while the new PDF is held. The new
 // paper reuses the old one's page and sentence numbers, so a keyboard pin on the same or another
