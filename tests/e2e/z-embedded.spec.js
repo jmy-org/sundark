@@ -400,6 +400,186 @@ test("switching papers cancels a pending PDF range and drops its late result", a
   expect(errors).toEqual([]);
 });
 
+// Opens the large paper with its range reads (offset > 0) held by the host, and records inside
+// the reader what reaches it: every JSON-RPC response as it arrives at the reader's window (added
+// after the bridge's listener, so not before the bridge settles it), every PDFDataRangeTransport
+// delivery to pdf.js, and any error or unhandled rejection.
+async function openLargeWithHeldRanges(page, request) {
+  const { size } = await (await request.post("/__e2e/large-pdf")).json();
+  const gate = { holding: true, held: [] };
+  await page.route("**/__e2e/tool", async (route) => {
+    const call = route.request().postDataJSON();
+    if (gate.holding && call.name === "pdf_chunk" && call.arguments.offset > 0)
+      gate.held.push(route);
+    else await route.continue();
+  });
+  await page.goto("/__e2e/host");
+  const frame = page.frameLocator("iframe");
+  await expect(frame.locator("#paperlist")).toBeVisible();
+  await frame.locator("body").evaluate(() => {
+    const seen = (window.e2eSeen = { responses: [], deliveries: [], errors: [] });
+    addEventListener("message", (event) => {
+      const m = event.data;
+      if (m?.jsonrpc !== "2.0" || m.id == null || m.method) return;
+      const data = m.result?.structuredContent;
+      seen.responses.push({
+        id: m.id,
+        error: !!m.error || !!m.result?.isError,
+        offset: data?.offset,
+        total: data?.total,
+        base64: data?.data_base64?.length || 0,
+      });
+    });
+    const proto = window.pdfjsLib.PDFDataRangeTransport.prototype;
+    const onDataRange = proto.onDataRange;
+    proto.onDataRange = function (begin, chunk) {
+      seen.deliveries.push({ length: this.length, begin, bytes: chunk.length });
+      return onDataRange.call(this, begin, chunk);
+    };
+    addEventListener("error", (e) => seen.errors.push(String(e.message)));
+    addEventListener("unhandledrejection", (e) =>
+      seen.errors.push(String(e.reason?.message || e.reason)),
+    );
+  });
+  await frame.locator("#refresh").click();
+  await frame.locator("#paperlist li").filter({ hasText: "Large native fixture" }).click();
+  await expect.poll(() => gate.held.length).toBeGreaterThan(0);
+  await expect(frame.locator("#prep-overlay")).toBeVisible();
+  const pending = await page.evaluate(() =>
+    bridgeLog
+      .filter(
+        (e) =>
+          e.method === "tools/call" &&
+          e.params.name === "pdf_chunk" &&
+          e.params.arguments.offset > 0,
+      )
+      .map((e) => ({ id: e.id, offset: e.params.arguments.offset })),
+  );
+  const docId = gate.held[0].request().postDataJSON().arguments.doc_id;
+  const seen = () => frame.locator("body").evaluate(() => window.e2eSeen);
+  const release = async () => {
+    gate.holding = false;
+    for (const route of gate.held.splice(0)) await route.continue();
+  };
+  // The held ranges' valid answers reached the reader's window.
+  const arrived = async () => {
+    const { responses } = await seen();
+    return pending.every(({ id, offset }) =>
+      responses.some(
+        (r) => r.id === id && !r.error && r.offset === offset && r.total === size && r.base64 > 0,
+      ),
+    );
+  };
+  return { size, frame, pending, docId, seen, release, arrived };
+}
+
+test("a held PDF range answered while its paper is open is delivered", async ({
+  page,
+  request,
+}) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const { size, frame, pending, seen, release, arrived } = await openLargeWithHeldRanges(
+    page,
+    request,
+  );
+  expect((await seen()).deliveries).toEqual([]);
+  await release();
+  await expect.poll(arrived).toBe(true);
+  // The control for the switch test below: the same observers see this delivery.
+  await expect
+    .poll(async () => {
+      const { deliveries } = await seen();
+      return pending.every(({ offset }) =>
+        deliveries.some((d) => d.length === size && d.begin === offset && d.bytes > 0),
+      );
+    })
+    .toBe(true);
+  await expect.poll(() => ink(frame)).toBeGreaterThan(100);
+  await expect(frame.locator("#prep-overlay")).toBeHidden();
+  await expect(frame.locator("#title")).not.toContainText("Could not read");
+  expect((await seen()).errors).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("a cancelled PDF range answered after the reader opens another paper is not delivered", async ({
+  page,
+  request,
+}) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const sample = await (await request.get("/__e2e/sample.pdf?variant=late-range")).body();
+  const meta = await (
+    await request.post("/api/upload", {
+      multipart: {
+        file: { name: "embedded-late-range.pdf", mimeType: "application/pdf", buffer: sample },
+      },
+    })
+  ).json();
+  const { size, frame, pending, docId, seen, release, arrived } = await openLargeWithHeldRanges(
+    page,
+    request,
+  );
+  expect(docId).not.toBe(meta.doc_id);
+  expect((await seen()).deliveries).toEqual([]);
+  // The reader's own control opens the other paper while the large one waits on its range:
+  // the overlay hides the library, so the test focuses the row programmatically (a test seam,
+  // not proof that keyboard navigation reaches it).
+  const row = frame
+    .locator("#paperlist li")
+    .filter({ hasText: "embedded-late-range.pdf" })
+    .locator("button");
+  await row.focus();
+  await row.press("Enter");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (ids) =>
+          ids.every((id) =>
+            bridgeLog.some(
+              (e) => e.method === "notifications/cancelled" && e.params.requestId === id,
+            ),
+          ),
+        pending.map((p) => p.id),
+      ),
+    )
+    .toBe(true);
+  await expect(frame.locator("#pdfview canvas").first()).toBeVisible();
+  await expect(frame.locator("#prep-overlay")).toBeHidden();
+  const chunksOfA = () =>
+    page.evaluate(
+      (id) =>
+        bridgeLog.filter(
+          (e) =>
+            e.method === "tools/call" &&
+            e.params.name === "pdf_chunk" &&
+            e.params.arguments.doc_id === id,
+        ).length,
+      docId,
+    );
+  const before = await chunksOfA();
+  // The synthetic host ignores the cancellation, so the original valid answers reach the reader.
+  await release();
+  await expect.poll(arrived).toBe(true);
+  // Let anything the late answer set off run: a bridge round trip, then two frames.
+  await frame
+    .locator("body")
+    .evaluate(() => window.SundarkTransport.fetch("/api/config").then((r) => r.json()));
+  await frame
+    .locator("#pdfview")
+    .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const { deliveries, errors: readerErrors } = await seen();
+  expect(deliveries.filter((d) => d.length === size)).toEqual([]);
+  expect(await chunksOfA()).toBe(before);
+  expect(await frame.locator("body").evaluate(() => window.S.docId)).toBe(meta.doc_id);
+  await expect(frame.locator("#title")).toContainText("Browser Study");
+  await expect(frame.locator("#pdfview .pdfpage")).toHaveCount(1);
+  await expect.poll(() => ink(frame)).toBeGreaterThan(100);
+  await expect(frame.locator("#title")).not.toContainText("Could not read");
+  expect(readerErrors).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test("the HTTP reader opens the same PDF over 100 MiB", async ({ page, request }) => {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
