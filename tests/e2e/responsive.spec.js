@@ -481,3 +481,250 @@ test("desktop 1440px auto-translate off and on resets the navigator", async ({ p
   await expect(pin).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#pdfview .hlrect").first()).toBeVisible();
 });
+
+// A sentence's hover or pin lives in the PDF highlight layer, and a rebuilt translation list takes
+// its spans away without a mouseleave. The rebuilt list's translations are held at the response,
+// so the empty shells are observed before any new sentence can be painted under the pointer.
+async function holdTranslations(page) {
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  let held = 0;
+  await page.route("**/api/translate_stream", async (route) => {
+    held++;
+    await gate;
+    await route.continue();
+  });
+  return { held: () => held, release };
+}
+
+// The drawn bar, per page and in layer coordinates, so a scroll does not change it.
+function layerRects(page) {
+  return page.locator("#pdfview .hllayer .hlrect:not(.hlring)").evaluateAll((els) =>
+    els.map((e) => {
+      const pages = [...document.querySelectorAll("#pdfview .pdfpage")];
+      return [
+        pages.indexOf(e.closest(".pdfpage")),
+        e.offsetLeft,
+        e.offsetTop,
+        e.offsetWidth,
+        e.offsetHeight,
+      ];
+    }),
+  );
+}
+
+// Whether a drawn bar covers the middle of a PDF word.
+function barUnder(word) {
+  return word.evaluate((el) => {
+    const w = el.getBoundingClientRect();
+    const x = w.left + w.width / 2;
+    const y = w.top + w.height / 2;
+    return [...document.querySelectorAll("#pdfview .hllayer .hlrect:not(.hlring)")].some((e) => {
+      const r = e.getBoundingClientRect();
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    });
+  });
+}
+
+async function rebuiltAndHeld(page, hold) {
+  await expect.poll(hold.held).toBeGreaterThan(0);
+  await expect(page.locator("#trlist .trseg")).toHaveCount(9);
+  await expect(page.locator("#trlist .trseg").filter({ hasText: /\S/ })).toHaveCount(0);
+  await expect(page.locator("#trlist .trseg.hl, #trlist .trseg.pinned")).toHaveCount(0);
+  await expect(page.locator("#trnav-pin")).toHaveAttribute("aria-pressed", "false");
+}
+
+test("desktop 1440px retranslating under a hovered sentence clears its PDF highlight", async ({
+  page,
+  request,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSample(page, request);
+  const segs = page.locator("#trlist .trseg");
+  await expect(segs.last()).toContainText(TRANSLATED);
+  const seg = segs.nth(2);
+  await seg.hover();
+  await expect(seg).toHaveClass(/\bhl\b/);
+  await expect(seg).not.toHaveClass(/pinned/);
+  expect((await layerRects(page)).length).toBeGreaterThan(0);
+
+  // The pointer stays on the sentence; the keyboard rebuilds the list from under it.
+  const hold = await holdTranslations(page);
+  await page.locator("#retranslate").focus();
+  await page.keyboard.press("Enter");
+  await rebuiltAndHeld(page, hold);
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+
+  hold.release();
+  await expect(segs.last()).toContainText(TRANSLATED);
+  await page.locator("#paperlist").hover();
+  await expect(page.locator("#trlist .trseg.hl")).toHaveCount(0);
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+  // The rebuilt sentence takes the pointer again.
+  await segs.nth(2).hover();
+  await expect(segs.nth(2)).toHaveClass(/\bhl\b/);
+  expect((await layerRects(page)).length).toBeGreaterThan(0);
+});
+
+test("desktop 1440px auto-translate off and on under a clicked sentence clears its highlight", async ({
+  page,
+  request,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSample(page, request);
+  const segs = page.locator("#trlist .trseg");
+  await expect(segs.last()).toContainText(TRANSLATED);
+  const seg = segs.nth(1);
+  // Clicked: pinned and still under the pointer, which the pin release alone leaves drawn.
+  await seg.click();
+  await expect(seg).toHaveClass(/pinned/);
+  await expect(seg).toHaveClass(/\bhl\b/);
+  const drawn = await layerRects(page);
+  expect(drawn.length).toBeGreaterThan(0);
+
+  const autotr = page.getByRole("checkbox", { name: "Auto-translate" });
+  await autotr.focus();
+  await page.keyboard.press("Space");
+  await expect(autotr).not.toBeChecked();
+  await expect(seg).toHaveClass(/pinned/);
+  expect(await layerRects(page)).toEqual(drawn);
+
+  const hold = await holdTranslations(page);
+  await page.keyboard.press("Space");
+  await expect(autotr).toBeChecked();
+  await rebuiltAndHeld(page, hold);
+  await navCleared(page);
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+
+  hold.release();
+  await expect(segs.last()).toContainText(TRANSLATED);
+  await page.locator("#paperlist").hover();
+  await expect(page.locator("#trlist .trseg.hl, #trlist .trseg.pinned")).toHaveCount(0);
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+});
+
+// A keyboard pin on one sentence and the pointer on another sentence of the same PDF page: the
+// rebuild releases the pin, whose clearing wipes that page's layer, and the PDF-owned bar stays.
+test("desktop 1440px retranslating keeps the PDF-hovered bar when a pin on its page goes", async ({
+  page,
+  request,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSample(page, request);
+  const segs = page.locator("#trlist .trseg");
+  const nav = page.getByRole("group", { name: "Sentence" });
+  const next = nav.getByRole("button", { name: "Next sentence" });
+  const pin = nav.getByRole("button", { name: "Pin source" });
+  await expect(segs.last()).toContainText(TRANSLATED);
+  await expect(next).toBeEnabled();
+  await next.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await pin.focus();
+  await page.keyboard.press("Space");
+  await expect(pin).toHaveAttribute("aria-pressed", "true");
+  await expect(segs.nth(1)).toHaveClass(/pinned/);
+  const pinned = await layerRects(page);
+  expect(pinned.length).toBeGreaterThan(0);
+
+  // The last sentence's word, on the same page as the pinned sentence.
+  const word = page.locator("#pdfview .textlayer span", { hasText: /^\s*evidence\s*$/ }).last();
+  await word.hover();
+  await expect(page.locator("#trlist .trseg.hl")).toHaveCount(2);
+  await expect(page.locator("#trlist .trseg.hl:not(.pinned)")).toHaveCount(1);
+  await expect(segs.nth(1)).toHaveClass(/pinned/);
+  const owned = await layerRects(page);
+  expect(owned.length).toBeGreaterThan(0);
+  expect(owned).not.toEqual(pinned);
+  expect(new Set(owned.map((r) => r[0])).size).toBe(1);
+  expect(pinned.every((r) => r[0] === owned[0][0])).toBe(true);
+  expect(await barUnder(word)).toBe(true);
+
+  const hold = await holdTranslations(page);
+  await page.locator("#retranslate").focus();
+  await page.keyboard.press("Enter");
+  await rebuiltAndHeld(page, hold);
+  await navCleared(page);
+  expect(await layerRects(page)).toEqual(owned);
+  expect(await barUnder(word)).toBe(true);
+
+  hold.release();
+  await expect(segs.last()).toContainText(TRANSLATED);
+  expect(await layerRects(page)).toEqual(owned);
+  // The PDF still owns the bar: leaving its text takes it down.
+  await page.locator("#paperlist").hover();
+  await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+});
+
+// The pointer owns a PDF sentence when another paper opens without a pointer move: the old text
+// layer goes with no mouseleave, and the pointer leaves while the new PDF is held. The new
+// paper reuses the old one's page and sentence numbers, so a keyboard pin on the same or another
+// sentence must not keep or redraw the old paper's owner when the list is rebuilt.
+for (const pinned of ["another", "the same"]) {
+  test(`desktop 1440px a new paper forgets the old PDF hover when a pin on ${pinned} sentence goes`, async ({
+    page,
+    request,
+  }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openSample(page, request);
+    const segs = page.locator("#trlist .trseg");
+    const nav = page.getByRole("group", { name: "Sentence" });
+    const next = nav.getByRole("button", { name: "Next sentence" });
+    const pin = nav.getByRole("button", { name: "Pin source" });
+    const word = page.locator("#pdfview .textlayer span", { hasText: /^\s*evidence\s*$/ }).last();
+    await expect(segs.last()).toContainText(TRANSLATED);
+    await word.hover();
+    await expect(segs.last()).toHaveClass(/\bhl\b/);
+    expect((await layerRects(page)).length).toBeGreaterThan(0);
+
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    await page.route("**/api/pdf/**", async (route) => {
+      await held;
+      await route.continue();
+    });
+    const other = await request.get("/__e2e/sample.pdf?variant=Replaced");
+    await page.locator("#file").setInputFiles({
+      name: "replaced-study.pdf",
+      mimeType: "application/pdf",
+      buffer: await other.body(),
+    });
+    await expect(page.locator("#prep-overlay")).toBeVisible();
+    await expect(page.locator("#pdfview .textlayer")).toHaveCount(0);
+    await page.mouse.move(5, 5);
+    release();
+    await expect(page.locator("#prep-overlay")).toBeHidden();
+    await expect(segs).toHaveCount(9);
+    await expect(segs.last()).toContainText(TRANSLATED);
+    await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+
+    await expect(next).toBeEnabled();
+    await next.focus();
+    const presses = pinned === "the same" ? 12 : 2;
+    for (let i = 0; i < presses && !(await next.isDisabled()); i++)
+      await page.keyboard.press("Enter");
+    const target = pinned === "the same" ? segs.last() : segs.nth(1);
+    await expect(target).toHaveClass(/selected/);
+    await pin.focus();
+    await page.keyboard.press("Space");
+    await expect(target).toHaveClass(/pinned/);
+    expect((await layerRects(page)).length).toBeGreaterThan(0);
+
+    const hold = await holdTranslations(page);
+    await page.locator("#retranslate").focus();
+    await page.keyboard.press("Enter");
+    await rebuiltAndHeld(page, hold);
+    await navCleared(page);
+    await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+
+    hold.release();
+    await expect(segs.last()).toContainText(TRANSLATED);
+    await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+    // The new paper's text takes the pointer: its sentence is drawn, and leaving takes it down.
+    await word.hover();
+    await expect(segs.last()).toHaveClass(/\bhl\b/);
+    await expect.poll(() => barUnder(word)).toBe(true);
+    await page.locator("#paperlist").hover();
+    await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
+  });
+}

@@ -740,6 +740,8 @@ function stopRender(P, release) {
   P.gen += 1;  // a render already past its last await sees this and does not land
   if (P.renderTask) { P.renderTask.cancel(); P.renderTask = null; }
   P.rendered = false;
+  // The pointer gets no mouseleave from a removed layer, so the sentence it owned there goes too.
+  if (P.textEl && pdfHoverCur && pdfHoverCur.layer === P.textEl) clearPdfHover();
   if (P.textEl) { P.textEl.remove(); P.textEl = null; }
   if (!P.canvas) return;
   if (release) {
@@ -1400,7 +1402,7 @@ function attachPdfHover(page, textEl) {
       clearPdfHover();
       setHover(pg, k, true);
     }
-    pdfHoverCur = { page: pg, k, part };
+    pdfHoverCur = { page: pg, k, part, layer: textEl };
     const t = $("trlist").querySelector(`.trseg[data-page="${pg}"][data-i="${k}"]`);
     if (t && $("tab-translation").classList.contains("active")) {
       scrollTrTo(t, part >= 0 ? partY(segParts(pg, k)[part]) : segMidY(pg, k));
@@ -1523,8 +1525,20 @@ function selectTr(d) {
 
 // The translation list is going (a new paper, a failed one, a retranslation): release its pin
 // and PDF highlight while the spans are still there, then forget the selection with them.
+// A detached span gets no mouseleave, so a hovered or pinned one is cleared here too, but not
+// the sentence the pointer is on in the PDF: that text layer stays and keeps owning its bar.
 function resetTrNav() {
-  unpinTr();
+  const pdfOwned = (x) =>
+    pdfHoverCur && pdfHoverCur.page === Number(x.dataset.page) && pdfHoverCur.k === Number(x.dataset.i);
+  let cleared = false;
+  $("trlist").querySelectorAll(".trseg.pinned").forEach((x) => x.classList.remove("pinned"));
+  $("trlist").querySelectorAll(".trseg.hl").forEach((x) => {
+    if (pdfOwned(x)) return;
+    setHover(Number(x.dataset.page), Number(x.dataset.i), false);
+    cleared = true;
+  });
+  // Clearing wipes a whole page's layer, which may hold the PDF-owned bar as well.
+  if (cleared && pdfHoverCur) setHover(pdfHoverCur.page, pdfHoverCur.k, true);
   $("trlist").innerHTML = "";
   S.trSel = null;
   $("trnav-status").textContent = "";

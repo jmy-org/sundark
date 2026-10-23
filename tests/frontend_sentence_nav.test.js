@@ -34,6 +34,9 @@ const code = [
   fn("makeTrSeg"),
   fn("toggleTrPin"),
   fn("unpinTr"),
+  // The PDF side's hover owner, which a rebuilt list must leave alone.
+  line("let pdfHoverCur = null;"),
+  "function setPdfHover(v) { pdfHoverCur = v; }",
   src
     .slice(src.indexOf('document.addEventListener("keydown", (e) => { if (e.key === "Escape")'))
     .split("\n")[0],
@@ -47,6 +50,8 @@ const code = [
   fn("preparePage"),
   fn("retranslateAll"),
 ].join("\n");
+// The PDF side for real: highlight layers, the text layer's hover owner, and a page's teardown.
+const pdfCode = [fn("drawHlRects"), fn("setHover"), fn("attachPdfHover"), fn("clearPdfHover"), fn("stopRender")];
 
 class El {
   constructor(tag, doc) {
@@ -118,8 +123,12 @@ class El {
     return this.children.flatMap((c) => [c, ...c.all()]);
   }
   querySelectorAll(sel) {
-    const want = sel.split(".").filter(Boolean);
-    return this.all().filter((e) => want.every((w) => e.cls.has(w)));
+    // Classes, and data attributes as setHover names a sentence: .trseg[data-page="0"][data-i="1"]
+    const data = [...sel.matchAll(/\[data-(\w+)="([^"]*)"\]/g)];
+    const want = sel.replace(/\[[^\]]*\]/g, "").split(".").filter(Boolean);
+    return this.all().filter(
+      (e) => want.every((w) => e.cls.has(w)) && data.every(([, k, v]) => String(e.dataset[k]) === v),
+    );
   }
   querySelector(sel) {
     return this.querySelectorAll(sel)[0] || null;
@@ -153,7 +162,7 @@ class El {
   }
 }
 
-function setup({ narrow = false } = {}) {
+function setup({ narrow = false, real = false } = {}) {
   const calls = { highlight: [], hover: [], panes: [], math: 0, batches: [] };
   const doc = { listeners: {}, activeElement: null };
   doc.body = new El("body", doc);
@@ -181,6 +190,7 @@ function setup({ narrow = false } = {}) {
     mk(id, doc.body);
   }
   for (const id of ["library", "summary", "chatlog", "anatomy", "autotr"]) mk(id, doc.body);
+  mk("tab-translation", doc.body);
   doc.hasFocus = () => false;
   doc.querySelector = (sel) => {
     assert.equal(sel, '#panes [data-pane="source"]');
@@ -254,17 +264,47 @@ function setup({ narrow = false } = {}) {
       ctx.paintFrontier();
     },
   };
+  if (real) {
+    // The real setHover, stopRender and the PDF hover handlers replace the stubs.
+    delete ctx.setHover;
+    delete ctx.stopRender;
+    S.scale = 1;
+    Object.assign(ctx, { partAt: () => 0, scrollTrTo() {}, segParts: () => [], partY() {}, segMidY() {} });
+  }
   vm.createContext(ctx);
-  vm.runInContext(code, ctx);
+  vm.runInContext(code + (real ? "\n" + pdfCode.join("\n") : ""), ctx);
 
   // Lay out pages the way preparePage does: one wrap per page, empty spans, painted in order.
   const shells = (texts) => {
     S.pages = texts.map((page, i) => {
       const wrap = ids.trlist.children[i];
       const spanByK = page.map((_, k) => wrap.appendChild(ctx.makeTrSeg(i, k, "")));
-      return { segs: page.map((t) => ({ text: t })), spanByK, trBuf: [], frontK: 0 };
+      const P = { segs: page.map((t) => ({ text: t })), spanByK, trBuf: [], frontK: 0 };
+      // A rebuilt list keeps its pages' PDF side, as a retranslation does.
+      return real && S.pages[i] && S.pages[i].textEl ? Object.assign(S.pages[i], P, { segs: S.pages[i].segs }) : P;
     });
   };
+  // Draw each page's PDF side the way renderPage does: a highlight layer and a text layer with
+  // the hover handlers. Sentence k sits at x = 10k; `next` gives page 0's last sentence a
+  // continuation at x = 50 on page 1.
+  const layers = ({ next = false } = {}) => {
+    S.pages.forEach((P, i) => {
+      P.el = ids.pdfview.appendChild(doc.createElement("div"));
+      P.hllayer = P.el.appendChild(doc.createElement("div"));
+      P.textEl = P.el.appendChild(doc.createElement("div"));
+      P.segs.forEach((seg, k) => (seg.rects = [{ left: 10 * k, top: 0, w: 5, h: 5 }]));
+      if (next && i === 0) Object.assign(P.segs.at(-1), { nextPage: 1, rectsNext: [{ left: 50, top: 0, w: 5, h: 5 }] });
+      ctx.attachPdfHover(i, P.textEl);
+    });
+  };
+  // The pointer over sentence k of page `pg`, on page `on`'s text layer.
+  const pointAt = (on, pg, k) => {
+    const word = { _seg: k, _segPage: pg === on ? undefined : pg };
+    word.closest = () => word;
+    S.pages[on].textEl.fire("mousemove", { target: word });
+  };
+  // What a page's highlight layer shows: the x of each rect drawn (rings and fills alike).
+  const drawn = (page) => S.pages[page].hllayer.children.map((d) => d.style.left);
   const open = (texts) => {
     S.numPages = texts.length;
     ctx.buildTrShells();
@@ -316,6 +356,9 @@ function setup({ narrow = false } = {}) {
     state,
     open,
     shells,
+    layers,
+    pointAt,
+    drawn,
     paint,
     spans,
     where,
@@ -478,6 +521,74 @@ function setup({ narrow = false } = {}) {
   t.open([["a", "b"]]);
   assert.deepEqual(t.calls.hover, [[0, 1, false]], "the old pin's highlight was cleared");
   assert.ok(!pinned.cls.has("pinned") && !pinned.cls.has("hl"));
+}
+
+// A rebuilt list takes down every PDF highlight its detached spans hold (none of them will get a
+// mouseleave), except the sentence the pointer owns on the PDF, which stays drawn.
+{
+  // Hovered, never pinned: the pointer was on it when the list went.
+  const t = setup();
+  t.open([["a", "b", "c"]]);
+  ["가", "나", "다"].forEach((x, k) => t.paint(0, k, x));
+  const s1 = t.spans()[1];
+  s1.hovered = true;
+  s1.fire("mouseenter");
+  t.calls.hover = [];
+  t.open([["a", "b", "c"]]);
+  assert.ok(!s1.isConnected, "the hovered sentence's span was replaced");
+  assert.deepEqual(t.calls.hover, [[0, 1, false]], "a hovered sentence's highlight outlived its span");
+  assert.ok(!s1.cls.has("hl"));
+
+  // Clicked under the pointer (pinned and hovered): released once, not left to the pointer.
+  t.paint(0, 0, "가");
+  t.paint(0, 1, "나");
+  const c1 = t.spans()[1];
+  c1.hovered = true;
+  c1.fire("mouseenter");
+  c1.fire("click");
+  t.calls.hover = [];
+  t.open([["a", "b", "c"]]);
+  assert.deepEqual(t.calls.hover, [[0, 1, false]], "a clicked sentence's highlight outlived its span");
+}
+{
+  // The pointer is on sentence 1 in the PDF: its bar is the PDF's, and the text layer stays.
+  const t = setup();
+  t.open([["a", "b", "c"]]);
+  ["가", "나", "다"].forEach((x, k) => t.paint(0, k, x));
+  t.ctx.setPdfHover({ page: 0, k: 1, part: 0 });
+  t.ctx.setHover(0, 1, true);
+  t.calls.hover = [];
+  t.open([["a", "b", "c"]]);
+  assert.deepEqual(t.calls.hover, [], "the PDF-owned highlight was cleared");
+
+  // The same sentence also pinned from the keyboard: the pin goes, the PDF's bar stays.
+  ["가", "나", "다"].forEach((x, k) => t.paint(0, k, x));
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-pin"].fire("click");
+  t.calls.hover = [];
+  t.open([["a", "b", "c"]]);
+  assert.deepEqual(t.calls.hover, [], "releasing the pin cleared the PDF-owned highlight");
+  assert.equal(t.ids["trnav-pin"].getAttribute("aria-pressed"), "false");
+
+  // Another sentence on the same page pinned from the keyboard: clearing it wipes the page's
+  // layer, so the PDF-owned bar is drawn again.
+  ["가", "나", "다"].forEach((x, k) => t.paint(0, k, x));
+  t.ctx.setHover(0, 1, true);
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-next"].fire("click");
+  t.ids["trnav-pin"].fire("click");
+  t.calls.hover = [];
+  t.open([["a", "b", "c"]]);
+  assert.deepEqual(
+    t.calls.hover,
+    [
+      [0, 2, false],
+      [0, 1, true],
+    ],
+    "the pin's page wipe took the PDF-owned highlight with it",
+  );
 }
 
 // Previous/Next that reach an end disable themselves: the keyboard user who pressed one keeps
@@ -670,8 +781,106 @@ const css = fs.readFileSync("web/styles.css", "utf8");
 assert.match(css, /\.trnav-bar \{[^}]*flex-wrap: wrap;/, "navigator wraps at narrow widths");
 assert.match(css, /\.trnav-pos \{[^}]*flex: 1 1 calc\(100% - 8em\);/, "position fills the label's row");
 
+// The real PDF highlight layers under a rebuilt list. The pointer owns a sentence only through a
+// live text layer: a layer torn down without a mouseleave (another paper opening, a zoom, a page
+// scrolled far away) takes its sentence with it, while a same-paper rebuild keeps it drawn.
+async function hoverOwners() {
+  const paintAll = (t, texts) => texts.forEach((page, i) => page.forEach((x, k) => t.paint(i, k, "번역 " + x)));
+  const pinAt = (t, n) => {
+    for (let j = 0; j < n; j++) t.ids["trnav-next"].fire("click");
+    t.ids["trnav-pin"].fire("click");
+  };
+  const bar = (x) => [x, x];  // a rect's ring and its fill
+
+  // Another paper reuses the old one's sentence numbers: the old pointer owns nothing in it.
+  for (const pinK of [0, 1]) {
+    const t = setup({ real: true });
+    const a = t.pdfSource();
+    t.sources.A = async () => a.source;
+    await t.ctx.openDoc({ doc_id: "A", num_pages: 1, title: "A" });
+    t.shells([["a", "b", "c"]]);
+    t.layers();
+    paintAll(t, [["a", "b", "c"]]);
+    t.pointAt(0, 0, 0);
+    assert.deepEqual(t.drawn(0), bar("0px"));
+    const b = t.pdfSource();
+    t.sources.B = async () => b.source;
+    await t.ctx.openDoc({ doc_id: "B", num_pages: 1, title: "B" });
+    t.shells([["x", "y", "z"]]);
+    t.layers();
+    paintAll(t, [["x", "y", "z"]]);
+    pinAt(t, pinK + 1);
+    assert.deepEqual(t.drawn(0), bar(pinK * 10 + "px"));
+    t.open([["x", "y", "z"]]);
+    assert.deepEqual(t.drawn(0), [], `the old paper's pointer kept B's sentence ${pinK} drawn`);
+    paintAll(t, [["x", "y", "z"]]);
+    assert.ok(!t.spans().some((x) => x.cls.has("hl")));
+    // The pointer then reaching B's sentence 0 draws it, as on any first move.
+    t.pointAt(0, 0, 0);
+    assert.deepEqual(t.drawn(0), bar("0px"), "the old paper's pointer swallowed the first move over B");
+  }
+
+  // The pointer on sentence 1 of a live page: a keyboard pin on it or on a neighbour goes with
+  // the list, and the pointer's bar is what the page shows afterwards.
+  for (const pinK of [1, 2]) {
+    const t = setup({ real: true });
+    const texts = [["a", "b", "c"]];
+    t.open(texts);
+    t.layers();
+    paintAll(t, texts);
+    t.pointAt(0, 0, 1);
+    pinAt(t, pinK + 1);
+    assert.deepEqual(t.drawn(0), bar(pinK * 10 + "px"));
+    t.open(texts);
+    assert.deepEqual(t.drawn(0), bar("10px"), `a pin on sentence ${pinK} took the pointer's bar`);
+    assert.equal(t.ids["trnav-pin"].getAttribute("aria-pressed"), "false");
+  }
+
+  // The pointer on page 1 over the continuation of page 0's last sentence; a keyboard pin on
+  // page 1's own sentence shares only that continuation page. Both halves are drawn after.
+  {
+    const t = setup({ real: true });
+    const texts = [
+      ["a", "b"],
+      ["c", "d"],
+    ];
+    t.open(texts);
+    t.layers({ next: true });
+    paintAll(t, texts);
+    t.pointAt(1, 0, 1);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("10px"), bar("50px")]);
+    pinAt(t, 3);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("10px"), bar("0px")]);
+    t.open(texts);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("10px"), bar("50px")], "the continuation's half was lost");
+    // Page 0's text layer going leaves the pointer on page 1 with its sentence; page 1's takes it.
+    t.ctx.stopRender(t.S.pages[0], true);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [bar("10px"), bar("50px")]);
+    t.ctx.stopRender(t.S.pages[1], true);
+    assert.deepEqual([t.drawn(0), t.drawn(1)], [[], []], "a removed layer's pointer kept its sentence");
+  }
+
+  // No pointer on the PDF: a keyboard pin clears with Escape, and with a rebuilt list.
+  {
+    const t = setup({ real: true });
+    const texts = [["a", "b", "c"]];
+    t.open(texts);
+    t.layers();
+    paintAll(t, texts);
+    pinAt(t, 2);
+    assert.deepEqual(t.drawn(0), bar("10px"));
+    t.escape();
+    assert.deepEqual(t.drawn(0), []);
+    t.ids["trnav-pin"].fire("click");
+    assert.deepEqual(t.drawn(0), bar("10px"));
+    t.open(texts);
+    assert.deepEqual(t.drawn(0), [], "a rebuilt list left the keyboard pin drawn");
+  }
+}
+
 lifecycle()
   .then(autotrToggle)
+  .then(hoverOwners)
   .then(() => console.log("sentence navigator ok"))
   .catch((e) => {
     console.error(e);
