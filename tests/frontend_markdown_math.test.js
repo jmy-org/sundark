@@ -20,6 +20,9 @@ assert.ok(out.includes("\\([A^m]_{ij}_x_\\)"), "underscores inside math untouche
 assert.ok(out.includes("a<em>b</em>c"), "underscores outside math still markdown: " + out);
 assert.ok(out.includes("\\[\nx&lt;y \\quad \\text{for } i\n\\]"), "display math kept and HTML-escaped: " + out);
 assert.ok(out.includes("$$E=mc^2$$"), "$$ math kept: " + out);
+const dollar = ctx.mdMath("$x_a_b$ and a_b_c, \\$5 or \\$10");
+assert.ok(dollar.includes("$x_a_b$"), "single-dollar math untouched: " + dollar);
+assert.ok(dollar.includes("a<em>b</em>c, \\$5 or \\$10"), "escaped dollars are not math: " + dollar);
 console.log("markdown math shielding PASS");
 
 delete ctx.window.DOMPurify;

@@ -1362,10 +1362,12 @@ applyTrScale();
 
 // Markdown -> HTML without breaking LaTeX. marked treats "\(" as an escaped "(" and "_x_" as
 // emphasis, which destroys math before KaTeX sees it. Shield math spans with placeholders,
-// run marked, then put the math back (HTML-escaped) for renderMath() to typeset.
+// run marked, then put the math back (HTML-escaped) for renderMath() to typeset. "$...$" is
+// shielded too (renderMath() enables it): one line, "$$" first, and an escaped "\$" neither
+// opens it (marked's literal dollar) nor closes it (KaTeX skips escaped characters).
 function mdMath(text) {
   const spans = [];
-  const shielded = (text || "").replace(/\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$\$[\s\S]+?\$\$/g, (m) => {
+  const shielded = (text || "").replace(/\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$\$[\s\S]+?\$\$|(?<!\\)\$(?:\\[^\n]|[^\\$\n])+?\$/g, (m) => {
     spans.push(m);
     return "@@MATH" + (spans.length - 1) + "@@";
   });

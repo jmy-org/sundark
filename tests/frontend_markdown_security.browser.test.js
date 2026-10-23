@@ -22,6 +22,34 @@ const { chromium } = require("@playwright/test");
       const start = src.indexOf(`function ${name}(`);
       await page.addScriptTag({ content: src.slice(start, src.indexOf("\n}\n", start) + 3) });
     }
+    // Single-dollar math is a KaTeX delimiter, so marked must not unescape "\{" or read "_" as
+    // emphasis inside it; escaped dollars outside math keep marked's own meaning.
+    const dollars = await page.evaluate(async () => {
+      const out = document.getElementById("out");
+      out.innerHTML = mdMath(
+        "$A = \\{x_1,\\ldots,x_n\\}$ and $\\hat{y}_t = \\sum_{j} w_j$ with _em_ text, costs \\$5.",
+      );
+      renderMath(out);
+      const tex = [...out.querySelectorAll('.katex annotation[encoding="application/x-tex"]')].map(
+        (a) => a.textContent,
+      );
+      const escaped = "costs \\$5 and \\$10";
+      return {
+        tex,
+        em: [...out.querySelectorAll("em")].map((e) => e.textContent),
+        currency: out.textContent.trim().endsWith("costs $5."),
+        escapedUnchanged:
+          mdMath(escaped) ===
+          DOMPurify.sanitize(marked.parse(escaped), { USE_PROFILES: { html: true } }),
+      };
+    });
+    assert.deepEqual(dollars, {
+      tex: ["A = \\{x_1,\\ldots,x_n\\}", "\\hat{y}_t = \\sum_{j} w_j"],
+      em: ["em"],
+      currency: true,
+      escapedUnchanged: true,
+    });
+    console.log("single-dollar math shielding PASS");
     const result = await page.evaluate(async () => {
       const out = document.getElementById("out");
       window.executed = 0;
