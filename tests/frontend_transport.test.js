@@ -113,18 +113,297 @@ test("MCP preserves core error status and rate-limit fields", async () => {
   assert.deepEqual(await result.json(), { detail: "limit", rate_limited: true });
 });
 
-test("MCP loads the complete original PDF through bounded validated chunks", async () => {
-  const pdf = Uint8Array.from({ length: 1024 * 1024 + 7 }, (_, i) => i % 251);
+// A one-page PDF whose unreferenced pad stream is a file hole: a large logical size that costs
+// a few KB of disk, so the reader's range path is tested past any whole-file cap.
+const MiB = 1024 * 1024;
+function writePdf(path, pad, contentPad = 0) {
+  const fs = require("node:fs");
+  const fd = fs.openSync(path, "w");
+  let at = 0;
   const offsets = [];
-  const transport = createMCP(toolBridge((name, args) => {
-    assert.equal(name, "pdf_chunk"); offsets.push(args.offset);
-    return { data_base64: Buffer.from(pdf.slice(args.offset, args.offset + args.length)).toString("base64"), offset: args.offset, total: pdf.length };
-  }));
-  const result = await transport.pdfSource("abc");
-  assert.deepEqual(result.data, pdf);
-  assert.deepEqual(offsets, [0, 1024 * 1024]);
-  const corrupt = createMCP(toolBridge(() => ({ total: 1000000000, offset: 0, data_base64: "" })));
+  const put = (text) => { const b = Buffer.from(text, "latin1"); fs.writeSync(fd, b, 0, b.length, at); at += b.length; };
+  const obj = (n, body) => { offsets[n] = at; put(`${n} 0 obj\n${body}\nendobj\n`); };
+  const text = "BT /F1 24 Tf 72 720 Td (Large synthetic fixture) Tj ET";
+  put("%PDF-1.4\n%\xe2\xe3\xcf\xd3\n");
+  obj(1, "<< /Type /Catalog /Pages 2 0 R >>");
+  obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>");
+  // NUL is PDF whitespace, so a content pad hole leaves the page's text as it is.
+  offsets[4] = at;
+  put(`4 0 obj\n<< /Length ${text.length + contentPad} >>\nstream\n${text}`);
+  at += contentPad;
+  put("\nendstream\nendobj\n");
+  obj(5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  offsets[6] = at;
+  put(`6 0 obj\n<< /Length ${pad} >>\nstream\n`);
+  at += pad;  // the hole: never written, so it reads back as zeros
+  put("\nendstream\nendobj\n");
+  const xref = at;
+  put("xref\n0 7\n0000000000 65535 f \n" + offsets.slice(1).map((o) => String(o).padStart(10, "0") + " 00000 n \n").join(""));
+  put(`trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  fs.closeSync(fd);
+  return at;
+}
+function fixture(pad, contentPad) {
+  const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sundark-range-"));
+  const file = path.join(dir, "paper.pdf");
+  const total = writePdf(file, pad, contentPad);
+  const fd = fs.openSync(file, "r");
+  return {
+    total, calls: [],
+    // Reads only the requested slice: the logical file is never allocated.
+    read(offset, length) {
+      const buffer = Buffer.alloc(Math.max(0, Math.min(length, total - offset)));
+      fs.readSync(fd, buffer, 0, buffer.length, offset);
+      return buffer;
+    },
+    close() { fs.closeSync(fd); fs.rmSync(dir, { recursive: true, force: true }); },
+  };
+}
+function chunkBridge(file, answer = (args, chunk) => chunk) {
+  return toolBridge((name, args, options) => {
+    assert.equal(name, "pdf_chunk");
+    file.calls.push({ ...args, signal: options?.signal });
+    return answer(args, { data_base64: file.read(args.offset, args.length).toString("base64"), offset: args.offset, total: file.total }, options);
+  });
+}
+const pdfjs = require("pdfjs-dist/legacy/build/pdf.js");
+const tick = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+
+test("MCP opens a PDF over 100 MiB by lazy, bounded pdf_chunk ranges", async () => {
+  const file = fixture(110 * MiB);
+  try {
+    assert.ok(file.total > 100 * MiB);
+    const transport = createMCP(chunkBridge(file), { pdfjs });
+    const source = await transport.pdfSource("abc");
+    assert.equal(source.range.length, file.total);
+    const task = pdfjs.getDocument({ ...source, verbosity: 0 });
+    const pdf = await Promise.race([task.promise, source.range.failed]);
+    assert.equal(pdf.numPages, 1);
+    const page = await pdf.getPage(1);
+    const text = (await page.getTextContent()).items.map((item) => item.str).join("");
+    assert.equal(text, "Large synthetic fixture");
+    const sent = file.calls.reduce((sum, call) => sum + Math.min(call.length, file.total - call.offset), 0);
+    assert.ok(file.calls.every((call) => call.length >= 1 && call.length <= MiB), "a call exceeded 1 MiB");
+    assert.ok(file.calls.length <= 6, `${file.calls.length} chunk calls`);
+    assert.ok(sent < 4 * MiB, `${sent} bytes crossed the bridge`);
+    await task.destroy();
+  } finally { file.close(); }
+});
+
+test("pdf.js's merged multi-MiB range and unaligned end each arrive as one complete delivery", async () => {
+  // Page 1's 3 MiB content stream makes pdf.js request its missing chunks as one merged range.
+  const file = fixture(110 * MiB, 3 * MiB);
+  try {
+    assert.notEqual(file.total % MiB, 0);
+    const transport = createMCP(chunkBridge(file), { pdfjs });
+    const source = await transport.pdfSource("abc");
+    const requests = [], deliveries = [];
+    const request = source.range.requestDataRange.bind(source.range);
+    source.range.requestDataRange = (begin, end) => { requests.push([begin, end]); request(begin, end); };
+    source.range.addRangeListener((begin, bytes) => deliveries.push([begin, bytes.byteLength]));
+    const task = pdfjs.getDocument({ ...source, verbosity: 0 });
+    const pdf = await Promise.race([task.promise, source.range.failed]);
+    const page = await Promise.race([pdf.getPage(1), source.range.failed]);
+    const text = (await Promise.race([page.getTextContent(), source.range.failed])).items.map((item) => item.str).join("");
+    assert.equal(text, "Large synthetic fixture");
+    assert.ok(requests.some(([begin, end]) => end - begin > MiB), JSON.stringify(requests));
+    assert.ok(requests.some(([, end]) => end === file.total), "no request reached the unaligned end");
+    assert.deepEqual(deliveries, requests.map(([begin, end]) => [begin, end - begin]));
+    assert.ok(file.calls.every((call) => call.length <= MiB));
+    await task.destroy();
+  } finally { file.close(); }
+});
+
+test("MCP opens a small PDF from its first chunk without range calls", async () => {
+  const file = fixture(1000);
+  try {
+    const transport = createMCP(chunkBridge(file), { pdfjs });
+    const source = await transport.pdfSource("abc");
+    const task = pdfjs.getDocument({ ...source, verbosity: 0 });
+    assert.equal((await task.promise).numPages, 1);
+    assert.deepEqual(file.calls.map((call) => [call.offset, call.length]), [[0, MiB]]);
+    await task.destroy();
+  } finally { file.close(); }
+  const corrupt = createMCP(toolBridge(() => ({ total: 1000000000, offset: 0, data_base64: "" })), { pdfjs });
   await assert.rejects(corrupt.pdfSource("abc"), /Invalid reader binary/);
+});
+
+test("MCP range splits a merged request into exact 1 MiB calls and delivers out of order by begin", async () => {
+  const file = fixture(8 * MiB);
+  const held = [];
+  try {
+    const transport = createMCP(chunkBridge(file, (args, chunk) => args.offset === 0 ? chunk
+      : new Promise((resolve) => held.push(() => resolve(chunk)))), { pdfjs });
+    const { range } = await transport.pdfSource("abc");
+    const delivered = [];
+    range.addRangeListener((begin, bytes) => delivered.push([begin, Buffer.from(bytes)]));
+    const a = [MiB + 3, 3 * MiB + 500000], b = [5 * MiB, 6 * MiB];
+    range.requestDataRange(...a);
+    range.requestDataRange(...b);
+    assert.equal(delivered.length, 0, "a range was delivered synchronously");
+    for (let i = 0; i < 8 && held.length < 4; i++) await tick(1);
+    // b's only call and a's first call are in flight together; b finishes first.
+    held.splice(held.length - 1, 1)[0]();
+    await tick();
+    while (held.length) { held.shift()(); await tick(); }
+    assert.deepEqual(delivered.map(([begin]) => begin), [b[0], a[0]]);
+    for (const [begin, bytes] of delivered) {
+      const end = begin === a[0] ? a[1] : b[1];
+      assert.deepEqual(bytes, file.read(begin, end - begin));
+    }
+    assert.deepEqual(file.calls.slice(1).map((call) => [call.offset, call.length]).sort((x, y) => x[0] - y[0]), [
+      [MiB + 3, MiB], [2 * MiB + 3, MiB], [3 * MiB + 3, 500000 - 3], [5 * MiB, MiB],
+    ]);
+  } finally { file.close(); }
+});
+
+test("MCP range rejects a bad chunk or bounds through a handled failure and delivers nothing", async () => {
+  const unhandled = [];
+  const onUnhandled = (error) => unhandled.push(error);
+  process.on("unhandledRejection", onUnhandled);
+  const file = fixture(4 * MiB);
+  const corrupt = {
+    offset: (chunk) => ({ ...chunk, offset: chunk.offset + 1 }),
+    total: (chunk) => ({ ...chunk, total: chunk.total + 1 }),
+    short: (chunk) => ({ ...chunk, data_base64: Buffer.from(chunk.data_base64, "base64").subarray(1).toString("base64") }),
+    long: (chunk) => ({ ...chunk, data_base64: Buffer.concat([Buffer.from(chunk.data_base64, "base64"), Buffer.from([1])]).toString("base64") }),
+    oversize: (chunk) => ({ ...chunk, data_base64: "A".repeat(Math.ceil(MiB / 3) * 4 + 4) }),
+    missing: (chunk) => ({ ...chunk, data_base64: undefined }),
+    decode: (chunk) => ({ ...chunk, data_base64: "!!!!" }),
+  };
+  try {
+    for (const [kind, change] of Object.entries(corrupt)) {
+      const transport = createMCP(chunkBridge(file, (args, chunk) => args.offset === 0 ? chunk : change(chunk)), { pdfjs });
+      const { range } = await transport.pdfSource("abc");
+      let delivered = 0;
+      range.addRangeListener(() => delivered++);
+      range.requestDataRange(MiB, 2 * MiB);
+      await assert.rejects(range.failed, /Invalid reader binary/, kind);
+      assert.equal(delivered, 0, kind);
+    }
+    for (const bounds of [[-1, 10], [0, file.total + 1], [10, 10], [1.5, 20], [20, 10]]) {
+      const transport = createMCP(chunkBridge(file), { pdfjs });
+      const { range } = await transport.pdfSource("abc");
+      range.requestDataRange(...bounds);
+      await assert.rejects(range.failed, /Invalid reader binary/, String(bounds));
+    }
+    // A failure aborts the other calls still in flight, and pdf.js's open fails through the race.
+    const held = [];
+    const transport = createMCP(chunkBridge(file, (args, chunk) => {
+      if (args.offset === 0) return chunk;
+      if (args.offset === 2 * MiB) return new Promise(() => {});
+      return new Promise((resolve) => held.push(() => resolve(corrupt.offset(chunk))));
+    }), { pdfjs });
+    const { range } = await transport.pdfSource("abc");
+    file.calls.length = 0;
+    range.requestDataRange(2 * MiB, 3 * MiB);
+    range.requestDataRange(3 * MiB, file.total);
+    await tick();
+    held.shift()();
+    await assert.rejects(range.failed, /Invalid reader binary/);
+    assert.equal(file.calls.find((call) => call.offset === 2 * MiB).signal.aborted, true);
+    await tick();
+    assert.deepEqual(unhandled, []);
+  } finally { file.close(); process.off("unhandledRejection", onUnhandled); }
+});
+
+test("MCP range open fails through the failure race instead of hanging", async () => {
+  const file = fixture(4 * MiB);
+  try {
+    const transport = createMCP(chunkBridge(file, (args, chunk) => args.offset === 0 ? chunk : { ...chunk, total: 5 }), { pdfjs });
+    const source = await transport.pdfSource("abc");
+    const task = pdfjs.getDocument({ ...source, verbosity: 0 });
+    await assert.rejects(Promise.race([task.promise, source.range.failed]), /Invalid reader binary/);
+    await task.destroy();
+  } finally { file.close(); }
+});
+
+test("destroying a document cancels its chunk calls and drops their late results", async () => {
+  const uncaught = [];
+  const onError = (error) => uncaught.push(error);
+  process.on("uncaughtException", onError);
+  process.on("unhandledRejection", onError);
+  const file = fixture(110 * MiB);
+  const held = [];
+  try {
+    for (const how of ["destroy", "signal"]) {
+      held.length = 0; file.calls.length = 0;
+      const open = new AbortController();
+      const transport = createMCP(chunkBridge(file, (args, chunk) => args.offset === 0 ? chunk
+        : new Promise((resolve, reject) => held.push((error) => error ? reject(error) : resolve(chunk)))), { pdfjs });
+      const source = await transport.pdfSource("abc", { signal: open.signal });
+      let delivered = 0;
+      source.range.addRangeListener(() => delivered++);
+      const task = pdfjs.getDocument({ ...source, verbosity: 0 });
+      for (let i = 0; i < 50 && !held.length; i++) await tick(1);
+      assert.ok(held.length > 0, "pdf.js requested no range");
+      const pending = file.calls.filter((call) => call.offset > 0);
+      if (how === "destroy") await task.destroy();
+      else open.abort();
+      assert.ok(pending.every((call) => call.signal.aborted), how + ": in-flight call not cancelled");
+      // Late answers after the close: a success for one call, a failure for the rest.
+      held.shift()();
+      while (held.length) held.shift()(new Error("late bridge failure"));
+      await tick();
+      assert.equal(delivered, 0, how + ": a late result was delivered");
+      let settled = false;
+      source.range.failed.catch(() => {}).finally(() => { settled = true; });
+      await tick();
+      assert.equal(settled, false, how + ": a cancellation was reported as a failure");
+      if (how === "signal") await task.destroy();
+    }
+    assert.deepEqual(uncaught, []);
+  } finally {
+    file.close();
+    process.off("uncaughtException", onError);
+    process.off("unhandledRejection", onError);
+  }
+});
+
+test("an external abort closes the range even when the bridge answers the cancelled call", async () => {
+  const unhandled = [];
+  const onUnhandled = (error) => unhandled.push(error);
+  process.on("unhandledRejection", onUnhandled);
+  const file = fixture(4 * MiB);
+  try {
+    for (const late of ["resolve", "reject"]) {
+      const held = [];
+      // A bridge that ignores the signal: the cancelled call still settles afterwards.
+      const transport = createMCP(chunkBridge(file, (args, chunk) => args.offset === 0 ? chunk
+        : new Promise((resolve, reject) => held.push(() => late === "resolve" ? resolve(chunk) : reject(new Error("late bridge failure"))))), { pdfjs });
+      const open = new AbortController();
+      const { range } = await transport.pdfSource("abc", { signal: open.signal });
+      let delivered = 0;
+      range.addRangeListener(() => delivered++);
+      file.calls.length = 0;
+      range.requestDataRange(MiB, 2 * MiB);
+      await tick();
+      assert.equal(held.length, 1, late);
+      open.abort();
+      assert.equal(file.calls[0].signal.aborted, true, late);
+      held.shift()();
+      await tick();
+      assert.equal(delivered, 0, late + ": a result after the abort was delivered");
+      assert.equal(file.calls.length, 1, late + ": a request was made after the abort");
+      range.requestDataRange(2 * MiB, 3 * MiB);
+      await tick();
+      assert.equal(file.calls.length, 1, late + ": a closed range requested again");
+      let settled = false;
+      range.failed.catch(() => {}).finally(() => { settled = true; });
+      await tick();
+      assert.equal(settled, false, late + ": a cancellation was reported as a failure");
+    }
+    // A signal aborted before pdfSource returns throws and leaves no request behind.
+    const open = new AbortController();
+    open.abort();
+    file.calls.length = 0;
+    await assert.rejects(createMCP(chunkBridge(file), { pdfjs }).pdfSource("abc", { signal: open.signal }), { name: "AbortError" });
+    assert.ok(file.calls.length <= 1);
+    await tick();
+    assert.deepEqual(unhandled, []);
+  } finally { file.close(); process.off("unhandledRejection", onUnhandled); }
 });
 
 test("MCP progressively emits exact events once and reconciles the final log", async () => {

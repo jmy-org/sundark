@@ -145,7 +145,7 @@
       .replace(/[^a-zA-Z0-9_.-]/g, "_").replace(/^\.+/, "").slice(0, 160);
     return name && name !== "zip" ? (/\.zip$/i.test(name) ? name : name + ".zip") : "review.zip";
   }
-  function createMCP(bridge = createBridge()) {
+  function createMCP(bridge = createBridge(), { pdfjs } = {}) {
     async function call(name, args, options) {
       const result = await bridge.callTool(name, args, options);
       if (result.isError) {
@@ -173,6 +173,61 @@
         output.set(bytes, offset); offset += bytes.length;
       } while (offset < output.length);
       return output;
+    }
+    // One validated pdf_chunk: exactly the bytes [offset, min(offset + length, total)) of a file
+    // whose size is `total` (when known), so a short read, an overrun or a changed file fails.
+    async function pdfChunk(docId, offset, length, total, options) {
+      const chunk = await call("pdf_chunk", { doc_id: docId, offset, length }, options);
+      if (!Number.isSafeInteger(chunk.total) || chunk.total < 0 || chunk.offset !== offset
+          || (total !== undefined && chunk.total !== total)) throw new Error("Invalid reader binary size or offset.");
+      if (typeof chunk.data_base64 !== "string" || chunk.data_base64.length > Math.ceil(CHUNK_SIZE / 3) * 4) throw new Error("Invalid reader binary chunk.");
+      let bytes;
+      try { bytes = decodeBytes(chunk.data_base64); } catch { throw new Error("Invalid reader binary chunk."); }
+      if (bytes.length !== Math.max(0, Math.min(length, chunk.total - offset))) throw new Error("Invalid reader binary chunk.");
+      return { bytes, total: chunk.total };
+    }
+    // pdf.js reads the PDF by range, so only the parts it draws cross the bridge and the reader
+    // never holds the whole file: a folder or Zotero paper has no size cap. pdf.js 3.x has no way
+    // for a range to fail, so a failure rejects `failed`, which the reader races against.
+    async function pdfSource(docId, options = {}) {
+      const Base = (pdfjs || root.pdfjsLib).PDFDataRangeTransport;
+      const first = await pdfChunk(docId, 0, CHUNK_SIZE, undefined, options);
+      const total = first.total;
+      const controller = new AbortController();
+      let closed = false, fail;
+      // The caller's abort closes the range like pdf.js's abort(): a bridge that answers the
+      // cancelled call anyway must not deliver it or start the next chunk.
+      const close = () => {
+        closed = true; controller.abort();
+        options.signal?.removeEventListener("abort", close);
+      };
+      if (options.signal?.aborted) close();
+      else options.signal?.addEventListener("abort", close, { once: true });
+      const failed = new Promise((_, reject) => { fail = reject; });
+      failed.catch(() => {});
+      async function read(begin, end) {
+        if (!Number.isSafeInteger(begin) || !Number.isSafeInteger(end) || begin < 0 || begin >= end || end > total) throw new Error("Invalid reader binary size or offset.");
+        const out = new Uint8Array(end - begin);
+        for (let offset = begin; offset < end;) {
+          if (closed) return null;
+          const { bytes } = await pdfChunk(docId, offset, Math.min(CHUNK_SIZE, end - offset), total, { signal: controller.signal });
+          out.set(bytes, offset - begin); offset += bytes.length;
+        }
+        return out;
+      }
+      class ChunkRange extends Base {
+        requestDataRange(begin, end) {
+          // The first await is the bridge call: pdf.js registers this range's reader only after
+          // this returns, and a delivery after abort() would find none.
+          read(begin, end).then((bytes) => { if (bytes && !closed) this.onDataRange(begin, bytes); })
+            .catch((error) => { if (!closed) { close(); fail(error); } });
+        }
+        abort() { close(); }
+      }
+      const range = new ChunkRange(total, first.bytes, first.bytes.length === total);
+      range.failed = failed;
+      if (closed) throw abortError();
+      return { range, rangeChunkSize: CHUNK_SIZE, disableAutoFetch: true };
     }
     async function upload(file, options) {
       if (!file || typeof file.slice !== "function" || !Number.isSafeInteger(file.size)) throw new Error("Select a PDF file to upload.");
@@ -253,7 +308,7 @@
           blob: encodeBytes(new Uint8Array(await blob.arrayBuffer())),
         } }]);
       },
-      async pdfSource(docId, options) { return { data: await binary("pdf_chunk", { doc_id: docId }, options) }; },
+      pdfSource,
       onDocument(callback) {
         return bridge.onToolResult((result) => {
           const meta = result?.structuredContent;

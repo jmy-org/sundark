@@ -278,3 +278,137 @@ test("a later page failure stops the shells it built and the paper reopens", asy
   await expect(frame.locator("#pdfview .pdfpage")).toHaveCount(1);
   expect(errors).toEqual([]);
 });
+
+const MiB = 1024 * 1024;
+const ink = (root) =>
+  root
+    .locator("#pdfview canvas")
+    .first()
+    .evaluate((canvas) => {
+      const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+      let count = 0;
+      for (let i = 0; i < pixels.length; i += 4) if (pixels[i] < 100 && pixels[i + 3]) count++;
+      return count;
+    });
+
+test("the native reader opens a folder PDF over 100 MiB by bounded ranges", async ({
+  page,
+  request,
+}) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const { size } = await (await request.post("/__e2e/large-pdf")).json();
+  expect(size).toBeGreaterThan(100 * MiB);
+  await page.goto("/__e2e/host");
+  const frame = page.frameLocator("iframe");
+  await frame.locator("#refresh").click();
+  await frame.locator("#paperlist li").filter({ hasText: "Large native fixture" }).click();
+  await expect(frame.locator("#pdfview canvas").first()).toBeVisible();
+  await expect.poll(() => ink(frame)).toBeGreaterThan(100);
+  await expect(frame.locator("#pdfview .textlayer").first()).toBeAttached();
+  await expect(frame.locator("#prep-overlay")).toBeHidden();
+  const calls = (await page.evaluate(() => bridgeLog))
+    .filter((e) => e.method === "tools/call" && e.params.name === "pdf_chunk")
+    .map((e) => e.params.arguments);
+  // Only the head and tail cross the bridge, never the whole file, in calls of at most 1 MiB.
+  expect(calls.length).toBeGreaterThan(1);
+  expect(calls.length).toBeLessThanOrEqual(6);
+  expect(calls.every((c) => c.length >= 1 && c.length <= MiB)).toBe(true);
+  expect(calls.some((c) => c.offset + c.length >= size)).toBe(true);
+  const sent = calls.reduce((sum, c) => sum + Math.min(c.length, size - c.offset), 0);
+  expect(sent).toBeLessThan(4 * MiB);
+  await expect(frame.locator("#title")).not.toContainText("Could not read");
+  expect(errors).toEqual([]);
+});
+
+test("switching papers cancels a pending PDF range and drops its late result", async ({
+  page,
+  request,
+}) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const { size } = await (await request.post("/__e2e/large-pdf")).json();
+  // The host keeps the large paper's range reads unanswered until after the switch.
+  const held = [];
+  await page.route("**/__e2e/tool", async (route) => {
+    const call = route.request().postDataJSON();
+    if (call.name === "pdf_chunk" && call.arguments.offset > 0) held.push(route);
+    else await route.continue();
+  });
+  const sample = await (await request.get("/__e2e/sample.pdf?variant=switch")).body();
+  const meta = await (
+    await request.post("/api/upload", {
+      multipart: {
+        file: { name: "embedded-switch.pdf", mimeType: "application/pdf", buffer: sample },
+      },
+    })
+  ).json();
+  await page.goto("/__e2e/host");
+  const frame = page.frameLocator("iframe");
+  await frame.locator("#refresh").click();
+  await frame.locator("#paperlist li").filter({ hasText: "Large native fixture" }).click();
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await expect(frame.locator("#prep-overlay")).toBeVisible();
+  const pending = await page.evaluate(() =>
+    bridgeLog
+      .filter(
+        (e) =>
+          e.method === "tools/call" &&
+          e.params.name === "pdf_chunk" &&
+          e.params.arguments.offset > 0,
+      )
+      .map((e) => e.id),
+  );
+  // The model opens another paper: the host pushes its tool result into the reader.
+  await page.evaluate((result) => {
+    document.querySelector("iframe").contentWindow.postMessage(
+      {
+        jsonrpc: "2.0",
+        method: "ui/notifications/tool-result",
+        params: { structuredContent: result },
+      },
+      "*",
+    );
+  }, meta);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (ids) =>
+          ids.every((id) =>
+            bridgeLog.some(
+              (e) => e.method === "notifications/cancelled" && e.params.requestId === id,
+            ),
+          ),
+        pending,
+      ),
+    )
+    .toBe(true);
+  await expect(frame.locator("#pdfview canvas").first()).toBeVisible();
+  await expect(frame.locator("#prep-overlay")).toBeHidden();
+  // The cancelled reads now answer late with valid data: the reader drops them.
+  const answered = () =>
+    page.evaluate(() => bridgeLog.filter((e) => e.tool === "pdf_chunk" && e.result).length);
+  const before = await answered();
+  for (const route of held.splice(0)) await route.continue();
+  await expect.poll(answered).toBeGreaterThanOrEqual(before + pending.length);
+  await frame
+    .locator("#pdfview")
+    .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  await expect(frame.locator("#title")).toContainText("Browser Study");
+  await expect(frame.locator("#pdfview .pdfpage")).toHaveCount(1);
+  expect(size).toBeGreaterThan(100 * MiB);
+  expect(errors).toEqual([]);
+});
+
+test("the HTTP reader opens the same PDF over 100 MiB", async ({ page, request }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await request.post("/__e2e/large-pdf");
+  await page.goto("/");
+  await page.locator("#refresh").click();
+  await page.locator("#paperlist li").filter({ hasText: "Large native fixture" }).click();
+  await expect(page.locator("#pdfview canvas").first()).toBeVisible();
+  await expect.poll(() => ink(page)).toBeGreaterThan(100);
+  await expect(page.locator("#prep-overlay")).toBeHidden();
+  expect(errors).toEqual([]);
+});

@@ -551,28 +551,9 @@ async function openDoc(meta) {
   updateReviewBtn();
   $("anatomy").innerHTML = '<p class="hint" style="padding:6px">Open the Anatomy tab to analyze the paper (grounded in the source).</p>';
 
-  try {
-    const source = await readerTransport.pdfSource(meta.doc_id, { signal: controller.signal });
-    if (!current()) return;
-    const loading = S.pdfLoading = pdfjsLib.getDocument(source);
-    const pdf = await loading.promise;
-    if (!current()) return;
-    S.pdf = pdf;
-
-    // page 1 sizes the fit modes (scale 1 = 1 CSS px per PDF point)
-    const first = await S.pdf.getPage(1).catch((err) => { if (current()) throw err; });
-    if (!current()) return;
-    const vw = first.getViewport({ scale: 1 });
-    S.page1 = { w: vw.width, h: vw.height };
-    S.scale = zoomScale();
-    showZoom();
-
-    await buildPageShells(generation);  // MUST await: it fills S.pages (one getPage per page); translateAll's
-    if (!current()) return;
-  } catch (err) {
-    if (!current()) return;
-    // The paper could not be read (lost bridge, bad chunk, broken page): give the library back
-    // instead of leaving the loading screen over it, and forget the paper so a retry reopens it.
+  // The paper could not be read (lost bridge, bad chunk, broken page): give the library back
+  // instead of leaving the loading screen over it, and forget the paper so a retry reopens it.
+  const giveBack = () => {
     if (S.pdfLoading) S.pdfLoading.destroy().catch(() => {});
     S.pdfLoading = null;
     // A later page can fail after the earlier shells are observed and drawing: stop them first.
@@ -589,8 +570,51 @@ async function openDoc(meta) {
     showPane("library");
     ov.classList.add("hidden");
     if (focusLost() && opener.isConnected) opener.focus();
+  };
+  // A PDF read by range over the MCP bridge (pdf.js has no error channel for it) reports a failed
+  // range here, and a destroyed document can leave its promises pending: without both races the
+  // open waiting on that range, or a superseded open, would never settle.
+  let failed;
+  const cancelled = new Promise((_, reject) => {
+    controller.signal.addEventListener("abort", () => reject(new Error("The open was superseded.")), { once: true });
+  });
+  cancelled.catch(() => {});
+  const guard = (promise) => Promise.race(failed ? [promise, failed, cancelled] : [promise, cancelled]);
+  try {
+    const source = await readerTransport.pdfSource(meta.doc_id, { signal: controller.signal });
+    if (!current()) return;
+    failed = source?.range?.failed;
+    const loading = S.pdfLoading = pdfjsLib.getDocument(source);
+    const pdf = await guard(loading.promise);
+    if (!current()) return;
+    S.pdf = pdf;
+
+    // page 1 sizes the fit modes (scale 1 = 1 CSS px per PDF point)
+    const first = await guard(S.pdf.getPage(1)).catch((err) => { if (current()) throw err; });
+    if (!current()) return;
+    const vw = first.getViewport({ scale: 1 });
+    S.page1 = { w: vw.width, h: vw.height };
+    S.scale = zoomScale();
+    showZoom();
+
+    await buildPageShells(generation, guard);  // MUST await: it fills S.pages (one getPage per page); translateAll's
+    if (!current()) return;
+  } catch (err) {
+    if (!current()) return;
+    giveBack();
     throw err;
   }
+  // A range that fails after the open (a page drawn later) gives the library back the same way,
+  // and ends this open so its reveal and translation stop.
+  if (failed) failed.catch((err) => {
+    if (!current()) return;
+    S.openGeneration++;
+    if (S.translationAbort) S.translationAbort.abort();
+    S.trToken += 1;
+    S.onFirstPaint = null;
+    giveBack();
+    setTitle("Could not read the PDF: " + err.message);
+  });
   buildTrShells();          // producer reads S.pages[i], so it has to be fully built first.
   showPageNum();
   // Don't wait for the whole document's layout, or even for the whole first page. Reveal as soon
@@ -617,7 +641,7 @@ async function openDoc(meta) {
     loadAnatomy();  // auto-generate the Research Anatomy in the background
     loadChat();     // this paper's saved Chat History
   }
-  await Promise.all([firstSentence, waitLayout(Math.min(3, S.numPages))]);
+  await guard(Promise.all([firstSentence, waitLayout(Math.min(3, S.numPages))])).catch(() => {});
   if (!current()) return;
   setBar(1);
   await sleep(150);
@@ -656,7 +680,7 @@ function resetObserver() {
   S.dropObs = new IntersectionObserver(onPageFar, { root: $("pdfview"), rootMargin: "3000px 0px" });
 }
 
-async function buildPageShells(generation = S.openGeneration) {
+async function buildPageShells(generation = S.openGeneration, guard = (promise) => promise) {
   const pdf = S.pdf;
   const count = S.numPages;
   if (generation !== S.openGeneration) return;
@@ -665,7 +689,7 @@ async function buildPageShells(generation = S.openGeneration) {
   S.pages = [];
   resetObserver();
   for (let i = 0; i < count; i++) {
-    const page = await pdf.getPage(i + 1).catch((err) => { if (generation === S.openGeneration) throw err; });
+    const page = await guard(pdf.getPage(i + 1)).catch((err) => { if (generation === S.openGeneration) throw err; });
     if (generation !== S.openGeneration) return;
     const vp = page.getViewport({ scale: 1 });  // in points; setScale() resizes the shell
     const el = document.createElement("div");

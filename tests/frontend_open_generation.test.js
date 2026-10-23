@@ -111,7 +111,7 @@ async function scenario(stage, rejected = false) {
     ctx,
   );
   const a = ctx.openDoc({ doc_id: "A", num_pages: 1 });
-  for (let i = 0; i < 12; i++) await Promise.resolve();
+  for (let i = 0; i < 40; i++) await Promise.resolve();
   const b = ctx.openDoc({ doc_id: "B", num_pages: 1 });
   await b;
   if (rejected) gate.reject(new Error("obsolete operation cancelled"));
@@ -271,12 +271,25 @@ async function scenario(stage, rejected = false) {
       },
       stopRender() {},
       buildTrShells() {},
-      waitLayout: () => Promise.resolve(),
+      waitLayout: () =>
+        stage === "reveal" && S.docId === "A" && !reveal.used
+          ? ((reveal.used = true), reveal.promise)
+          : Promise.resolve(),
       sleep: () => Promise.resolve(),
     };
     vm.createContext(ctx);
     vm.runInContext(fn("openDoc") + fn("buildPageShells"), ctx);
     const hidden = (id) => ctx.$(id).classList.contains("hidden");
+    // The same paper and another one open after the failure, untouched by the failed open.
+    const reopen = async (label) => {
+      for (const id of ["A", "B"]) {
+        await ctx.openDoc({ doc_id: id, num_pages: 2 });
+        assert.equal(S.docId, id, label + ": reopen " + id);
+        assert.equal(S.pages.length, 2, label + ": reopen " + id);
+        assert.equal(hidden("prep-overlay"), true, label + ": reopen " + id);
+        assert.equal(hidden("pdfcol"), false, label + ": reopen " + id);
+      }
+    };
     const a = ctx.openDoc({ doc_id: "A", num_pages: 1 });
     if (stale) {
       // B opens while A is still in flight, then A fails: B's overlay must stay up.
@@ -438,7 +451,7 @@ async function scenario(stage, rejected = false) {
     ctx,
   );
   const tick = async () => {
-    for (let i = 0; i < 12; i++) await Promise.resolve();
+    for (let i = 0; i < 40; i++) await Promise.resolve();
   };
   const a = ctx.openDoc({ doc_id: "A", num_pages: 2 });
   await tick();
@@ -478,6 +491,215 @@ async function scenario(stage, rejected = false) {
   assert.equal(P.gen, gen, "a stale entry released the new paper's page");
   assert.equal(renders.length, 2);
   console.log("A later page failure stops the earlier pages' observers and renders PASS");
+})().catch((e) => {
+  console.error(e);
+  process.exitCode = 1;
+});
+
+// pdf.js has no error channel for a range read over the MCP bridge: a failed range leaves the
+// document or page waiting forever, so the transport's `failed` promise must give the library
+// back during the open, after it, and never for a paper that is no longer open.
+let rangeFailuresDone = false;
+process.on("exit", () => {
+  if (!rangeFailuresDone) {
+    console.error("A failed range read left an open pending");
+    process.exitCode = 1;
+  }
+});
+(async () => {
+  const classes = (hidden) => {
+    const set = new Set(hidden ? ["hidden"] : []);
+    return { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c) };
+  };
+  const never = new Promise(() => {});
+  async function run(stage) {
+    const elements = new Map(),
+      sources = {},
+      titles = [];
+    let destroyed = 0,
+      pane = "library";
+    const element = (id) => ({
+      innerHTML: "",
+      style: {},
+      dataset: {},
+      classList: classes(["prep-overlay", "pdfcol", "aipanel"].includes(id)),
+      appendChild() {},
+      contains: () => false,
+    });
+    const S = { openGeneration: 0, trToken: 0, pages: [], aiConfig: null };
+    // A's document, first page or later page stays pending, as pdf.js leaves it when a range is
+    // never delivered or the document is destroyed with the bridge ignoring the cancellation.
+    const opens = { A: 0, B: 0 };
+    const pending = (id, at, open = opens[id]) =>
+      id === "A" && open === 1 && (stage === at || stage === "cancel-" + at);
+    const pdf = (id, open = opens[id]) => ({
+      getPage(n) {
+        if (pending(id, "first", open) && n === 1) return never;
+        if (pending(id, "shell", open) && n === 2) return never;
+        return Promise.resolve({ getViewport: () => ({ width: 100, height: 100 }) });
+      },
+    });
+    const reveal = deferred();
+    const ctx = {
+      S,
+      AbortController,
+      Promise,
+      $: (id) => {
+        if (!elements.has(id)) elements.set(id, element(id));
+        return elements.get(id);
+      },
+      readerTransport: {
+        async pdfSource(id) {
+          opens[id]++;
+          let reject;
+          const failed = new Promise((_, r) => (reject = r));
+          failed.catch(() => {});
+          sources[id] = { range: { failed }, reject };
+          return sources[id];
+        },
+      },
+      pdfjsLib: {
+        getDocument(source) {
+          const id = Object.keys(sources).find((key) => sources[key] === source);
+          return {
+            promise: pending(id, "loading") ? never : Promise.resolve(pdf(id)),
+            destroy: () => {
+              destroyed++;
+              return Promise.resolve();
+            },
+          };
+        },
+      },
+      document: {
+        createElement: () => element(),
+        body: {},
+        activeElement: null,
+        hasFocus: () => false,
+      },
+      getComputedStyle: () => ({ display: "flex" }),
+      setTitle: (title) => titles.push(title),
+      showPane(name) {
+        pane = name;
+      },
+      updateReviewBtn() {},
+      zoomScale: () => 1,
+      showZoom() {},
+      showPageNum() {},
+      resetObserver() {
+        S.pageObs = S.dropObs = { observe() {}, disconnect() {} };
+      },
+      stopRender() {},
+      buildTrShells() {},
+      waitLayout: () =>
+        stage === "reveal" && S.docId === "A" && !reveal.used
+          ? ((reveal.used = true), reveal.promise)
+          : Promise.resolve(),
+      sleep: () => Promise.resolve(),
+    };
+    vm.createContext(ctx);
+    vm.runInContext(fn("openDoc") + fn("buildPageShells"), ctx);
+    const hidden = (id) => ctx.$(id).classList.contains("hidden");
+    // The same paper and another one open after the failure, untouched by the failed open.
+    const reopen = async (label) => {
+      for (const id of ["A", "B"]) {
+        await ctx.openDoc({ doc_id: id, num_pages: 2 });
+        assert.equal(S.docId, id, label + ": reopen " + id);
+        assert.equal(S.pages.length, 2, label + ": reopen " + id);
+        assert.equal(hidden("prep-overlay"), true, label + ": reopen " + id);
+        assert.equal(hidden("pdfcol"), false, label + ": reopen " + id);
+      }
+    };
+    const tick = async () => {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    };
+    const given = (label) => {
+      assert.equal(hidden("prep-overlay"), true, label + ": overlay left over the screen");
+      assert.equal(hidden("empty"), false, label);
+      assert.equal(hidden("pdfcol"), true, label);
+      assert.equal(pane, "library", label);
+      assert.equal(S.docId, null, label);
+      assert.equal(S.pdf, null, label);
+      assert.equal(S.pages.length, 0, label);
+      assert.ok(destroyed >= 1, label + ": document not destroyed");
+    };
+    if (stage === "stale") {
+      await ctx.openDoc({ doc_id: "A", num_pages: 1 });
+      await ctx.openDoc({ doc_id: "B", num_pages: 1 });
+      const generation = S.openGeneration;
+      sources.A.reject(new Error("late A failure"));
+      await tick();
+      assert.equal(S.docId, "B", "a stale failure closed the open paper");
+      assert.equal(S.openGeneration, generation);
+      assert.equal(hidden("pdfcol"), false);
+      assert.equal(
+        titles.some((t) => /Could not read/.test(t)),
+        false,
+      );
+      return;
+    }
+    if (stage.startsWith("cancel-")) {
+      // Opening B destroys A, whose document never settles: A's open still ends, and quietly.
+      const a = ctx.openDoc({ doc_id: "A", num_pages: 2 });
+      await tick();
+      await ctx.openDoc({ doc_id: "B", num_pages: 2 });
+      assert.equal(await a, undefined, stage + ": superseded open did not settle");
+      assert.equal(S.docId, "B", stage);
+      assert.equal(S.pages.length, 2, stage);
+      assert.equal(hidden("pdfcol"), false, stage);
+      assert.equal(hidden("prep-overlay"), true, stage);
+      assert.equal(pane, "ai", stage + ": a superseded open gave the library back");
+      sources.A.reject(new Error("late A failure"));
+      await tick();
+      assert.equal(S.docId, "B", stage + ": a superseded failure closed the open paper");
+      return;
+    }
+    if (stage === "reveal") {
+      // The failure comes while the loading screen waits for layout, after the shells are built.
+      const opening = ctx.openDoc({ doc_id: "A", num_pages: 2 });
+      await tick();
+      assert.equal(S.pages.length, 2, "shells not built before the reveal wait");
+      assert.equal(hidden("prep-overlay"), false);
+      sources.A.reject(new Error("Invalid reader binary chunk."));
+      assert.equal(await opening, undefined, "the reveal wait did not settle");
+      given(stage);
+      assert.match(titles.at(-1), /Could not read the PDF/);
+      const old = sources.A;
+      await reopen(stage);
+      // The failed open's layout wait finishes late, and its range fails again: nothing changes.
+      reveal.resolve();
+      old.reject(new Error("again"));
+      await tick();
+      assert.equal(S.docId, "B");
+      assert.equal(hidden("prep-overlay"), true);
+      assert.equal(hidden("pdfcol"), false);
+      return;
+    }
+    if (stage === "after") {
+      await ctx.openDoc({ doc_id: "A", num_pages: 2 });
+      assert.equal(S.pages.length, 2);
+      const generation = S.openGeneration,
+        translation = (S.translationAbort = new AbortController());
+      sources.A.reject(new Error("Invalid reader binary chunk."));
+      await tick();
+      given(stage);
+      assert.equal(S.openGeneration, generation + 1, "the open was not ended");
+      assert.equal(translation.signal.aborted, true, "translation left running");
+      assert.match(titles.at(-1), /Could not read the PDF: Invalid reader binary chunk/);
+      await reopen(stage);
+      return;
+    }
+    const opening = ctx.openDoc({ doc_id: "A", num_pages: 2 });
+    await tick();
+    assert.equal(hidden("prep-overlay"), false, stage + ": open finished before the failure");
+    sources.A.reject(new Error("Invalid reader binary chunk."));
+    await assert.rejects(opening, /Invalid reader binary chunk/);
+    given(stage);
+    await reopen(stage);
+  }
+  for (const stage of ["loading", "first", "shell", "reveal", "after", "stale"]) await run(stage);
+  for (const stage of ["cancel-loading", "cancel-first", "cancel-shell"]) await run(stage);
+  rangeFailuresDone = true;
+  console.log("A failed range read gives the library back during and after the open PASS");
 })().catch((e) => {
   console.error(e);
   process.exitCode = 1;
