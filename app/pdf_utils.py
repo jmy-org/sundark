@@ -2088,7 +2088,6 @@ def figure_catalog(pdf_bytes: bytes) -> dict:
         for pi in range(doc.page_count):
             page = doc[pi]
             regions = layout_model.detect_page(page) or []
-            captions = [r for r in regions if r["role"] == "caption"]
             if any(r["role"] == "formula" for r in regions):
                 has_math = True
             counts: dict[str, int] = {}
@@ -2096,6 +2095,9 @@ def figure_catalog(pdf_bytes: bytes) -> dict:
                 if r["role"] not in ("figure", "table"):
                     continue
                 kind = "fig" if r["role"] == "figure" else "tbl"
+                # an equation number ("(1)") is a model caption too (formula_caption)
+                cls = "figure_caption" if kind == "fig" else "table_caption"
+                captions = [c for c in regions if c.get("cls") == cls]
                 counts[kind] = counts.get(kind, 0) + 1
                 figures.append(
                     {

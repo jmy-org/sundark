@@ -1,6 +1,8 @@
 import asyncio
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app import ai
@@ -51,9 +53,16 @@ class FakeBackend:
 
 class AiTests(unittest.IsolatedAsyncioTestCase):
     def use(self, backend, s=None):
+        # AI slot files go next to the settings file: keep them out of the real data/.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p0 = patch.dict(
+            "os.environ", {"SUNDARK_SETTINGS": str(Path(tmp.name) / "settings.json")}
+        )
         p1 = patch("app.ai.settings.load", return_value=s or settings_for())
         p2 = patch("app.ai.backends.get", return_value=backend)
-        p1.start(), p2.start()
+        p0.start(), p1.start(), p2.start()
+        self.addCleanup(p0.stop)
         self.addCleanup(p1.stop)
         self.addCleanup(p2.stop)
 

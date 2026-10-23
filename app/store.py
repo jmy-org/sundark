@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
+import uuid
+from contextlib import ExitStack
 from pathlib import Path
+
+from filelock import FileLock
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 PDFS = DATA / "pdfs"
@@ -30,15 +36,35 @@ def doc_id_for(pdf_bytes: bytes) -> str:
 
 
 def save_pdf(doc_id: str, pdf_bytes: bytes) -> None:
-    (PDFS / f"{doc_id}.pdf").write_bytes(pdf_bytes)
+    _atomic_write(PDFS / f"{doc_id}.pdf", pdf_bytes)
 
 
 def pdf_path(doc_id: str) -> Path:
     return PDFS / f"{doc_id}.pdf"
 
 
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Publish complete bytes; concurrent writers are last-complete-wins."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(
+        dir=path.parent, prefix=f"{path.suffix}-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _atomic_json_write(path: Path, value: object) -> None:
+    _atomic_write(path, json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
 def save_doc(doc_id: str, extracted: dict) -> None:
-    (DOCS / f"{doc_id}.json").write_text(json.dumps(extracted), encoding="utf-8")
+    _atomic_json_write(DOCS / f"{doc_id}.json", extracted)
 
 
 def load_doc(doc_id: str) -> dict | None:
@@ -56,11 +82,7 @@ def cache_get(doc_id: str, key: str) -> dict | None:
 
 
 def cache_put(doc_id: str, key: str, value: dict) -> None:
-    d = CACHE / doc_id
-    d.mkdir(parents=True, exist_ok=True)
-    (d / f"{key}.json").write_text(
-        json.dumps(value, ensure_ascii=False), encoding="utf-8"
-    )
+    _atomic_json_write(CACHE / doc_id / f"{key}.json", value)
 
 
 def _key(pid: str) -> str:
@@ -76,10 +98,7 @@ def paper_get(pid: str) -> dict | None:
 
 
 def paper_put(pid: str, record: dict) -> None:
-    PAPERS.mkdir(parents=True, exist_ok=True)
-    (PAPERS / f"{_key(pid)}.json").write_text(
-        json.dumps({"paper_id": pid, **record}, ensure_ascii=False), "utf-8"
-    )
+    _atomic_json_write(PAPERS / f"{_key(pid)}.json", {"paper_id": pid, **record})
 
 
 def paper_cache_id(pid: str) -> str:
@@ -87,35 +106,140 @@ def paper_cache_id(pid: str) -> str:
     return f"paper_{_key(pid)}"
 
 
-def chat_get(pid: str) -> list[dict]:
+def _chat_path(pid: str) -> Path:
+    return CHATS / f"{_key(pid)}.json"
+
+
+def _chat_lock(path: Path) -> FileLock:
+    locks = CHATS / ".locks"
+    locks.mkdir(parents=True, exist_ok=True)
+    return FileLock(locks / f"{path.name}.lock")
+
+
+def _chat_record(path: Path) -> dict:
+    """Only a missing file is an empty history; invalid records fail closed."""
     try:
-        turns = json.loads((CHATS / f"{_key(pid)}.json").read_text("utf-8"))
+        record = json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return {"turns": [], "generation": "legacy"}
+    if isinstance(record, list):
+        return {"turns": record, "generation": "legacy"}
+    if (
+        not isinstance(record, dict)
+        or not isinstance(record.get("turns"), list)
+        or not isinstance(record.get("generation"), str)
+        or not record["generation"]
+        or (
+            "move_id" in record
+            and not (isinstance(record["move_id"], str) and record["move_id"])
+        )
+        or (
+            "moved" in record
+            and (
+                record["moved"] is not True
+                or "move_id" not in record
+                or record["turns"]
+            )
+        )
+    ):
+        raise ValueError("Invalid chat record")
+    return record
+
+
+def _chat_read(path: Path) -> tuple[list[dict], str]:
+    record = _chat_record(path)
+    return record["turns"], record["generation"]
+
+
+def _chat_write(
+    path: Path,
+    turns: list[dict],
+    generation: str,
+    *,
+    move_id: str | None = None,
+    moved: bool = False,
+) -> None:
+    """Replace the complete record atomically, including the reset fence."""
+    record = {"generation": generation, "turns": turns}
+    if move_id is not None:
+        record["move_id"] = move_id
+    if moved:
+        record["moved"] = True
+    _atomic_json_write(path, record)
+
+
+def chat_snapshot(pid: str) -> tuple[list[dict], str]:
+    """Read history and its reset fence in one short cross-process transaction."""
+    path = _chat_path(pid)
+    with _chat_lock(path):
+        return _chat_read(path)
+
+
+def chat_get(pid: str) -> list[dict]:
+    # Atomic replacement lets readers see an entire old or new record without waiting.
+    try:
+        return _chat_read(_chat_path(pid))[0]
     except (OSError, ValueError):
         return []
-    return turns if isinstance(turns, list) else []
 
 
 def chat_put(pid: str, turns: list[dict]) -> None:
-    CHATS.mkdir(parents=True, exist_ok=True)
-    (CHATS / f"{_key(pid)}.json").write_text(
-        json.dumps(turns, ensure_ascii=False), "utf-8"
-    )
+    path = _chat_path(pid)
+    with _chat_lock(path):
+        _chat_record(path)  # Never replace unreadable user work as if absent.
+        _chat_write(path, turns, uuid.uuid4().hex)
+
+
+def chat_append(pid: str, turns: list[dict], generation: str) -> bool:
+    """Append in completion order unless reset/replacement invalidated the snapshot."""
+    path = _chat_path(pid)
+    with _chat_lock(path):
+        record = _chat_record(path)
+        if record["generation"] != generation:
+            return False
+        # A new exchange at a vacated ID starts an independent history.
+        move_id = None if record.get("moved") else record.get("move_id")
+        _chat_write(path, record["turns"] + turns, generation, move_id=move_id)
+        return True
 
 
 def chat_clear(pid: str) -> None:
-    (CHATS / f"{_key(pid)}.json").unlink(missing_ok=True)
+    # Keep a durable empty record: deletion would revive a legacy in-flight snapshot.
+    chat_put(pid, [])
+
+
+def _chat_move(old: Path, new: Path, *, keep_fence: bool) -> None:
+    if old == new:
+        return
+    with ExitStack() as stack:
+        for path in sorted((old, new)):
+            stack.enter_context(_chat_lock(path))
+        if not old.exists():
+            return
+        source = _chat_record(old)
+        if source.get("moved"):
+            return
+        destination = _chat_record(new)
+        move_id = source.get("move_id") or uuid.uuid4().hex
+        if new.exists() and not (
+            keep_fence
+            and destination.get("moved")
+            and destination.get("move_id") == move_id
+        ):
+            return
+        # Destination first: interruption can duplicate, never lose, turns.
+        _chat_write(new, source["turns"], uuid.uuid4().hex, move_id=move_id)
+        if keep_fence:
+            _chat_write(old, [], uuid.uuid4().hex, move_id=move_id, moved=True)
+        else:
+            old.unlink()
 
 
 def chat_move(old_pid: str, new_pid: str) -> None:
-    """Carry a Paper's chat over when its Paper ID changes, never overwriting."""
-    old, new = CHATS / f"{_key(old_pid)}.json", CHATS / f"{_key(new_pid)}.json"
-    if old.exists() and old != new and not new.exists():
-        old.replace(new)
+    """Carry chat across identity changes without overwriting history/reset fences."""
+    _chat_move(_chat_path(old_pid), _chat_path(new_pid), keep_fence=True)
 
 
 def chat_migrate(doc_id: str, pid: str) -> None:
-    """Move a chat saved per doc_id (before Paper IDs) to its Paper, never overwriting."""
-    old = CHATS / f"{doc_id}.json"
-    new = CHATS / f"{_key(pid)}.json"
-    if old.exists() and old != new and not new.exists():
-        old.replace(new)
+    """Move a chat saved per doc_id (before Paper IDs), never overwriting."""
+    _chat_move(CHATS / f"{doc_id}.json", _chat_path(pid), keep_fence=False)

@@ -1,5 +1,23 @@
 "use strict";
 
+const readerTransport = window.SundarkTransport;
+const fetch = (url, options) => readerTransport.fetch(url, options);
+
+// UI preferences survive for this reader session when an opaque host denies storage.
+const uiStorage = (() => {
+  const memory = new Map();
+  return {
+    getItem(key) {
+      if (memory.has(key)) return memory.get(key);
+      try { return globalThis.localStorage.getItem(key); } catch { return null; }
+    },
+    setItem(key, value) {
+      memory.set(key, String(value));
+      try { globalThis.localStorage.setItem(key, String(value)); } catch {}
+    },
+  };
+})();
+
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
@@ -11,6 +29,7 @@ const lang = () => {
 
 const S = {
   docId: null,
+  openGeneration: 0,
   pdf: null,
   numPages: 0,
   scale: 1.4,
@@ -119,6 +138,7 @@ async function getChatGPTJSON(path) {
 }
 
 async function refreshChatGPT() {
+  if (readerTransport.mode === "mcp") return;
   if (chatGPT.busy || $("set-backend").value !== "chatgpt" || !$("settings").open) return;
   setChatGPTBusy(true);
   const generation = chatGPT.generation;
@@ -227,7 +247,7 @@ function fillModels(backend) {
   const row = S.aiConfig.backends.find((b) => b.id === backend);
   const listId = "suggest-" + backend;
   const list = document.createElement("datalist"); list.id = listId;
-  for (const m of row.suggestions) { const o = document.createElement("option"); o.value = m; list.appendChild(o); }
+  for (const m of row.suggestions || []) { const o = document.createElement("option"); o.value = m; list.appendChild(o); }
   box.appendChild(list);
   for (const task of S.aiConfig.tasks) {
     const label = document.createElement("label");
@@ -254,11 +274,21 @@ function openSettings() {
   sel.innerHTML = "";
   for (const b of S.aiConfig.backends) {
     const o = document.createElement("option");
-    o.value = b.id; o.textContent = b.label + (b.installed ? "" : " (not installed)");
-    o.disabled = !b.installed; sel.appendChild(o);
+    o.value = b.id; o.textContent = b.label + (b.installed === false ? " (not installed)" : "");
+    o.disabled = b.installed === false; sel.appendChild(o);
   }
   const first = S.aiConfig.backend || (S.aiConfig.backends.find((b) => b.installed) || {}).id;
   if (first) { sel.value = first; fillModels(first); }
+  if (readerTransport.mode === "mcp") {
+    $("settings-reason").textContent = [S.aiConfig.reason, window.SundarkTransports.LOCAL_SETTINGS].filter(Boolean).join(" ");
+    show($("settings-reason"));
+    for (const input of $("settings-form").querySelectorAll("input, select, button[type=submit]")) input.disabled = true;
+    hide($("chatgpt-settings"));
+    hide($("chatgpt-save-hint"));
+    hide($("settings-error"));
+    $("settings").showModal();
+    return;
+  }
   $("settings-reason").textContent = S.aiConfig.reason || "";
   (S.aiConfig.reason ? show : hide)($("settings-reason"));
   hide($("settings-error"));
@@ -290,11 +320,11 @@ $("settings-form").addEventListener("submit", async (e) => {
 // ================= Library =================
 // Two sources: the papers folder, or the user's Zotero library (read-only, via Zotero's local API).
 let libSource = "folder";
-try { libSource = localStorage.getItem("libSource") || "folder"; } catch {}
+try { libSource = uiStorage.getItem("libSource") || "folder"; } catch {}
 
 function setLibSource(src) {
   libSource = src;
-  try { localStorage.setItem("libSource", src); } catch {}
+  try { uiStorage.setItem("libSource", src); } catch {}
   $("src-folder").classList.toggle("active", src === "folder");
   $("src-zotero").classList.toggle("active", src === "zotero");
   $("zot-controls").classList.toggle("hidden", src !== "zotero");
@@ -440,13 +470,16 @@ async function loadLibrary() {
     list.innerHTML = "";
     for (const p of r.papers) {
       const li = document.createElement("li");
-      li.innerHTML = `${esc(p.name)}<span class="meta">${esc(p.file || "")} · ${fmtSize(p.size)}</span>`;
-      li.addEventListener("click", () => openFromLibrary(p.rel, li));
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "paper-action";
+      button.innerHTML = `${esc(p.name)}<span class="meta">${esc(p.file || "")} · ${fmtSize(p.size)}</span>`;
+      button.addEventListener("click", () => openFromLibrary(p.rel, li));
+      li.appendChild(button);
       list.appendChild(li);
     }
   } catch (err) {
     if (stale()) return;
-    list.innerHTML = '<li class="emptylib">Error: ' + err.message + "</li>";
+    list.innerHTML = '<li class="emptylib">Error: ' + esc(err.message) + "</li>";
   }
 }
 $("refresh").addEventListener("click", () => { zotCollectionsLoaded = false; loadLibrary(); });
@@ -472,10 +505,26 @@ $("file").addEventListener("change", async (e) => {
     await openDoc(meta);
     loadLibrary();  // the upload is now also saved under papers/, so refresh the list
   } catch (err) { setTitle("Upload failed: " + err.message); }
+  finally { e.target.value = ""; }  // so picking the same file again fires change
 });
 
 // ================= Open document =================
 async function openDoc(meta) {
+  const generation = ++S.openGeneration;
+  const current = () => S.openGeneration === generation;
+  if (S.openAbort) S.openAbort.abort();
+  const controller = S.openAbort = new AbortController();
+  if (S.pdfLoading) S.pdfLoading.destroy().catch(() => {});
+  S.pdfLoading = null;
+  if (S.pageObs) S.pageObs.disconnect();
+  if (S.dropObs) S.dropObs.disconnect();
+  for (const P of S.pages) stopRender(P, true);
+  S.pdf = null;
+  S.pages = [];
+  $("pdfview").innerHTML = "";
+  if (S.translationAbort) S.translationAbort.abort();
+  S.trToken += 1;
+  resetTrNav();  // before any await: the old paper's sentences must not be navigable meanwhile
   S.docId = meta.doc_id;
   S.numPages = meta.num_pages;
   setTitle(meta.title + (meta.byline ? "  ·  " + meta.byline : "") + "  ·  " + meta.num_pages + " pages");
@@ -491,31 +540,92 @@ async function openDoc(meta) {
   $("empty").classList.add("hidden");
   $("pdfcol").classList.remove("hidden");
   $("aipanel").classList.remove("hidden");
+  // On a narrow screen the AI pane hides the library, and a focused row with it. Give focus a
+  // visible home afterwards, but only if it fell to the page (the setChatGPTBusy guard).
+  const active = document.activeElement;
+  const opener = active && $("library").contains(active) ? active : null;
+  const focusLost = () => opener && document.activeElement === document.body && document.hasFocus();
+  showPane("ai");
   $("summary").innerHTML = "";
   $("chatlog").innerHTML = "";
   S.summaryLoaded = false;
-  S.anatomyLoaded = false; S.anatomyModel = null;
+  S.anatomyLoaded = false; S.anatomyModel = null; S.anatomyLoading = false;
   updateReviewBtn();
   $("anatomy").innerHTML = '<p class="hint" style="padding:6px">Open the Anatomy tab to analyze the paper (grounded in the source).</p>';
 
-  S.pdf = await pdfjsLib.getDocument("/api/pdf/" + meta.doc_id).promise;
+  // The paper could not be read (lost bridge, bad chunk, broken page): give the library back
+  // instead of leaving the loading screen over it, and forget the paper so a retry reopens it.
+  const giveBack = () => {
+    if (S.pdfLoading) S.pdfLoading.destroy().catch(() => {});
+    S.pdfLoading = null;
+    // A later page can fail after the earlier shells are observed and drawing: stop them first.
+    if (S.pageObs) S.pageObs.disconnect();
+    if (S.dropObs) S.dropObs.disconnect();
+    for (const P of S.pages) stopRender(P, true);
+    S.pdf = null;
+    S.pages = [];
+    S.docId = null;
+    resetTrNav();
+    $("pdfview").innerHTML = "";
+    $("pdfcol").classList.add("hidden");
+    $("aipanel").classList.add("hidden");
+    $("empty").classList.remove("hidden");
+    showPane("library");
+    ov.classList.add("hidden");
+    if (focusLost() && opener.isConnected) opener.focus();
+  };
+  // A PDF read by range over the MCP bridge (pdf.js has no error channel for it) reports a failed
+  // range here, and a destroyed document can leave its promises pending: without both races the
+  // open waiting on that range, or a superseded open, would never settle.
+  let failed;
+  const cancelled = new Promise((_, reject) => {
+    controller.signal.addEventListener("abort", () => reject(new Error("The open was superseded.")), { once: true });
+  });
+  cancelled.catch(() => {});
+  const guard = (promise) => Promise.race(failed ? [promise, failed, cancelled] : [promise, cancelled]);
+  try {
+    const source = await readerTransport.pdfSource(meta.doc_id, { signal: controller.signal });
+    if (!current()) return;
+    failed = source?.range?.failed;
+    const loading = S.pdfLoading = pdfjsLib.getDocument(source);
+    const pdf = await guard(loading.promise);
+    if (!current()) return;
+    S.pdf = pdf;
 
-  // page 1 sizes the fit modes (scale 1 = 1 CSS px per PDF point)
-  const first = await S.pdf.getPage(1);
-  const vw = first.getViewport({ scale: 1 });
-  S.page1 = { w: vw.width, h: vw.height };
-  S.scale = zoomScale();
-  showZoom();
+    // page 1 sizes the fit modes (scale 1 = 1 CSS px per PDF point)
+    const first = await guard(S.pdf.getPage(1)).catch((err) => { if (current()) throw err; });
+    if (!current()) return;
+    const vw = first.getViewport({ scale: 1 });
+    S.page1 = { w: vw.width, h: vw.height };
+    S.scale = zoomScale();
+    showZoom();
 
-  await buildPageShells();  // MUST await: it fills S.pages (one getPage per page); translateAll's
+    await buildPageShells(generation, guard);  // MUST await: it fills S.pages (one getPage per page); translateAll's
+    if (!current()) return;
+  } catch (err) {
+    if (!current()) return;
+    giveBack();
+    throw err;
+  }
+  // A range that fails after the open (a page drawn later) gives the library back the same way,
+  // and ends this open so its reveal and translation stop.
+  if (failed) failed.catch((err) => {
+    if (!current()) return;
+    S.openGeneration++;
+    if (S.translationAbort) S.translationAbort.abort();
+    S.trToken += 1;
+    S.onFirstPaint = null;
+    giveBack();
+    setTitle("Could not read the PDF: " + err.message);
+  });
   buildTrShells();          // producer reads S.pages[i], so it has to be fully built first.
   showPageNum();
   // Don't wait for the whole document's layout, or even for the whole first page. Reveal as soon
   // as (a) the FIRST translated sentence is painted and (b) a few pages of layout are buffered so
   // scrolling right away stays smooth. Translation (parallel pool) and layout prewarm both keep
   // running in the background after the reveal.
-  const token = S.docId;
   const setBar = (f) => {
+    if (!current()) return;
     const p = Math.round(100 * Math.max(0, Math.min(1, f)));
     $("prep-fill").style.width = p + "%";
     $("prep-text").textContent = p + "%";
@@ -534,11 +644,15 @@ async function openDoc(meta) {
     loadAnatomy();  // auto-generate the Research Anatomy in the background
     loadChat();     // this paper's saved Chat History
   }
-  await Promise.all([firstSentence, waitLayout(Math.min(3, S.numPages))]);
-  if (S.docId !== token) return;
+  await guard(Promise.all([firstSentence, waitLayout(Math.min(3, S.numPages))])).catch(() => {});
+  if (!current()) return;
   setBar(1);
   await sleep(150);
+  if (!current()) return;
   $("prep-overlay").classList.add("hidden");
+  if (focusLost() && getComputedStyle($("panes")).display !== "none") {
+    document.querySelector('#panes button[aria-pressed="true"]')?.focus();
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -569,13 +683,17 @@ function resetObserver() {
   S.dropObs = new IntersectionObserver(onPageFar, { root: $("pdfview"), rootMargin: "3000px 0px" });
 }
 
-async function buildPageShells() {
+async function buildPageShells(generation = S.openGeneration, guard = (promise) => promise) {
+  const pdf = S.pdf;
+  const count = S.numPages;
+  if (generation !== S.openGeneration) return;
   const view = $("pdfview");
   view.innerHTML = "";
   S.pages = [];
   resetObserver();
-  for (let i = 0; i < S.numPages; i++) {
-    const page = await S.pdf.getPage(i + 1);
+  for (let i = 0; i < count; i++) {
+    const page = await guard(pdf.getPage(i + 1)).catch((err) => { if (generation === S.openGeneration) throw err; });
+    if (generation !== S.openGeneration) return;
     const vp = page.getViewport({ scale: 1 });  // in points; setScale() resizes the shell
     const el = document.createElement("div");
     el.className = "pdfpage";
@@ -594,16 +712,24 @@ async function buildPageShells() {
   }
 }
 
+// An entry queued before a disconnect can still arrive; it names a shell that is gone, or one of
+// the previous paper, so it is only acted on while its target is still that page's shell.
+function shellOf(e) {
+  const P = S.pages[+e.target.dataset.page];
+  return P && P.el === e.target ? P : null;
+}
+
 function onPageVisible(entries) {
   for (const e of entries) {
-    if (!e.isIntersecting) continue;
+    if (!e.isIntersecting || !shellOf(e)) continue;
     ensureRendered(+e.target.dataset.page);
   }
 }
 
 function onPageFar(entries) {
   for (const e of entries) {
-    if (!e.isIntersecting) stopRender(S.pages[+e.target.dataset.page], true);
+    const P = shellOf(e);
+    if (!e.isIntersecting && P) stopRender(P, true);
   }
 }
 
@@ -614,6 +740,8 @@ function stopRender(P, release) {
   P.gen += 1;  // a render already past its last await sees this and does not land
   if (P.renderTask) { P.renderTask.cancel(); P.renderTask = null; }
   P.rendered = false;
+  // The pointer gets no mouseleave from a removed layer, so the sentence it owned there goes too.
+  if (P.textEl && pdfHoverCur && pdfHoverCur.layer === P.textEl) clearPdfHover();
   if (P.textEl) { P.textEl.remove(); P.textEl = null; }
   if (!P.canvas) return;
   if (release) {
@@ -755,6 +883,8 @@ const trPool = () => (S.aiConfig && S.aiConfig.backend ? S.aiConfig.concurrency[
 async function translateAll(force) {
   if (!S.aiConfig || !S.aiConfig.backend) return;
   if (!S.docId || !$("autotr").checked) return;
+  if (S.translationAbort) S.translationAbort.abort();
+  S.translationAbort = new AbortController();
   const token = ++S.trToken;
   const targetLanguage = lang();
   S.rateLimited = null; hide($("ai-banner"));
@@ -882,8 +1012,8 @@ function lineRects(words, foldScripts = true) {
 
 // ================= Translation =================
 function buildTrShells() {
+  resetTrNav();
   const list = $("trlist");
-  list.innerHTML = "";
   S.frontier = 0; // earliest page not yet fully displayed (strict top-to-bottom reveal)
   for (let i = 0; i < S.numPages; i++) {
     const wrap = document.createElement("div");
@@ -899,6 +1029,7 @@ async function streamTranslate(page, offset, texts, force, write, targetLanguage
   const res = await fetch("/api/translate_stream", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ doc_id: S.docId, page, target_lang: targetLanguage, segments: texts, force: !!force }),
+    signal: S.translationAbort && S.translationAbort.signal,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -907,18 +1038,23 @@ async function streamTranslate(page, offset, texts, force, write, targetLanguage
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-      if (!line.trim()) continue;
-      let obj; try { obj = JSON.parse(line); } catch { continue; }
-      if (obj.error) throw obj.rate_limited ? new RateLimited(obj.error) : new Error(obj.error);
-      write(offset + obj.i, obj.tr);
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let obj; try { obj = JSON.parse(line); } catch { continue; }
+        if (obj.error) throw obj.rate_limited ? new RateLimited(obj.error) : new Error(obj.error);
+        write(offset + obj.i, obj.tr);
+      }
     }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 
@@ -940,9 +1076,12 @@ function paintFrontier() {
     if (P.loadingEl) { P.loadingEl.remove(); P.loadingEl = null; }
     const wrap = $("trlist").children[S.frontier];
     if (wrap) renderMath(wrap);
+    if (wrap && S.trSel && wrap.contains(S.trSel)) showTrPreview();
     P.translated = true;
     S.frontier += 1;
   }
+  // Painting only adds sentences after the frontier, so it can only enable a disabled Next.
+  if ($("trnav-next").disabled) syncTrNav();
   // Every page is displayed (or the whole document has no translatable sentences, e.g. a scanned
   // PDF): release the loading cover even though nothing was painted, so it can never hang open.
   if (S.frontier >= S.numPages && S.onFirstPaint) {
@@ -976,7 +1115,11 @@ function preparePage(i) {
   const P = S.pages[i];
   if (!P) return [];
   const wrap = $("trlist").children[i];
+  // The selected (and maybe pinned) sentence is about to go: release it with its span.
+  const owned = wrap && S.trSel && wrap.contains(S.trSel);
+  if (owned) { unpinTr(); selectTr(null); }
   if (wrap) wrap.innerHTML = "";
+  if (owned) syncTrNav();
   P.spanByK = []; P.trBuf = []; P.frontK = 0; P.loadingEl = null;
   if (!P.segs || !P.segs.length) return [];
   // Paragraph structure: sentences of the same block flow inline in one <p>. Paragraph font-size
@@ -1081,6 +1224,7 @@ async function fetchMath(i, wrap) {
       if (tag && no && no.classList.contains("treqno")) no.remove();
     }
     renderMath(wrap);
+    if (S.trSel && wrap.contains(S.trSel)) showTrPreview();
   } catch { /* best-effort: keep the original text if math fetch fails */ }
 }
 
@@ -1091,22 +1235,40 @@ function makeTrSeg(i, k, tr) {
   // Hover only highlights (both sides); the PDF is scrolled on CLICK, not on hover, so the
   // eyes are not yanked around while skimming the translation.
   d.addEventListener("mouseenter", () => setHover(i, k, true));
-  d.addEventListener("mouseleave", () => setHover(i, k, false));
-  d.addEventListener("click", () => {
-    // A second click on the pinned sentence releases it (so does Esc, below).
-    if (d.classList.contains("pinned")) { d.classList.remove("pinned"); return; }
-    unpinTr();
-    d.classList.add("pinned");
-    highlightSource(i, k, true, "center");
+  d.addEventListener("mouseleave", () => {
+    // A click on a narrow screen swaps this panel for the source, which hides the sentence from
+    // under the pointer; the pinned sentence keeps its highlight there.
+    if (d.classList.contains("pinned") && getComputedStyle(d).visibility === "hidden") return;
+    setHover(i, k, false);
   });
+  d.addEventListener("click", () => { selectTr(d); toggleTrPin(d); });
   return d;
 }
 
-// Release the translation sentence pinned by a click.
-function unpinTr() {
-  document.querySelectorAll(".trseg.pinned").forEach((x) => x.classList.remove("pinned"));
+// Pin a sentence and scroll the PDF to its source; on the pinned one, release it (so does Esc,
+// below). A click on the sentence and the navigator's Pin source button both come here.
+function toggleTrPin(d) {
+  if (d.classList.contains("pinned")) unpinTr();
+  else {
+    unpinTr();
+    d.classList.add("pinned");
+    showPane("source");  // on a narrow screen the source is the hidden pane
+    highlightSource(Number(d.dataset.page), Number(d.dataset.i), true, "center");
+  }
+  syncTrNav();
 }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") unpinTr(); });
+
+// Release the pinned translation sentence. A pin made from the keyboard keeps its highlight drawn
+// (no mouseleave clears it), so clear it here unless the pointer is on it and owns the hover.
+function unpinTr() {
+  document.querySelectorAll(".trseg.pinned").forEach((x) => {
+    x.classList.remove("pinned");
+    if (x.classList.contains("hl") && !x.matches(":hover")) {
+      setHover(Number(x.dataset.page), Number(x.dataset.i), false);
+    }
+  });
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { unpinTr(); syncTrNav(); } });
 
 // Unified: highlight one sentence on BOTH sides — a continuous bar over its lines on
 // the PDF, and its translation segment in the panel.
@@ -1240,7 +1402,7 @@ function attachPdfHover(page, textEl) {
       clearPdfHover();
       setHover(pg, k, true);
     }
-    pdfHoverCur = { page: pg, k, part };
+    pdfHoverCur = { page: pg, k, part, layer: textEl };
     const t = $("trlist").querySelector(`.trseg[data-page="${pg}"][data-i="${k}"]`);
     if (t && $("tab-translation").classList.contains("active")) {
       scrollTrTo(t, part >= 0 ? partY(segParts(pg, k)[part]) : segMidY(pg, k));
@@ -1249,7 +1411,12 @@ function attachPdfHover(page, textEl) {
   textEl.addEventListener("mouseleave", clearPdfHover);
 }
 function clearPdfHover() {
-  if (pdfHoverCur) { setHover(pdfHoverCur.page, pdfHoverCur.k, false); pdfHoverCur = null; }
+  if (!pdfHoverCur) return;
+  setHover(pdfHoverCur.page, pdfHoverCur.k, false);
+  pdfHoverCur = null;
+  // The hover took the page's one highlight layer from the pinned sentence: draw that again.
+  const pin = $("trlist").querySelector(".trseg.pinned");
+  if (pin) setHover(Number(pin.dataset.page), Number(pin.dataset.i), true);
 }
 
 // Scroll the translation panel so the middle of translation `t` is level with screen y `mid`
@@ -1269,15 +1436,17 @@ function scrollTrTo(t, mid) {
 }
 
 // Auto-translate toggle and explicit retranslation. Settings changes reload the page.
-$("autotr").addEventListener("change", () => { if ($("autotr").checked) translateAll(); });
+// Turning it back on rebuilds the list like a retranslation (fresh shells, frontier, selection),
+// but without force, so saved translations are reused.
+$("autotr").addEventListener("change", () => { if ($("autotr").checked) retranslateAll(false); });
 $("retranslate").addEventListener("click", () => retranslateAll(true));
 
 // Translation panel text-size control (dynamic, persisted)
-let trScale = parseFloat(localStorage.getItem("trScale") || "1") || 1;
+let trScale = parseFloat(uiStorage.getItem("trScale") || "1") || 1;
 function applyTrScale() { try { $("trlist").style.zoom = trScale; } catch (e) {} }
 function bumpTrScale(d) {
   trScale = Math.max(0.7, Math.min(2.0, Math.round((trScale + d) * 10) / 10));
-  try { localStorage.setItem("trScale", String(trScale)); } catch (e) {}
+  try { uiStorage.setItem("trScale", String(trScale)); } catch (e) {}
   applyTrScale();
 }
 $("tr-smaller").addEventListener("click", () => bumpTrScale(-0.1));
@@ -1286,15 +1455,19 @@ applyTrScale();
 
 // Markdown -> HTML without breaking LaTeX. marked treats "\(" as an escaped "(" and "_x_" as
 // emphasis, which destroys math before KaTeX sees it. Shield math spans with placeholders,
-// run marked, then put the math back (HTML-escaped) for renderMath() to typeset.
+// run marked, then put the math back (HTML-escaped) for renderMath() to typeset. "$...$" is
+// shielded too (renderMath() enables it): one line, "$$" first, and an escaped "\$" neither
+// opens it (marked's literal dollar) nor closes it (KaTeX skips escaped characters).
 function mdMath(text) {
   const spans = [];
-  const shielded = (text || "").replace(/\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$\$[\s\S]+?\$\$/g, (m) => {
+  const shielded = (text || "").replace(/\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$\$[\s\S]+?\$\$|(?<!\\)\$(?:\\[^\n]|[^\\$\n])+?\$/g, (m) => {
     spans.push(m);
     return "@@MATH" + (spans.length - 1) + "@@";
   });
   const escape = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return marked.parse(shielded).replace(/@@MATH(\d+)@@/g, (_, k) => escape(spans[Number(k)]));
+  if (!window.DOMPurify) throw new Error("Safe Markdown rendering is unavailable. Reload to try again.");
+  const html = marked.parse(shielded).replace(/@@MATH(\d+)@@/g, (_, k) => escape(spans[Number(k)] || ""));
+  return window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_TAGS: ["style"], FORBID_ATTR: ["style"] });
 }
 
 // copy-tex writes LaTeX to text/plain but keeps rendered math in text/html.
@@ -1343,12 +1516,116 @@ function retranslateAll(force) {
   translateAll(force);
 }
 
+// ================= Sentence navigator =================
+// Native Previous/Next/Pin source buttons give the keyboard (and a screen reader) the sentence
+// click: the sentences stay plain text, so math, paragraphs and selection read as before.
+// S.trSel is the selected sentence: a click or Previous/Next selects it, Pin source pins it.
+function selectTr(d) {
+  if (S.trSel === d) return;
+  if (S.trSel) S.trSel.classList.remove("selected");
+  S.trSel = d;
+  if (d) d.classList.add("selected");
+  showTrPreview();
+}
+
+// The translation list is going (a new paper, a failed one, a retranslation): release its pin
+// and PDF highlight while the spans are still there, then forget the selection with them.
+// A detached span gets no mouseleave, so a hovered or pinned one is cleared here too, but not
+// the sentence the pointer is on in the PDF: that text layer stays and keeps owning its bar.
+function resetTrNav() {
+  const pdfOwned = (x) =>
+    pdfHoverCur && pdfHoverCur.page === Number(x.dataset.page) && pdfHoverCur.k === Number(x.dataset.i);
+  let cleared = false;
+  $("trlist").querySelectorAll(".trseg.pinned").forEach((x) => x.classList.remove("pinned"));
+  $("trlist").querySelectorAll(".trseg.hl").forEach((x) => {
+    if (pdfOwned(x)) return;
+    setHover(Number(x.dataset.page), Number(x.dataset.i), false);
+    cleared = true;
+  });
+  // Clearing wipes a whole page's layer, which may hold the PDF-owned bar as well.
+  if (cleared && pdfHoverCur) setHover(pdfHoverCur.page, pdfHoverCur.k, true);
+  $("trlist").innerHTML = "";
+  S.trSel = null;
+  $("trnav-status").textContent = "";
+  syncTrNav();
+}
+
+// Sentences that can be selected, in document order: painted and not empty (an unpainted
+// sentence is an empty span, and a translation can come back empty).
+function trNavEntries() {
+  return [...$("trlist").querySelectorAll(".trseg")].filter((d) => d.textContent.trim());
+}
+
+function trNavStep(entries, cur, dir) {
+  const at = entries.indexOf(cur);
+  if (at < 0) return dir > 0 ? entries[0] || null : null;
+  return entries[at + dir] || null;
+}
+
+function trNavPlace(d) {
+  return "Page " + (Number(d.dataset.page) + 1) + ", sentence " + (Number(d.dataset.i) + 1);
+}
+
+// A copy of the selected sentence beside the buttons, math kept as rendered math.
+function showTrPreview() {
+  const box = $("trnav-preview");
+  box.replaceChildren();
+  if (!S.trSel) return;
+  for (const n of S.trSel.childNodes) box.appendChild(n.cloneNode(true));
+  // A sentence painted before its page finished is still raw TeX.
+  if (!box.querySelector(".katex")) renderMath(box);
+}
+
+// Bring the buttons and the visible context in line with S.trSel. Never moves focus or speaks.
+function syncTrNav() {
+  const d = S.trSel && S.trSel.isConnected ? S.trSel : null;
+  const entries = trNavEntries();
+  $("trnav-prev").disabled = !trNavStep(entries, d, -1);
+  $("trnav-next").disabled = !trNavStep(entries, d, 1);
+  const pin = $("trnav-pin");
+  pin.disabled = !d;
+  pin.setAttribute("aria-pressed", String(!!d && d.classList.contains("pinned")));
+  $("trnav-pos").textContent = d ? trNavPlace(d) : "None selected";
+  if (!d) $("trnav-preview").replaceChildren();
+}
+
+// Moving the selection releases a pin, so only one sentence is ever marked as shown in the PDF.
+// A button that reaches the end disables itself and would drop its focus to the page: the user
+// who pressed it keeps focus in the group, on Pin source (enabled once a sentence is selected).
+function moveTr(dir) {
+  const d = trNavStep(trNavEntries(), S.trSel, dir);
+  if (!d) return;
+  const from = $(dir > 0 ? "trnav-next" : "trnav-prev");
+  const pressed = document.activeElement === from;
+  unpinTr();
+  selectTr(d);
+  d.scrollIntoView({ block: "nearest" });
+  syncTrNav();
+  if (pressed && from.disabled) $("trnav-pin").focus();
+  $("trnav-status").textContent = trNavPlace(d);
+}
+
+$("trnav-prev").addEventListener("click", () => moveTr(-1));
+$("trnav-next").addEventListener("click", () => moveTr(1));
+$("trnav-pin").addEventListener("click", (e) => {
+  // A sentence whose span is gone cannot be pinned: forget it instead.
+  if (S.trSel && !S.trSel.isConnected) { selectTr(null); syncTrNav(); }
+  if (!S.trSel) return;
+  toggleTrPin(S.trSel);
+  // On a narrow screen the source pane replaced this one: give focus its visible pane control.
+  if (getComputedStyle(e.currentTarget).visibility === "hidden") {
+    document.querySelector('#panes [data-pane="source"]').focus();
+  }
+});
+
 // ================= Tabs =================
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".tab").forEach((b) => {
+      b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-pressed", String(b === btn));
+    });
     document.querySelectorAll(".tabpane").forEach((p) => p.classList.remove("active"));
-    btn.classList.add("active");
     $("tab-" + btn.dataset.tab).classList.add("active");
     // Generate lazily on first view so they don't compete with translation on open.
     if (btn.dataset.tab === "anatomy") loadAnatomy();
@@ -1368,6 +1645,7 @@ const ANAT = [
 const EV_SUB = [["dataset_test", "Dataset/Test"], ["metric", "Metric"], ["baseline", "Baseline"], ["ablation", "Ablation"]];
 
 async function loadAnatomy(force) {
+  const generation = S.openGeneration;
   if (!S.docId) return;
   if (!force && S.anatomyLoaded) return;
   if (S.anatomyLoading) return;  // already in flight (open + a tab click would double-fire)
@@ -1376,12 +1654,16 @@ async function loadAnatomy(force) {
   box.innerHTML = '<p class="loading" style="padding:6px">Analyzing structure… (grounded in the source, ~10-30s)</p>';
   try {
     const d = await postJSON("/api/anatomy", { output_language: lang(), doc_id: S.docId, force: !!force });
+    if (generation !== S.openGeneration) return;
     renderAnatomy(d); S.anatomyLoaded = true;
   } catch (err) {
-    box.innerHTML = '<p class="loading" style="padding:6px">Error: ' + err.message + "</p>";
+    if (generation !== S.openGeneration) return;
+    box.innerHTML = '<p class="loading" style="padding:6px">Error: ' + esc(err.message) + "</p>";
   } finally {
-    S.anatomyLoading = false;
-    updateReviewBtn();
+    if (generation === S.openGeneration) {
+      S.anatomyLoading = false;
+      updateReviewBtn();
+    }
   }
 }
 $("re-anatomy").addEventListener("click", () => { S.anatomyLoaded = false; loadAnatomy(true); });
@@ -1447,6 +1729,7 @@ function highlightQuote(quote) {
     if (!P.segs) continue;
     for (let k = 0; k < P.segs.length; k++) {
       if (P.segs[k].text.replace(/\s+/g, " ").toLowerCase().includes(nq)) {
+        showPane("source");
         setHover(pi, k, true);
         scrollPdfToSeg(pi, k, true);
         return true;
@@ -1459,16 +1742,19 @@ function highlightQuote(quote) {
 // ================= Summary =================
 function resetSummary() { if (S.docId) { S.summaryLoaded = false; $("summary").innerHTML = ""; } }
 async function genSummary() {
+  const generation = S.openGeneration;
   if (!S.docId || S.summaryLoaded) return;
   S.summaryLoaded = true;
   $("summary").innerHTML = '<p class="loading">Summarizing… (first run can take a bit)</p>';
   try {
     const r = await postJSON("/api/summarize", { output_language: lang(), doc_id: S.docId });
+    if (generation !== S.openGeneration) return;
     $("summary").innerHTML = mdMath(r.summary);
     renderMath($("summary"));
   } catch (err) {
+    if (generation !== S.openGeneration) return;
     S.summaryLoaded = false;
-    $("summary").innerHTML = '<p class="loading">Error: ' + err.message + "</p>";
+    $("summary").innerHTML = '<p class="loading">Error: ' + esc(err.message) + "</p>";
   }
   updateReviewBtn();
 }
@@ -1487,9 +1773,12 @@ function updateReviewBtn() {
 
 $("export-review").addEventListener("click", async () => {
   if (!S.docId) return;
+  const error = $("review-error");
+  error.textContent = ""; hide(error);
   const btn = $("export-review"), label = btn.textContent;
   btn.disabled = true; btn.textContent = "생성 중…";
   try {
+    await readerTransport.assertDownloadSupported();
     const res = await fetch(`/api/review/${S.docId}?output_language=${encodeURIComponent(lang())}`, { method: "POST" });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
@@ -1498,22 +1787,20 @@ $("export-review").addEventListener("click", async () => {
     }
     const blob = await res.blob();
     const m = (res.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/);
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = m ? m[1] : "review.zip";
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(a.href);
+    await readerTransport.download(blob, m ? m[1] : "review.zip");
   } catch (e) {
-    alert("리뷰 생성 실패: " + e.message);
+    error.textContent = "리뷰 생성 실패: " + e.message; show(error);
   } finally {
     btn.disabled = false; btn.textContent = label;
   }
 });
 
 async function loadChat() {
+  const generation = S.openGeneration;
   $("chatlog").innerHTML = "";
   try {
     const r = await (await fetch(`/api/chat/${S.docId}`)).json();
+    if (generation !== S.openGeneration) return;
     for (const t of r.turns) {
       const div = addMsg(t.role === "user" ? "user" : "bot", t.text);
       if (t.role !== "user") { div.innerHTML = mdMath(t.text); renderMath(div); }
@@ -1609,6 +1896,7 @@ $("btn-ask").addEventListener("click", () => {
   hide($("selpop"));
   if (!lastSelection) return;
   setChatCite(lastSelection);                               // show as a citation block
+  showPane("ai");
   document.querySelector('.tab[data-tab="chat"]').click();  // auto-switch to Chat
   $("chatinput").value = "";
   fitChatInput();
@@ -1645,7 +1933,7 @@ async function postForm(url, fd) {
 const PT_PX = 96 / 72;
 const ZOOM_STEPS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
 try {
-  const z = JSON.parse(localStorage.getItem("pdfZoom"));
+  const z = JSON.parse(uiStorage.getItem("pdfZoom"));
   if (z && ["width", "page", "pct"].includes(z.mode) && z.pct > 0) S.zoom = z;
 } catch (e) {}
 
@@ -1658,7 +1946,8 @@ function zoomScale() {
     // a whole page plus the gaps above and below it
     if (S.zoom.mode === "page") s = Math.min(s, (view.clientHeight - 40) / S.page1.h);
   }
-  const lo = ZOOM_STEPS[0] / 100 * PT_PX, hi = ZOOM_STEPS[ZOOM_STEPS.length - 1] / 100 * PT_PX;
+  // a fit mode may go below the smallest step, so a phone-width pane still fits the page
+  const lo = (S.zoom.mode === "pct" ? ZOOM_STEPS[0] : 25) / 100 * PT_PX, hi = ZOOM_STEPS[ZOOM_STEPS.length - 1] / 100 * PT_PX;
   return Math.min(hi, Math.max(lo, s));
 }
 
@@ -1670,7 +1959,7 @@ function showZoom() {
 
 function setZoom(z, anchor) {
   S.zoom = z;
-  try { localStorage.setItem("pdfZoom", JSON.stringify(z)); } catch (e) {}
+  try { uiStorage.setItem("pdfZoom", JSON.stringify(z)); } catch (e) {}
   if (S.pdf && S.pages.length) setScale(zoomScale(), anchor);
   showZoom();
 }
@@ -1770,7 +2059,7 @@ function refitPdf() {
 
 (function initResizers() {
   const ws = document.querySelector(".workspace");
-  const c1 = localStorage.getItem("c1"), c3 = localStorage.getItem("c3");
+  const c1 = uiStorage.getItem("c1"), c3 = uiStorage.getItem("c3");
   try { if (c1) ws.style.setProperty("--c1", c1); if (c3) ws.style.setProperty("--c3", c3); } catch (e) {}
 
   function drag(handle, varName, fromRight) {
@@ -1786,7 +2075,7 @@ function refitPdf() {
         handle.classList.remove("active");
         document.removeEventListener("pointermove", move);
         document.removeEventListener("pointerup", up);
-        try { localStorage.setItem(varName === "--c1" ? "c1" : "c3", ws.style.getPropertyValue(varName)); } catch (e) {}
+        try { uiStorage.setItem(varName === "--c1" ? "c1" : "c3", ws.style.getPropertyValue(varName)); } catch (e) {}
         refitPdf();
       };
       document.addEventListener("pointermove", move);
@@ -1797,8 +2086,24 @@ function refitPdf() {
   drag($("rz2"), "--c3", true);
 })();
 
+// ================= Narrow-screen panes =================
+// Below the CSS breakpoint one pane shows at a time; on wider screens the switcher is hidden
+// and this only records the choice.
+function showPane(name) {
+  document.querySelector(".workspace").dataset.pane = name;
+  document.querySelectorAll("#panes button").forEach((b) =>
+    b.setAttribute("aria-pressed", String(b.dataset.pane === name)));
+}
+document.querySelectorAll("#panes button").forEach((b) =>
+  b.addEventListener("click", () => showPane(b.dataset.pane)));
+
 let resizeT;
 window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(refitPdf, 300); });
 
 window.S = S; // expose for debugging
-loadConfig().finally(() => setLibSource(libSource));
+const configReady = loadConfig();
+configReady.finally(() => setLibSource(libSource));
+if (readerTransport.onDocument) readerTransport.onDocument((meta) => {
+  configReady.then(() => { if (S.docId !== meta.doc_id) return openDoc(meta); })
+    .catch((err) => setTitle("Open failed: " + err.message));
+});

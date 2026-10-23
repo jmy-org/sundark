@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from app import main, settings, store, zotero
+from app import main, service, settings, store, zotero
 from tests.pdfgen import make_pdf
 
 PAGE = "A Zotero Paper Title\nDOI: 10.9999/from.pdf.text"
@@ -27,9 +27,9 @@ class ZoteroApiTests(unittest.TestCase):
             patch.object(store, "CACHE", root / "cache"),
             patch.object(store, "CHATS", root / "chats"),
             patch.object(store, "PAPERS", root / "papers"),
-            patch.object(main, "PAPERS_DIR", root / "library"),
-            patch("app.main._schedule_prewarm", side_effect=lambda meta: meta),
-            patch("app.main.biblio.lookup", new=AsyncMock(return_value=None)),
+            patch.object(service, "PAPERS_DIR", root / "library"),
+            patch("app.service.schedule_prewarm", side_effect=lambda meta: meta),
+            patch("app.service.biblio.lookup", new=AsyncMock(return_value=None)),
         ]
         for p in self.patches:
             p.start()

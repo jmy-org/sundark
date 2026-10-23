@@ -107,7 +107,8 @@ jobs:
         run: >-
           .venv/Scripts/python.exe -m unittest
           tests.test_backend_chatgpt tests.test_chatgpt_auth
-          tests.test_chatgpt_accounts tests.test_chatgpt_concurrency -v
+          tests.test_chatgpt_accounts tests.test_chatgpt_concurrency
+          tests.test_ai_limits -v
 
   browser:
     name: Check browser workflows
@@ -131,6 +132,7 @@ jobs:
       - run: uv sync --locked
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:markdown-security
       - run: pnpm test:e2e
       - name: Upload browser failure evidence
         if: failure()

@@ -27,7 +27,7 @@ class ApiTests(unittest.TestCase):
             ),
             patch.object(store, "CACHE", root / "cache"),
             patch.object(store, "CHATS", root / "chats"),
-            patch("app.main._require_doc", return_value=DOC),
+            patch("app.service._require_doc", return_value=DOC),
         ]
         for p in self.patches:
             p.start()
@@ -238,7 +238,7 @@ class ApiTests(unittest.TestCase):
 
         with (
             patch("app.main.ai.translate_stream", new=stream),
-            patch("app.main._get_brief", new=AsyncMock(return_value="")),
+            patch("app.service._get_brief", new=AsyncMock(return_value="")),
         ):
             r = self.client.post(
                 "/api/translate_stream",
@@ -307,7 +307,7 @@ class ApiTests(unittest.TestCase):
         with (
             patch("app.main.ai.translate_stream", new=stream),
             patch("app.main.ai.translate", new=retranslate),
-            patch("app.main._get_brief", new=AsyncMock(return_value="")),
+            patch("app.service._get_brief", new=AsyncMock(return_value="")),
         ):
             r = self.client.post(
                 "/api/translate_stream",
@@ -334,10 +334,10 @@ class ApiTests(unittest.TestCase):
         src = "where the probability that the system is in state i is given by the vector and A is the transition matrix."
         cached = {"segments": [{"src": src, "tr": src} for _ in range(3)]}
         with (
-            patch("app.main.store.cache_get", return_value=cached),
-            patch("app.main.store.cache_put") as put,
+            patch("app.service.store.cache_get", return_value=cached),
+            patch("app.service.store.cache_put") as put,
             patch(
-                "app.main._retranslate",
+                "app.service._retranslate",
                 new=AsyncMock(side_effect=RateLimitError("Slow down")),
             ) as retry,
         ):
@@ -358,7 +358,7 @@ class ApiTests(unittest.TestCase):
         )
         good = "여기서 계가 상태 \\(i\\)에 있을 확률은 벡터의 \\(i\\)번째 성분이고, \\(A\\)는 전이 행렬이다."
         body = {"doc_id": "d", "page": 0, "segments": ["First sentence.", src]}
-        with patch("app.main._get_brief", new=AsyncMock(return_value="")):
+        with patch("app.service._get_brief", new=AsyncMock(return_value="")):
 
             async def stream(segs, lang, brief=""):
                 yield "첫 문장."

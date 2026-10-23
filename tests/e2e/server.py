@@ -156,7 +156,14 @@ pdf.close()
 
 
 @app.get("/__e2e/sample.pdf")
-async def sample():
+async def sample(variant: str = ""):
+    if variant:
+        from fastapi.responses import Response
+
+        with pymupdf.open(root / "sample.pdf") as source:
+            source.set_metadata({"title": "Embedded " + variant})
+            return Response(source.tobytes(), media_type="application/pdf")
+
     from fastapi.responses import FileResponse
 
     return FileResponse(root / "sample.pdf", media_type="application/pdf")
@@ -165,6 +172,113 @@ async def sample():
 # The production static mount is deliberately last; test-only routes precede it.
 app.router.routes.insert(-2, app.router.routes.pop())
 
+LARGE_PAD = 110 * 1024 * 1024
+
+
+@app.post("/__e2e/large-pdf")
+async def large_pdf():
+    """A one-page folder paper over 100 MiB whose padding is a file hole (a few KB on disk)."""
+    path = Path(os.environ["PAPERS_DIR"]) / "large-native.pdf"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = b"BT /F1 24 Tf 72 720 Td (Large native fixture) Tj ET"
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << /Font << /F1 5 0 R >> >> >>",
+            b"<< /Length %d >>\nstream\n%s\nendstream" % (len(text), text),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ]
+        offsets = []
+        with path.open("wb") as f:
+            f.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+            for n, body in enumerate(objects, 1):
+                offsets.append(f.tell())
+                f.write(b"%d 0 obj\n%s\nendobj\n" % (n, body))
+            offsets.append(f.tell())
+            f.write(b"6 0 obj\n<< /Length %d >>\nstream\n" % LARGE_PAD)
+            # The hole: never written, so it reads back as zeros.
+            f.seek(LARGE_PAD, os.SEEK_CUR)
+            f.write(b"\nendstream\nendobj\n")
+            xref = f.tell()
+            f.write(b"xref\n0 7\n0000000000 65535 f \n")
+            f.write(b"".join(b"%010d 00000 n \n" % o for o in offsets))
+            f.write(
+                b"trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref
+            )
+    return {"rel": path.name, "size": path.stat().st_size}
+
+
+app.router.routes.insert(-2, app.router.routes.pop())
+
+# The browser host only relays JSON-RPC: every tool runs through the native SDK.
+from contextlib import asynccontextmanager  # noqa: E402
+
+from fastapi import Request  # noqa: E402
+from fastapi.responses import HTMLResponse, StreamingResponse  # noqa: E402
+from mcp import Client  # noqa: E402
+
+from app import mcp_server  # noqa: E402
+
+native_server = mcp_server.build_server()
+original_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def fixture_lifespan(application):
+    async with original_lifespan(application):
+        async with Client(native_server, cache=None) as client:
+            application.state.mcp_client = client
+            yield
+
+
+app.router.lifespan_context = fixture_lifespan
+
+
+@app.get("/__e2e/reader")
+async def embedded_reader():
+    return HTMLResponse(mcp_server.reader_html())
+
+
+@app.get("/__e2e/host")
+async def embedded_host():
+    return HTMLResponse(Path(__file__).with_name("host.html").read_text())
+
+
+@app.post("/__e2e/tool")
+async def native_tool(request: Request):
+    message = await request.json()
+
+    async def events():
+        queue = asyncio.Queue()
+
+        async def progress(value, total, text):
+            await queue.put({"progress": value, "total": total, "message": text})
+
+        async def invoke():
+            result = await app.state.mcp_client.call_tool(
+                message["name"],
+                message.get("arguments", {}),
+                progress_callback=progress,
+            )
+            await queue.put({"result": result.model_dump(by_alias=True, mode="json")})
+
+        task = asyncio.create_task(invoke())
+        try:
+            while True:
+                event = await queue.get()
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+                if "result" in event:
+                    break
+            await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
+
 
 @app.get("/__e2e/calls")
 async def calls():
@@ -172,3 +286,9 @@ async def calls():
 
 
 app.router.routes.insert(-2, app.router.routes.pop())
+
+# Explicitly place all fixture routes before the catch-all static mount.
+fixtures = [
+    r for r in app.router.routes if getattr(r, "path", "").startswith("/__e2e/")
+]
+app.router.routes[:] = fixtures + [r for r in app.router.routes if r not in fixtures]

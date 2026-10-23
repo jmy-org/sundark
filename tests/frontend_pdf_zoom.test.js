@@ -54,7 +54,7 @@ function fixture() {
     clearPdfHover() {},
     stopRender() {},
     observePages() {},
-    localStorage: {
+    uiStorage: {
       getItem: (key) => saved.get(key),
       setItem: (key, value) => saved.set(key, value),
     },

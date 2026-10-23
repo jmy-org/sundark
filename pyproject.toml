@@ -24,6 +24,8 @@ dependencies = [
     "torchvision>=0.15",
     "huggingface-hub>=0.23",
     "pillow>=10.0",
+    # MCP adapter (app/mcp_server.py): the official Python SDK, 2.x API (MCPServer).
+    "mcp>=2.3,<3",
 ]
 
 [dependency-groups]

@@ -25,7 +25,7 @@ const els = {};
 const $ = (id) => (els[id] = els[id] || el());
 let pending = [];
 const ctx = {
-  $, localStorage: { getItem: () => null, setItem() {} }, esc: (s) => s, setTimeout, clearTimeout,
+  $, uiStorage: { getItem: () => null, setItem() {} }, esc: (s) => s, setTimeout, clearTimeout,
   URLSearchParams, document: { createElement: (tag) => Object.assign(el(), { tagName: tag.toUpperCase() }) }, openFromZotero() {}, postJSON() {},
   loadLibrary() {}, console,
   fetch: (url) => new Promise((resolve) => pending.push({ url, resolve })),
