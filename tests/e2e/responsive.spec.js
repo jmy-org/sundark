@@ -728,3 +728,76 @@ for (const pinned of ["another", "the same"]) {
     await expect(page.locator("#pdfview .hlrect")).toHaveCount(0);
   });
 }
+
+// The four AI views are plain toggle buttons (like the narrow-screen pane switcher): the pressed
+// one names the visible region, and the selection's Ask-in-chat switch goes through the same click.
+test("desktop 1440px AI view buttons expose the current view", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSample(page, request);
+  const views = page.getByRole("group", { name: "AI views" });
+  const names = {
+    translation: "Translation",
+    anatomy: "Anatomy",
+    summary: "Summary",
+    chat: "Chat",
+  };
+  const expectView = async (tab) => {
+    await expect(views.locator('[aria-pressed="true"]')).toHaveCount(1);
+    for (const [key, name] of Object.entries(names)) {
+      const btn = views.getByRole("button", { name, exact: true });
+      await expect(btn).toHaveAttribute("aria-pressed", String(key === tab));
+      if (key === tab) await expect(btn).toHaveClass(/\bactive\b/);
+      else await expect(btn).not.toHaveClass(/\bactive\b/);
+      const pane = page.locator("#" + (await btn.getAttribute("aria-controls")));
+      await expect(pane).toHaveCount(1);
+      await expect(pane).toBeVisible({ visible: key === tab });
+    }
+    await expect(page.getByRole("region", { name: names[tab], exact: true })).toBeVisible();
+  };
+  const aiCalls = async () => {
+    const calls = await (await request.get("/__e2e/calls")).json();
+    return Object.entries(calls)
+      .filter(([key]) => /^(summary|anatomy):/.test(key))
+      .reduce((sum, [, n]) => sum + n, 0);
+  };
+  await expectView("translation");
+  // Opening generated both in the background; viewing them must not generate again.
+  await expect(page.locator("#summary")).toContainText(TRANSLATED);
+  await expect(page.locator("#tab-anatomy .anat-quote").first()).toBeAttached();
+  const callsBefore = await aiCalls();
+
+  // Four Tab stops in order, each activated by the native Enter or Space.
+  const translation = views.getByRole("button", { name: "Translation", exact: true });
+  await translation.focus();
+  for (const [name, key] of [
+    ["Anatomy", "Enter"],
+    ["Summary", "Space"],
+    ["Chat", "Enter"],
+  ]) {
+    await page.keyboard.press("Tab");
+    await expect(views.getByRole("button", { name, exact: true })).toBeFocused();
+    await page.keyboard.press(key);
+    await expectView(name.toLowerCase());
+  }
+  await translation.click();
+  await expectView("translation");
+  await page.locator('[data-tab="summary"]').click();
+  await expectView("summary");
+  expect(await aiCalls()).toBe(callsBefore);
+
+  // Ask-in-chat on a PDF selection switches to Chat through the same handler.
+  await page.evaluate(() => {
+    const span = [...document.querySelectorAll("#pdfview .textlayer span")].find(
+      (s) => s.textContent.trim().length >= 3,
+    );
+    const range = document.createRange();
+    range.selectNodeContents(span);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    document.getElementById("pdfview").dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await page.locator("#btn-ask").click();
+  await expectView("chat");
+  await expect(page.locator("#chatinput")).toBeFocused();
+  expect(await aiCalls()).toBe(callsBefore);
+});

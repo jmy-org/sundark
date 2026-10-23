@@ -1616,9 +1616,11 @@ $("trnav-pin").addEventListener("click", (e) => {
 // ================= Tabs =================
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".tab").forEach((b) => {
+      b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-pressed", String(b === btn));
+    });
     document.querySelectorAll(".tabpane").forEach((p) => p.classList.remove("active"));
-    btn.classList.add("active");
     $("tab-" + btn.dataset.tab).classList.add("active");
     // Generate lazily on first view so they don't compete with translation on open.
     if (btn.dataset.tab === "anatomy") loadAnatomy();
