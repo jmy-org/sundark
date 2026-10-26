@@ -122,14 +122,34 @@ What the reader shows lives in the ChatGPT conversation and the widget:
   (owner-scoped, with per-user caps). The library tools (`search_library`, `read_paper_page`,
   `save_paper_analysis` and the rest) keep working on what is saved there.
 
-These properties are tested locally and in CI with synthetic data. They still need these live
-gates, which no local test covers:
+### Live validation checkpoint (2026-10-26)
 
-- ChatGPT file attachment reaches the Site (the attachment download host,
-  `files.oaiusercontent.com` by default, `SUNDARK_FILE_HOSTS` otherwise, is a candidate, not a
-  confirmed one).
-- The MCP Apps reader widget renders in the ChatGPT host.
-- An authenticated end-to-end run in the published Site.
+All four CI checks passed for the implementation at `95d254d`: 86 unit/contract tests,
+30 state/Chromium mock-host tests, and local production/development workerd checks
+(26/62 respectively). The exact exported source was deployed to the existing owner-private
+Site. These checks do not prove that the ChatGPT host renders the reader.
+
+Native Site logs confirm that ChatGPT negotiates MCP `2026-07-28` with the MCP Apps UI
+capability, calls the empty-reader tool successfully, and retrieves both the attachment
+reader HTML (2,034,560 bytes) and the small saved-reader HTML (7,302 bytes). Attachment
+policy errors also identified two exact regional ChatGPT download hosts; those hosts were
+allowed individually, without a wildcard. Other regional hosts remain unverified.
+
+**The real ChatGPT reader remains blocked.** In fresh chats after refreshing metadata,
+both readers showed "App failed to open". A temporary, tiny static MCP Apps resource
+with no JavaScript, resource metadata, file handling or storage failed the same way.
+A DOM observer installed before that call recorded no widget-frame insertion or removal
+in the document or reachable shadow roots. Closed shadow roots, other windows and
+out-of-document surfaces were not observable, so this does not prove that no frame was
+attempted anywhere. The evidence points toward the host or connection stage; it does
+not establish a specific platform defect.
+
+The temporary probe was removed and the previous product tree restored exactly. Opt-in
+MCP tracing was disabled again. No user papers were saved during these probes. The
+remaining live gates are visible original-PDF rendering, ordered translation, page
+navigation, grounded Q&A, export/restore and reopen behavior in actual ChatGPT.
+Do not describe the workflow as ready until these gates pass; a model response claiming
+that it opened the reader is insufficient evidence.
 
 ## Licenses
 
