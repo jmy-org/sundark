@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `207b9e55c3c6ed7e24d8850244b07d34abb42861` ("Expose safe attachment policy diagnostics"; reader added in `7c2b570`) |
+| Exported Site commit | `ec45aa9346dcdacebf7ae74e19e9f281cd39dbce` ("Align widget discovery and add opt-in MCP tracing"; reader added in `7c2b570`) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 

@@ -85,6 +85,34 @@ test('export JSON round-trips through the validator; bad files are refused', () 
   assert.throws(() => S.restoreJson(' '.repeat(4 * 1024 * 1024 + 1)), /4MB/);
 });
 
+test('a restore keeps every exported translation past one tool result cap, and refuses what it cannot hold', () => {
+  // 101 pages x 31 sentences = 3131 translations, read over many tool results of one page each.
+  const pages = Array.from({length: 101}, (_, i) => i + 1);
+  const d = pages.reduce((acc, n) => {
+    const segments = Array.from({length: 31}, (_, i) => ({...seg(n, i), bbox: [0.1, 0.02 + i * 0.03, 0.5, 0.02]}));
+    return S.merge(acc, S.parseOutput(output({attachment: {fileId: 'file-1', fileName: 'paper.pdf', pdfSha256: sha, numPages: 101}, page: n,
+      pages: [{page: n, width: 612, height: 792, segments}], translations: segments.map(s => ({id: s.id, text: `번역 ${s.id}`}))})));
+  }, S.emptyDoc());
+  assert.equal(S.frontier(d).translated, 3131);
+  const json = S.exportJson(d);
+  assert(new TextEncoder().encode(json).length < 4 * 1024 * 1024, 'within the restore size limit');
+  const back = S.restoreJson(json);
+  assert.equal(back.translations.size, 3131);
+  assert.equal(S.frontier(back).translated, 3131);
+  assert.equal(back.translations.get('p101-t2-s30'), '번역 p101-t2-s30');
+  assert.deepEqual([...back.translations], [...d.translations]);
+  // A tool result keeps its own cap.
+  const big = Array.from({length: 3001}, (_, i) => ({id: `x${i}`, text: 't'}));
+  assert.equal(S.parseOutput(output({translations: big})).translations.length, 3000);
+  // A file holding more than a reading can is refused, never cut short.
+  const extra = JSON.parse(json);
+  extra.translations.push({id: 'p1-t2-s0', text: 'duplicate'});
+  assert.throws(() => S.restoreJson(JSON.stringify(extra)), /번역/);
+  const tooMany = {format: 'sundark-ephemeral-reading', version: 1, attachment: null,
+    pages: Array.from({length: 201}, (_, i) => ({page: Math.min(i + 1, 200), width: 612, height: 792, segments: []})), translations: [], analysis: []};
+  assert.throws(() => S.restoreJson(JSON.stringify(tooMany)), /200/);
+});
+
 test('analysis results flatten by kind; unknown shapes show nothing', () => {
   assert.equal(S.analysisText('summary', {text: '요약', citations: []}), '요약');
   assert.equal(S.analysisText('qa', {question: '왜?', answer: '그래서.', citations: []}), 'Q. 왜?\n\n그래서.');

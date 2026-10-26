@@ -96,6 +96,8 @@ export async function drawPage(doc: PdfDoc, number: number, canvas: HTMLCanvasEl
   const cssScale = cssWidth / base.width;
   const ratio = Math.min(globalThis.devicePixelRatio || 1, 3);
   const size = await renderPage(doc, number, canvas, cssScale * ratio, signal);
+  // A newer draw owns the shared text container now: leave it alone.
+  if (signal?.aborted) throw new DOMException('Rendering cancelled.', 'AbortError');
   const cssHeight = base.height * cssScale;
   canvas.style.width = cssWidth + 'px';
   canvas.style.height = cssHeight + 'px';
@@ -104,7 +106,13 @@ export async function drawPage(doc: PdfDoc, number: number, canvas: HTMLCanvasEl
   textLayer.style.setProperty('--scale-round-x', '1px');
   textLayer.style.setProperty('--scale-round-y', '1px');
   const layer = new pdfjs.TextLayer({ textContentSource: page.streamTextContent(), container: textLayer, viewport: page.getViewport({ scale: cssScale }) });
-  await layer.render();
+  // TextLayer appends spans as its text stream arrives; cancel() stops the stream, so an
+  // obsolete page adds nothing after a newer draw cleared the container.
+  const cancel = () => layer.cancel();
+  signal?.addEventListener('abort', cancel, { once: true });
+  try { await layer.render(); }
+  catch (error) { if (signal?.aborted) throw new DOMException('Rendering cancelled.', 'AbortError'); throw error; }
+  finally { signal?.removeEventListener('abort', cancel); }
   return { ...size, cssWidth, cssHeight, textLayer: layer };
 }
 

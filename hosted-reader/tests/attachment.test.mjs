@@ -455,7 +455,10 @@ async function rpc(method, params, headers = signedIn) {
     return (await response.json()).result;
   } finally { globalThis.__requestHeaders = undefined; }
 }
-const ATTACHMENT_URI = 'ui://sundark/attachment-reader.html';
+const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v2.html';
+const SAVED_URI = 'ui://sundark/reader-compat-v3.html';
+// URIs earlier tool results named; hosts that cached them must still read the current body.
+const OLD_ATTACHMENT_URI = 'ui://sundark/attachment-reader.html', OLD_SAVED_URI = 'ui://sundark/reader-compat-v2.html';
 const LEGACY = ['prepare_paper_task', 'list_paper_figures', 'read_paper_figure', 'render_paper_reader', 'search_library', 'list_paper_sources', 'read_paper_source',
   'read_paper_page', 'read_paper_notes', 'read_paper_analysis', 'save_paper_analysis', 'import_paper_pdf', 'extract_paper_pages', 'import_paper_text'];
 
@@ -495,7 +498,7 @@ test('route: new tools are read-only, file-param and reader-template tools', asy
   assert.match(by.import_paper_pdf.description, /read_attached_pdf/);
   const {resources} = await rpc('resources/list');
   assert(resources.some(r => r.uri === ATTACHMENT_URI));
-  assert(resources.some(r => r.uri === 'ui://sundark/reader-compat-v2.html'), 'legacy reader resource kept');
+  assert(resources.some(r => r.uri === SAVED_URI), 'saved reader resource kept');
   const read = await rpc('resources/read', {uri: ATTACHMENT_URI});
   const {attachmentReaderHtml} = await import('../lib/attachment-reader.ts');
   assert.equal(read.contents[0].text, attachmentReaderHtml);
@@ -503,6 +506,52 @@ test('route: new tools are read-only, file-param and reader-template tools', asy
   assert.equal(read.contents[0].mimeType, 'text/html;profile=mcp-app');
   assert.deepEqual(read.contents[0]._meta.ui.csp, {connectDomains: ['https://files.oaiusercontent.com'], resourceDomains: []});
   assert.deepEqual(read.contents[0]._meta['openai/widgetCSP'], {connect_domains: ['https://files.oaiusercontent.com'], resource_domains: []});
+});
+
+test('route: old reader URIs read the current body but only the new URIs are advertised', async () => {
+  const {resources} = await rpc('resources/list');
+  assert.deepEqual(resources.map(r => r.uri).sort(), [ATTACHMENT_URI, SAVED_URI].sort());
+  const {tools} = await noStorage(() => rpc('tools/list'));
+  const named = JSON.stringify(tools);
+  assert(!named.includes(OLD_ATTACHMENT_URI) && !named.includes(OLD_SAVED_URI), 'tool metadata names only the new URIs');
+  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI]]) {
+    const now = (await rpc('resources/read', {uri: current})).contents[0];
+    const alias = (await rpc('resources/read', {uri: old})).contents[0];
+    assert.equal(alias.uri, old, 'echoes the URI the host asked for');
+    assert.deepEqual({...alias, uri: current}, now, `${old} serves the same body, MIME and CSP`);
+  }
+  const unknown = await rpc('resources/read', {uri: 'ui://sundark/attachment-reader-v1.html'});
+  assert.equal(unknown.isError, true, 'unknown URIs still fail');
+  assert.equal(unknown.contents, undefined);
+});
+
+test('route: UI tool metadata matches what the installed ext-apps registerAppTool registers', async () => {
+  // registerAppTool mirrors _meta.ui.resourceUri into the legacy _meta['ui/resourceUri'] key (and back) and
+  // changes nothing else; a fake server records exactly what it would register.
+  const {registerAppTool, RESOURCE_URI_META_KEY} = await import('@modelcontextprotocol/ext-apps/server');
+  assert.equal(RESOURCE_URI_META_KEY, 'ui/resourceUri');
+  const registered = meta => {
+    let seen;
+    registerAppTool({registerTool: (_name, config) => { seen = config._meta; }}, 'probe', {_meta: meta}, () => {});
+    return seen;
+  };
+  const {tools} = await noStorage(() => rpc('tools/list'));
+  const ui = {open_pdf_file: ATTACHMENT_URI, read_attached_pdf: ATTACHMENT_URI, render_attached_reader: ATTACHMENT_URI,
+    open_attachment_reader: ATTACHMENT_URI, render_paper_reader: SAVED_URI};
+  for (const t of tools) {
+    const uri = ui[t.name];
+    if (!uri) {
+      assert.equal(t._meta?.ui, undefined, `${t.name} has no UI`);
+      assert.equal(t._meta?.[RESOURCE_URI_META_KEY], undefined, t.name);
+      assert.equal(t._meta?.['openai/outputTemplate'], undefined, t.name);
+      continue;
+    }
+    assert.deepEqual([t._meta.ui.resourceUri, t._meta[RESOURCE_URI_META_KEY], t._meta['openai/outputTemplate']], [uri, uri, uri], t.name);
+    assert.deepEqual(registered(t._meta), t._meta, `${t.name} is already normalized`);
+    const {[RESOURCE_URI_META_KEY]: _legacy, ...current} = t._meta;
+    assert.deepEqual(registered(current), t._meta, `${t.name} equals the SDK registration of its current-key metadata`);
+  }
+  assert.deepEqual(tools.filter(t => t._meta?.ui).map(t => t.name).sort(), Object.keys(ui).sort());
 });
 
 test('route: initialize carries standard instructions that route an attached PDF to read', async () => {
@@ -525,6 +574,15 @@ test('route: initialize carries standard instructions that route an attached PDF
   const render = tools.find(t => t.name === 'render_attached_reader');
   assert.match(render.description, /same language/i);
   assert.doesNotMatch(tools.find(t => t.name === 'prepare_attachment_task').description, /page = a source page/);
+});
+
+test('route: July discovery carries the same attachment onboarding as initialize', async () => {
+  const discovered = await noStorage(() => rpc('server/discover'));
+  const initialized = await noStorage(() => rpc('initialize', {protocolVersion: '2026-07-28'}));
+  assert.deepEqual(discovered.supportedVersions, ['2026-07-28']);
+  assert.equal(discovered.instructions, initialized.instructions);
+  assert.match(discovered.instructions, /read_attached_pdf/);
+  assert.match(discovered.instructions, /explicit/i);
 });
 
 test('route: read and render return model text, structuredContent and no URL', async () => {

@@ -40,6 +40,9 @@ let busy = false;
  * earlier document never reaches the screen. */
 let gen = 0;
 let loading: AbortController | null = null;
+/** File entrypoint opens, numbered as requested: only the newest may change the view,
+ * whichever host read finishes first. */
+let fileOpen = 0;
 class Stale extends Error { name = 'AbortError'; }
 const fence = (g: number) => { if (g !== gen) throw new Stale('stale'); };
 const isAbort = (error: unknown) => (error as Error)?.name === 'AbortError' || (error as Error)?.name === 'RenderingCancelledException';
@@ -247,28 +250,30 @@ async function loadOriginal() {
  * extract the first pages with the same geometry code the server uses. */
 async function openFileEntry(file: FileEntry) {
   status(`${file.name} 여는 중…`);
-  const g = gen;
+  const g = gen, intent = ++fileOpen;
+  const current = (at: number) => { fence(at); if (intent !== fileOpen) throw new Stale('stale'); };
   try {
     const bytes = base64Bytes(await host.readFileResource(file.resourceUri));
-    fence(g);
+    current(g);
     const sha = await sha256Hex(bytes);
-    fence(g);
+    current(g);
     const same = doc.attachment?.pdfSha256 === sha;
     if (!same) newDocument();
     const mine = gen;
     doc = merge(same ? doc : emptyDoc(), local([], { attachment: { fileId: '', fileName: file.name, pdfSha256: sha, numPages: 0 } }));
     await adoptPdf(bytes, 'resource:' + sha, mine);
+    current(mine);
     doc.attachment!.numPages = pdf!.numPages;
     const opened = pdf!;
     const pages = [];
-    for (let n = 1; n <= Math.min(opened.numPages, MAX_CLIENT_PAGES); n++) { pages.push(await extractPage(opened, n)); fence(mine); }
+    for (let n = 1; n <= Math.min(opened.numPages, MAX_CLIENT_PAGES); n++) { pages.push(await extractPage(opened, n)); current(mine); }
     const needsOcrPages = pages.filter(p => !p.segments.length).map(p => p.page);
     doc = merge(doc, local(pages, { nextPages: pdf!.numPages > MAX_CLIENT_PAGES ? [MAX_CLIENT_PAGES + 1] : [], needsOcrPages,
       complete: pdf!.numPages <= MAX_CLIENT_PAGES && !needsOcrPages.length }));
     page = 1; selected = doc.pages.get(1)?.segments[0]?.id ?? null;
     status(`${file.name} · 원문을 열었어요. 번역은 “이어서 번역 요청”으로 대화에서 진행해요.`);
     paint(); await showPage(); saveState();
-  } catch (error) { if (isAbort(error)) return; fail(error); status('파일을 열지 못했어요.'); }
+  } catch (error) { if (isAbort(error) || intent !== fileOpen) return; fail(error); status('파일을 열지 못했어요.'); }
 }
 
 // ---------------- tool results ----------------

@@ -47,8 +47,10 @@ downloads nothing and does not echo the resource URI.
   sourceHash,pages:[{page,width,height,segments,sourceHash}],translations,nextPages,needsOcrPages,
   failedPages,deferredPages,attemptedPages,unreadPages,complete,reportedComplete,progressBasis,pageLimit,extractablePages,
   translation:{language,instructions,batches:[{page,sourceHash,language,segmentIds}]},storageNotice}` as both model
-  text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader.html`
-  (`_meta.ui.resourceUri` plus the `openai/outputTemplate` alias), so the first requested page's source
+  text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader-v2.html`
+  (`_meta.ui.resourceUri` plus the `openai/outputTemplate` alias; the earlier
+  `ui://sundark/attachment-reader.html` and the saved reader's `ui://sundark/reader-compat-v2.html`
+  stay readable with the same body for existing chats, but are no longer listed), so the first requested page's source
   shows before any translation. The download URL is never echoed, stored or logged.
 - `sourceHash` is per page: sha256 over the original file's sha256 and that page's exact geometry and
   segments. `render_attached_reader` downloads and extracts the page again and refuses a hash that does
@@ -84,6 +86,15 @@ downloads nothing and does not echo the resource URI.
   `{"event":"sundark_attachment_policy","reason":"unsupported_host","host":"<hostname>"}`, so the
   Site owner can read the exact refused host before adding it to `SUNDARK_FILE_HOSTS`. Only the
   validated hostname is logged; other errors log nothing.
+- `SUNDARK_MCP_DIAGNOSTICS=1` (default off; enable only for a controlled probe, then remove) writes
+  one Workers log line per `/mcp` request, `{"event":"sundark_mcp_observation",...}`: `method`
+  (known MCP methods, else `other`), `tool` (`read_attached`, `render_attached`, `prepare`, `open`,
+  `saved_render`, `other`), `resource` (`attachment`, `saved`, `other`), date-formatted
+  `requestedVersion`/`protocolVersion`, `uiCapability` (`mcp_app`, `other`, `absent`, from the
+  client's `io.modelcontextprotocol/ui` extension), `outcome` (`ok`, `error`, `unsupported`),
+  `status`, an enum `reason` and the resource's `bytes`. HTTP is 200 even for an RPC error, so this
+  shows whether `resources/read` reaches the Site. Params, arguments, URIs, file ids, headers,
+  identity, paper text and error messages are never logged; responses are unchanged.
 - The reader resource's CSP `connectDomains` (and `openai/widgetCSP`) list exactly the hosts the
   server download gate allows; nothing broader.
 - ChatGPT's own file retention is outside Sundark. Results live only in the conversation.

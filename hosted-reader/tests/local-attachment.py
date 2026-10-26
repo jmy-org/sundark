@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODE=sys.argv[1] if len(sys.argv)>1 else 'dev'
 assert MODE in ('dev','prod'),'mode is dev or prod'
-SECRET='sig=SYNTHETIC-SIGNED-TOKEN-a7c1';FILE_HOST='files.oaiusercontent.com';URI='ui://sundark/attachment-reader.html'
+SECRET='sig=SYNTHETIC-SIGNED-TOKEN-a7c1';FILE_HOST='files.oaiusercontent.com';URI='ui://sundark/attachment-reader-v2.html'
 checks=[]
 def check(name,condition,detail:object=''):
  if not condition:raise AssertionError(f'{name} {detail}'.strip())

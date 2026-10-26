@@ -26,6 +26,7 @@ export interface ReaderOutput {
 
 const MAX_TRANSLATION = 20000;
 const MAX_TRANSLATIONS = 3000;
+const MAX_PAGES = 200;
 const MAX_NOTE = 2000;
 const MAX_ANALYSIS = 60000;
 
@@ -113,11 +114,11 @@ function batches(v: unknown): Batch[] {
 
 /** Validates one tool result's structuredContent. Throws on a malformed payload so the
  * UI reports the first failure instead of painting partial or invented data. */
-export function parseOutput(input: unknown): ReaderOutput {
+export function parseOutput(input: unknown, maxTranslations = MAX_TRANSLATIONS): ReaderOutput {
   if (!isObject(input)) throw new Error('도구 결과에 리더 데이터가 없어요.');
   if (input.persistent === true || (input.mode !== undefined && input.mode !== 'ephemeral')) throw new Error('이 화면은 저장하지 않은(ephemeral) 읽기 결과만 보여줘요.');
-  const pages = (Array.isArray(input.pages) ? input.pages : []).slice(0, 200).map(pageSource);
-  const translations = (Array.isArray(input.translations) ? input.translations : []).slice(0, MAX_TRANSLATIONS)
+  const pages = (Array.isArray(input.pages) ? input.pages : []).slice(0, MAX_PAGES).map(pageSource);
+  const translations = (Array.isArray(input.translations) ? input.translations : []).slice(0, maxTranslations)
     .filter(isObject).filter(t => typeof t.id === 'string' && typeof t.text === 'string')
     .map(t => ({ id: (t.id as string).slice(0, 80), text: (t.text as string).slice(0, MAX_TRANSLATION) }));
   const translation = isObject(input.translation) ? input.translation : {};
@@ -310,7 +311,14 @@ export function restoreJson(text: string): Doc {
   try { raw = JSON.parse(text); } catch { throw new Error('올바른 JSON 파일이 아니에요.'); }
   if (!isObject(raw) || raw.format !== EXPORT_FORMAT || raw.version !== 1) throw new Error('Sundark에서 내보낸 읽기 결과가 아니에요.');
   const a = isObject(raw.attachment) ? attachment({ ...raw.attachment, fileId: '' }) : null;
-  const out = parseOutput({ mode: 'ephemeral', persistent: false, attachment: a, pages: raw.pages, translations: raw.translations, analysis: raw.analysis,
-    ...(typeof raw.language === 'string' ? { translation: { language: raw.language } } : {}) });
+  // One tool result's caps would silently cut a whole reading short: a file is held whole or
+  // refused. A reading has at most 200 pages and one translation per restored sentence.
+  const pages = Array.isArray(raw.pages) ? raw.pages : [];
+  if (pages.length > MAX_PAGES) throw new Error(`페이지가 ${MAX_PAGES}개보다 많아요.`);
+  const translations = Array.isArray(raw.translations) ? raw.translations : [];
+  const sentences = pages.reduce((n: number, p) => n + (isObject(p) && Array.isArray(p.segments) ? p.segments.length : 0), 0);
+  if (translations.length > sentences) throw new Error('번역이 원문 문장보다 많아요.');
+  const out = parseOutput({ mode: 'ephemeral', persistent: false, attachment: a, pages, translations, analysis: raw.analysis,
+    ...(typeof raw.language === 'string' ? { translation: { language: raw.language } } : {}) }, translations.length);
   return { ...merge(emptyDoc(), out), restored: true };
 }

@@ -5,7 +5,8 @@ import { AppBridge, PostMessageTransport } from '@modelcontextprotocol/ext-apps/
 const params = new URLSearchParams(location.search);
 const capabilities = { message: { text: {} }, serverTools: {}, downloadFile: {}, ...(params.get('resources') ? { experimental: { 'openai/resource': {} } } : {}) };
 const calls = { messages: [], tools: [], downloads: [], resources: [] };
-const replies = { tool: null, resource: null };
+// resources: per-uri {delay, reply}, so a test can make one file read finish after another.
+const replies = { tool: null, resource: null, resources: {} };
 const iframe = document.createElement('iframe');
 // An opaque-origin sandbox like the real host's: the widget reaches nothing same-origin.
 iframe.setAttribute('sandbox', 'allow-scripts');
@@ -16,7 +17,13 @@ const ready = new Promise(resolve => {
   bridge.onmessage = async p => { calls.messages.push(p.content.map(c => c.text).join('\n')); return {}; };
   bridge.oncalltool = async p => { calls.tools.push(p); return replies.tool ? { content: [], structuredContent: replies.tool } : { content: [{ type: 'text', text: 'no reply https://example.invalid/secret' }], isError: true }; };
   bridge.ondownloadfile = async p => { calls.downloads.push(p.contents[0]); return {}; };
-  bridge.onreadresource = async p => { calls.resources.push(p); return replies.resource; };
+  bridge.onreadresource = async p => {
+    calls.resources.push(p);
+    const r = replies.resources[p.uri];
+    if (!r) return replies.resource;
+    await new Promise(resolve => setTimeout(resolve, r.delay));
+    return r.reply;
+  };
   bridge.oninitialized = () => resolve(bridge);
   // Listen before the view loads, as a real host does, so its ui/initialize is not missed.
   document.body.appendChild(iframe);

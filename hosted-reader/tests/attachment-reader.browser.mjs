@@ -16,7 +16,7 @@ import {register} from 'node:module';
 import {after, before, test} from 'node:test';
 import {build} from 'esbuild';
 import {chromium} from 'playwright';
-import {twoPagePdf} from './fixtures/synthetic-pdf.mjs';
+import {manyPagePdf, twoPagePdf} from './fixtures/synthetic-pdf.mjs';
 
 register('./fixtures/worker-loader.mjs', import.meta.url);
 globalThis.__workerEnv = new Proxy({}, {get(t, key) { if (key === 'DB' || key === 'BUCKET') throw new Error('storage access'); return t[key]; }});
@@ -45,6 +45,11 @@ const server = https.createServer(tls, async (req, res) => {
     return res.end('<!doctype html><meta charset="utf-8"><title>host</title><body><script src="/host.js"></script>');
   }
   if (url.pathname === '/host.js') { res.writeHead(200, {'Content-Type': 'text/javascript'}); return res.end(hostJs); }
+  if (url.pathname === '/pdf-harness.html') {
+    res.writeHead(200, {'Content-Type': 'text/html'});
+    return res.end('<!doctype html><meta charset="utf-8"><title>pdf</title><canvas id="c"></canvas><div id="t"></div><script src="/pdf-harness.js"></script>');
+  }
+  if (url.pathname === '/pdf-harness.js') { res.writeHead(200, {'Content-Type': 'text/javascript'}); return res.end(pdfJs); }
   if (url.pathname === '/widget.html') {
     const q = url.searchParams;
     const fileUrl = `${origin}/file.pdf?token=short-lived${q.get('delay') ? '&delay=' + q.get('delay') : ''}`;
@@ -60,6 +65,10 @@ const server = https.createServer(tls, async (req, res) => {
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const origin = `https://127.0.0.1:${server.address().port}`;
+// The widget's own pdf.ts, bundled alone so a test can drive drawPage against a gated text stream.
+const pdfJs = (await build({stdin: {contents: "import {drawPage, openPdfBytes} from './client/attachment-reader/pdf.ts'; window.harness = {drawPage, openPdfBytes};",
+  resolveDir: new URL('..', import.meta.url).pathname, loader: 'js'}, bundle: true, write: false, format: 'iife', platform: 'browser', logLevel: 'silent',
+  external: ['module', 'fs', 'path', 'url', 'http', 'https', 'zlib', 'canvas']})).outputFiles[0].text;
 const hostJs = (await build({entryPoints: [new URL('./fixtures/attachment-host.mjs', import.meta.url).pathname], bundle: true, write: false, format: 'iife', platform: 'browser', logLevel: 'silent'})).outputFiles[0].text;
 
 // The server tools read the same bytes from a plain-http dev origin (the only kind their
@@ -98,7 +107,7 @@ const painted = frame => frame.$eval('#canvas', c => {
 });
 
 test('exports the resource the backend registers', () => {
-  assert.equal(attachmentReaderUri, 'ui://sundark/attachment-reader.html');
+  assert.equal(attachmentReaderUri, 'ui://sundark/attachment-reader-v2.html');
   assert(attachmentReaderHtml.startsWith('<!doctype html>'));
   // Self-contained: no external script, stylesheet, font or worker URL.
   assert(!/<script[^>]+src=|<link[^>]+href=|\/vendor\//.test(attachmentReaderHtml));
@@ -351,6 +360,75 @@ test('desktop file entrypoint reads the resource blob and matches server geometr
   assert(!(await frame.$eval('#stage', e => e.hidden)));
   assert(await frame.$eval('#original-msg', e => e.hidden), 'no download attempted or error shown');
   assert(!requests.includes('/file.pdf'));
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+// Two file entrypoint opens overlap: whichever host read finishes first, the file the user
+// asked for last is the one shown, with its own source text, original and text layer.
+test('overlapping file entrypoint opens: the last requested file wins in either completion order', async () => {
+  const blob = b => ({contents: [{uri: 'x', mimeType: 'application/pdf', blob: b.toString('base64')}]});
+  for (const [first, last] of [[300, 1500], [1500, 300]]) {
+    const {page, frame, host, errors} = await open('resources=1');
+    await host(([a, b, da, db]) => { window.testHost.replies.resources = {'file:///two.pdf': {delay: da, reply: a}, 'file:///three.pdf': {delay: db, reply: b}}; },
+      [blob(pdf), blob(manyPagePdf(3)), first, last]);
+    await host(a => window.testHost.input(a), {file: {name: 'two.pdf', resourceUri: 'file:///two.pdf'}});
+    await host(a => window.testHost.input(a), {file: {name: 'three.pdf', resourceUri: 'file:///three.pdf'}});
+    await page.waitForFunction(() => window.testHost.calls.resources.length === 2);
+    await frame.waitForFunction(() => !document.getElementById('stage').hidden, null, {timeout: 15000});
+    await page.waitForTimeout(Math.max(first, last) + 1000);
+    const view = await frame.evaluate(() => ({title: document.getElementById('title').textContent, pages: document.getElementById('page-label').textContent,
+      source: document.getElementById('segments').textContent.includes('Synthetic page 1 of 3.'), old: document.body.innerText.includes('SYNTHETIC'),
+      layer: document.getElementById('text-layer').textContent.includes('Synthetic page 1 of 3.'), error: document.getElementById('error').hidden,
+      stage: !document.getElementById('stage').hidden}));
+    assert.deepEqual(view, {title: 'three.pdf', pages: '1 / 3', source: true, old: false, layer: true, error: true, stage: true}, `delays ${first}/${last}`);
+    assert.deepEqual(errors, []);
+    await page.close();
+  }
+});
+
+// Page 1's text layer is still streaming when page 2 is drawn into the same container: the
+// canceled render must stop, and none of page 1's text may land after page 2 cleared it.
+test('a canceled page draw cancels its text layer; no late text reaches the next page', async () => {
+  const page = await browser.newPage({ignoreHTTPSErrors: true});
+  const errors = [];
+  page.on('pageerror', e => errors.push(String(e)));
+  await page.goto(`${origin}/pdf-harness.html`);
+  const result = await page.evaluate(async b64 => {
+    const {drawPage, openPdfBytes} = window.harness;
+    const doc = await openPdfBytes(Uint8Array.from(atob(b64), c => c.charCodeAt(0)));
+    const p1 = await doc.getPage(1);
+    const real = p1.streamTextContent.bind(p1);
+    let release, started, canceled = false;
+    const gate = new Promise(r => { release = r; }), begun = new Promise(r => { started = r; });
+    p1.streamTextContent = (...args) => {
+      const reader = real(...args).getReader();
+      started();
+      return new ReadableStream({
+        async pull(c) { await gate; if (canceled) return; const {value, done} = await reader.read(); if (canceled) return; if (done) c.close(); else c.enqueue(value); },
+        cancel(reason) { canceled = true; return reader.cancel(reason); },
+      });
+    };
+    const canvas = document.getElementById('c'), layer = document.getElementById('t');
+    const first = new AbortController();
+    const old = drawPage(doc, 1, canvas, layer, 600, first.signal).then(() => 'resolved', e => e.name);
+    await begun;
+    first.abort();
+    await drawPage(doc, 2, canvas, layer, 600, new AbortController().signal);
+    release();
+    const settled = await Promise.race([old, new Promise(r => setTimeout(() => r('pending'), 2000))]);
+    await new Promise(r => setTimeout(r, 300));
+    // Aborted before it starts: the container is not touched at all.
+    const early = new AbortController(); early.abort();
+    const before = layer.innerHTML;
+    const skipped = await drawPage(doc, 1, canvas, layer, 600, early.signal).then(() => 'resolved', e => e.name);
+    return {settled, canceled, text: layer.textContent, skipped, untouched: layer.innerHTML === before};
+  }, pdf.toString('base64'));
+  assert.equal(result.settled, 'AbortError', 'the obsolete draw ends as an abort');
+  assert.equal(result.canceled, true, 'the text stream was canceled');
+  assert.match(result.text, /Second synthetic page/);
+  assert(!result.text.includes('SYNTHETIC IMPORT'), 'no page 1 text was appended after page 2');
+  assert.deepEqual([result.skipped, result.untouched], ['AbortError', true]);
   assert.deepEqual(errors, []);
   await page.close();
 });
