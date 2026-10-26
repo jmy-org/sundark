@@ -80,6 +80,10 @@ downloads nothing and does not echo the resource URI.
   `extract_failed`. Only `unsupported_host` names a host: the parsed, validated hostname, never the
   path, query or file id. It is a deployment setting (`SUNDARK_FILE_HOSTS`), so it does not ask the user
   to reattach. `expired` (401/403/404/410) asks for a fresh file reference to the same attachment.
+  An `unsupported_host` refusal also writes one error-level Workers log line,
+  `{"event":"sundark_attachment_policy","reason":"unsupported_host","host":"<hostname>"}`, so the
+  Site owner can read the exact refused host before adding it to `SUNDARK_FILE_HOSTS`. Only the
+  validated hostname is logged; other errors log nothing.
 - The reader resource's CSP `connectDomains` (and `openai/widgetCSP`) list exactly the hosts the
   server download gate allows; nothing broader.
 - ChatGPT's own file retention is outside Sundark. Results live only in the conversation.

@@ -292,6 +292,39 @@ test('file reference errors carry a reason and only a safe hostname', async () =
     await fails(() => readAttached({file: {download_url: raw, file_id: 'f'}}, strict), 'unsafe_url', e => { assert.equal(e.host, undefined, raw); assert(!e.message.includes('pw')); return true; });
 });
 
+test('only an unsupported host logs a diagnostic, with the validated hostname and nothing else', async () => {
+  const strict = {policy: {hosts: ['files.oaiusercontent.com']}};
+  const logged = [];
+  const saved = {};
+  for (const level of ['log', 'info', 'warn', 'error', 'debug']) { saved[level] = console[level]; console[level] = (...args) => logged.push({level, args}); }
+  try {
+    const host = 'oaisdmntprindiasocentral.blob.core.windows.net';
+    await fails(() => readAttached({file: {download_url: `https://${host}/file-SYNTHETIC/x.pdf?se=2026&sig=${SECRET}&skoid=TOKEN`, file_id: 'file-SYNTHETIC-ID', file_name: 'private-name.pdf'}}, strict), 'unsupported_host');
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0].level, 'error');
+    assert.equal(logged[0].args.length, 1);
+    assert.deepEqual(JSON.parse(logged[0].args[0]), {event: 'sundark_attachment_policy', reason: 'unsupported_host', host});
+    for (const leak of [SECRET, 'TOKEN', 'sig=', 'file-SYNTHETIC', 'x.pdf', 'private-name', 'https:'])
+      assert(!logged[0].args[0].includes(leak), leak);
+    logged.length = 0;
+    await fails(() => prepareAttachedTask({file: {download_url: `https://CDN.Example.com/p.pdf?sig=${SECRET}`, file_id: 'file-SYNTHETIC-ID'}, kind: 'summary', pages: [1]}, strict), 'unsupported_host');
+    assert.deepEqual(logged.map(l => JSON.parse(l.args[0])), [{event: 'sundark_attachment_policy', reason: 'unsupported_host', host: 'cdn.example.com'}]);
+    logged.length = 0;
+    for (const raw of ['not a url', 'x'.repeat(5000), 'https://user:pw@evil.example/f', 'https://evil.example:8443/f', 'https://127.0.0.1/f', 'https://[::1]/f',
+      'https://ev%20il.example/f', 'https://xn--.example/f', 'http://evil.example/f', 'javascript:alert(1)'])
+      await assert.rejects(readAttached({file: {download_url: raw, file_id: 'f'}}, strict));
+    await fails(() => readAttached({}, strict), 'missing');
+    await fails(() => readAttached({file: file('/expired-403.pdf')}, deps), 'expired');
+    await fails(() => readAttached({file: file('/broken.pdf')}, deps), 'download');
+    await fails(() => readAttached({file: file('/html.pdf')}, deps), 'not_pdf');
+    await readAttached({file: file('/two.pdf')}, deps);
+    // pdf.js may print its own font warnings; only the policy event is this code's.
+    const text = JSON.stringify(logged);
+    assert(!text.includes('sundark_attachment_policy'), 'no policy log for other errors or an allowed URL');
+    assert(!text.includes(SECRET) && !text.includes(origin) && !text.includes('evil.example') && !text.includes('pw'), text);
+  } finally { Object.assign(console, saved); }
+});
+
 test('download errors: expired asks for a fresh reference, others are bounded', async () => {
   for (const code of [401, 403, 404, 410])
     await fails(() => readAttached({file: file(`/expired-${code}.pdf`)}, deps), 'expired', e => /fresh/i.test(e.message));

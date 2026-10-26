@@ -35,7 +35,15 @@ function reference(raw:unknown,deps:Deps):Ref{
  let url;try{url=checkFileUrl(f.download_url,deps.policy??policy())}catch(e){throw fileError(e)}
  return {url,fileId:f.file_id,fileName:pdfName(f.file_name)};
 }
-function fileError(e:unknown){return e instanceof PdfFileError?new AttachmentError(e.status,e.reason,e.message,e.reason==='unsupported_host'?e.host:undefined):e}
+// Operational diagnostic for the Site owner (error-level Workers logs): which exact host the gate refused. Only the
+// validated hostname, never the URL, query, file id, file name or tool arguments.
+const SAFE_HOST=/^[a-z0-9.-]{1,253}$/;
+function logPolicy(host:unknown){console.error(JSON.stringify({event:'sundark_attachment_policy',reason:'unsupported_host',...(typeof host==='string'&&SAFE_HOST.test(host)?{host}:{})}))}
+function fileError(e:unknown){
+ if(!(e instanceof PdfFileError))return e;
+ if(e.reason==='unsupported_host')logPolicy(e.host);
+ return new AttachmentError(e.status,e.reason,e.message,e.reason==='unsupported_host'?e.host:undefined);
+}
 function pageList(raw:unknown){
  if(!Array.isArray(raw)||!raw.length||raw.length>PAGE_BATCH||raw.some(n=>!Number.isInteger(n)||n<1||n>MAX_PAGES)||new Set(raw).size!==raw.length)throw new AttachmentError(400,'invalid_pages',`Select 1-${PAGE_BATCH} distinct pages between 1 and ${MAX_PAGES}.`);
  return raw as number[];
