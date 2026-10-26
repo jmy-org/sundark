@@ -1,0 +1,87 @@
+# Build and test hosted-reader/, the exported ChatGPT Site source (docs/hosted-reader.md).
+# It never deploys: publication goes through the Sites helpers for the existing project.
+name: Hosted Reader
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "hosted-reader/**"
+      - ".github/workflows/hosted-reader.yml"
+  push:
+    branches: [main]
+    paths:
+      - "hosted-reader/**"
+      - ".github/workflows/hosted-reader.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test hosted reader
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: hosted-reader
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: hosted-reader/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      # The Chromium build pinned by the locked playwright package, with its system libraries.
+      - name: Install Playwright Chromium
+        run: npx --no-install playwright install --with-deps chromium
+
+      # prebuild vendors pdf.js, Tesseract, KaTeX, marked and DOMPurify into public/vendor.
+      - name: Build Site
+        run: npm run build
+
+      # The build generates the widget module imported by lib/attachment-reader.ts.
+      - name: Type check
+        run: npx --no-install tsc --noEmit -p .
+
+      # The Markdown test runs lib/markdown.ts in the runner's Chrome instead of skipping.
+      - name: Unit and contract tests
+        env:
+          CHROME: /usr/bin/google-chrome
+        run: node --test tests/*.test.mjs
+
+      - name: Original reader regression scripts
+        run: |
+          for test in tests/original-reader-*.mjs tests/pdf-ocr-geometry.mjs; do
+            echo "::group::${test}"
+            node "${test}"
+            echo "::endgroup::"
+          done
+
+      # Missing Playwright fails the required state and Chromium tests.
+      - name: Attachment reader browser tests
+        run: npm run test:attachment-reader
+
+      # Real workerd on synthetic PDFs: prod runs wrangler dev --local on the built dist/,
+      # dev runs vinext dev and checks that attachment calls leave D1 and R2 unchanged.
+      - name: Attachment reader on local workerd
+        run: |
+          for mode in prod dev; do
+            echo "::group::local-attachment ${mode}"
+            python3 -I tests/local-attachment.py "${mode}"
+            echo "::endgroup::"
+          done
