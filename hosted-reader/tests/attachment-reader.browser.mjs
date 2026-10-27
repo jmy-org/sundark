@@ -758,6 +758,49 @@ test('a non-Korean translation keeps its language through render and requests', 
   await page.close();
 });
 
+// A page read is still out when the reading moves to Japanese. Its source-only reply (stamped
+// Korean, the language it was asked in) adds page 2 but never switches the language back.
+test('a read that returns after a switch to Japanese keeps the Japanese prefix and adds its page', async () => {
+  const {page, frame, host, errors} = await open('openai=1');
+  await host(o => window.testHost.result(o), read1);
+  await frame.waitForSelector('#segments li[role=option]');
+  await host(r => { window.testHost.replies.tool = r; window.testHost.replies.toolHold = new Promise(go => { window.releaseTool = go; }); }, read2);
+  await frame.click('#load-next');
+  await page.waitForFunction(() => window.testHost.calls.tools.length === 1);
+  assert.equal((await host(() => window.testHost.calls.tools))[0].arguments.language, read2.translation.language);
+  assert.notEqual(read2.translation.language, 'Japanese', 'the pending read carries the old language');
+  const readJa = await readAttached({file, pages: [1], language: 'Japanese'}, deps);
+  await host(o => window.testHost.result(o), await renderAttached({file, page: 1, sourceHash: readJa.sourceHash, language: 'Japanese',
+    translations: [{id: ids[0], text: 'これは翻訳された最初の文です。'}]}, deps));
+  await frame.waitForFunction(() => document.querySelector('#segments li[role=option] .tr')?.textContent.includes('これは'));
+  await host(() => window.releaseTool());
+  await frame.waitForFunction(() => document.querySelectorAll('#segments li.page-head').length === 2);
+  assert.match(await text(frame, '#progress-text'), /원문 2\/2페이지/);
+  assert.match(await text(frame, '#translation-lang'), /Japanese/, 'the late read did not switch the language back');
+  assert.equal(await text(frame, '#segments li[role=option] .tr'), 'これは翻訳された最初の文です。', 'the Japanese prefix survived');
+  await frame.click('#translate-next');
+  await page.waitForFunction(() => window.testHost.calls.messages.length === 1);
+  assert.match((await host(() => window.testHost.calls.messages))[0], /language Japanese/, 'the next read asks for Japanese');
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+// The page read waits on a fresh file URL; another attachment arriving meanwhile means the
+// old file is never read with it.
+test('another attachment during the file URL wait stops the page read before its call', async () => {
+  const {page, frame, host, errors} = await open('openai=1&urldelay=400');
+  await host(o => window.testHost.result(o), read1);
+  await frame.waitForSelector('#segments li[role=option]');
+  await host(r => { window.testHost.replies.tool = r; }, read2);
+  await frame.click('#load-next');
+  await host(o => window.testHost.result(o), bigRead);
+  await page.waitForTimeout(800);
+  assert.deepEqual(await host(() => window.testHost.calls.tools), [], 'no read of the old file');
+  assert.equal(await frame.$$eval('#segments li.page-head', l => l.length), 1);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
 test('document-level analysis is labelled with its source pages beside any page', async () => {
   const task = await prepareAttachedTask({file, pages: [2], kind: 'summary'}, deps);
   const shown = await renderAttached({file, page: 1, sourceHash: read1.sourceHash,

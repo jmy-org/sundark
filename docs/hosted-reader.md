@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `2c8592c15b76a5ca325c2aa855e0461cec61bbd5` ("Declare structured output for original PDF chunks"; in-band delivery in `1be30a6`, reader added in `7c2b570`) |
+| Exported Site commit | `15a3ed2397f8dc975634df3cf770af1345b6fbac` ("Preserve active translation language during page reads"; in-band delivery in `1be30a6`, reader added in `7c2b570`) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 
@@ -223,3 +223,12 @@ and hidden-metadata live gates were not run. A standard PDF-tool comparison is
 being checked separately; this failure does not establish a unique platform cause.
 The subsequent output-schema declaration for the app-only original tool does not
 change the launcher or claim to repair that 404.
+
+The final page-read race correction preserves the current translation language and
+translated prefix when a previous-language request settles, while retaining new
+source pages and read progress. A document switch during fresh URL acquisition is
+fenced before invoking the read tool. The two browser regressions pass; the final
+reader state/browser suite passes 46/46. Standard `read_attached_pdf` also reproduced
+the v4 widget lookup HTTP 404 in native Chrome at 09:08:46 UTC after a synthetic PDF
+upload; thus the observed failure is not confined to the launcher. Actual original
+canvas, translation, page navigation, export/restore and reopen remain unverified.

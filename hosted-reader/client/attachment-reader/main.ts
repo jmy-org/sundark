@@ -348,13 +348,20 @@ async function loadNext() {
       if (!a?.fileId || !host.canCallTool || !host.canFetchFileUrl) throw new Error('이 환경에서는 리더가 직접 페이지를 불러올 수 없어요. “이어서 번역 요청”으로 대화에서 진행해 주세요.');
       // The URL is fresh, passed once as the tool's file reference and then dropped.
       // Echo the cumulative read state, so the server never re-offers or forgets a page.
-      const attemptedPages = [...new Set([...doc.attemptedPages, ...doc.pages.keys(), ...doc.unreadPages])].sort((x, y) => x - y);
-      const result = await host.callTool(READ_TOOL, { file: { file_id: a.fileId, download_url: await host.fileUrl(a.fileId), file_name: a.fileName },
-        pages, attemptedPages, unreadPages: doc.unreadPages, ...(doc.language ? { language: doc.language } : {}) });
+      const downloadUrl = await host.fileUrl(a.fileId);
+      // A newer document while the URL was minted: the old file is never read.
       fence(g);
-      const out = parseOutput(result);
+      const attemptedPages = [...new Set([...doc.attemptedPages, ...doc.pages.keys(), ...doc.unreadPages])].sort((x, y) => x - y);
+      const asked = doc.language;
+      const result = await host.callTool(READ_TOOL, { file: { file_id: a.fileId, download_url: downloadUrl, file_name: a.fileName },
+        pages, attemptedPages, unreadPages: doc.unreadPages, ...(asked ? { language: asked } : {}) });
+      fence(g);
+      let out = parseOutput(result);
       // A result for another file never folds into this reading.
       if (out.attachment && !sameAttachment(a, out.attachment)) throw new Error('도구가 다른 PDF의 결과를 돌려줬어요. 이 화면에는 넣지 않았어요.');
+      // The reading moved to another language while this read was out: keep its pages and
+      // read state, never its language, which would switch back and drop the newer translations.
+      if (!sameLang(doc.language, asked)) out = { ...out, language: '', translations: [], batches: [] };
       doc = merge(doc, out);
     }
     paint();

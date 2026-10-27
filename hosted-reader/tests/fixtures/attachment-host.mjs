@@ -6,7 +6,8 @@ const params = new URLSearchParams(location.search);
 const capabilities = { message: { text: {} }, serverTools: {}, downloadFile: {}, ...(params.get('resources') ? { experimental: { 'openai/resource': {} } } : {}) };
 const calls = { messages: [], tools: [], originals: [], downloads: [], resources: [] };
 // resources: per-uri {delay, reply}, so a test can make one file read finish after another.
-const replies = { tool: null, resource: null, resources: {} };
+// toolHold: a promise the next tool reply waits on, so a test can land results while a read is out.
+const replies = { tool: null, toolHold: null, resource: null, resources: {} };
 const iframe = document.createElement('iframe');
 // An opaque-origin sandbox like the real host's: the widget reaches nothing same-origin.
 iframe.setAttribute('sandbox', 'allow-scripts');
@@ -22,7 +23,7 @@ const ready = new Promise(resolve => {
       calls.originals.push(p);
       return window.serveOriginal ? window.serveOriginal(p.arguments) : { content: [{ type: 'text', text: 'no original https://example.invalid/secret' }], isError: true };
     }
-    calls.tools.push(p); return replies.tool ? { content: [], structuredContent: replies.tool } : { content: [{ type: 'text', text: 'no reply https://example.invalid/secret' }], isError: true };
+    calls.tools.push(p); if (replies.toolHold) await replies.toolHold; return replies.tool ? { content: [], structuredContent: replies.tool } : { content: [{ type: 'text', text: 'no reply https://example.invalid/secret' }], isError: true };
   };
   bridge.ondownloadfile = async p => { calls.downloads.push(p.contents[0]); return {}; };
   bridge.onreadresource = async p => {
