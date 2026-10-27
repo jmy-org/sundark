@@ -683,7 +683,8 @@ test('route: UI tool metadata matches what the installed ext-apps registerAppToo
       else assert.equal(t._meta?.ui, undefined, `${t.name} has no UI`);
       assert.equal(t._meta?.[RESOURCE_URI_META_KEY], undefined, t.name);
       assert.equal(t._meta?.['openai/outputTemplate'], undefined, t.name);
-      assert.equal(t.outputSchema, undefined, `${t.name} declares no outputSchema`);
+      if (t.name === 'read_attachment_original') assert.deepEqual(t.outputSchema, {type: 'object', additionalProperties: true});
+      else assert.equal(t.outputSchema, undefined, `${t.name} declares no outputSchema`);
       continue;
     }
     // structuredContent is declared, permissively, as the object it always is.
@@ -771,7 +772,7 @@ test('route: read_attachment_original is app-only, file-param, and not offered t
   assert.deepEqual(t.inputSchema.properties.file.required, ['download_url', 'file_id']);
   assert.deepEqual([t.annotations.readOnlyHint, t.annotations.destructiveHint, t.annotations.openWorldHint], [true, false, true]);
   assert.match(t.description, /not for the model/i);
-  assert.equal(t.outputSchema, undefined);
+  assert.deepEqual(t.outputSchema, {type: 'object', additionalProperties: true});
 });
 
 test('route: original bytes travel only in _meta; model-visible fields stay small', async () => {
