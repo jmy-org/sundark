@@ -34,6 +34,10 @@ dev = [
 # Ruff infers its Python target from project.requires-python.
 [tool.ruff]
 line-length = 88
+# hosted-reader/ is a byte-exact export of the hosted Site. Its Python files are
+# standalone harnesses for a local workerd; change them at the Site source
+# (docs/hosted-reader.md).
+extend-exclude = ["hosted-reader"]
 
 [tool.ruff.lint]
 select = ["I"]

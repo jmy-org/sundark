@@ -1,0 +1,1659 @@
+"use strict";
+// Original jmy-org/sundark web/app.js, pinned 47b680ebe65ac2e75911ba7879fc1d7e79787ca8.
+// Private authenticated-Site compatibility adaptation; no upstream license assertion.
+const pdfjsLib = window.pdfjsLib;
+const fetch = (...args) => window.sundarkFetch(...args);
+
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "/vendor/pdf/pdf.worker.min.mjs";
+
+const $ = (id) => document.getElementById(id);
+const lang = () => {
+  if (!S.aiConfig) throw new Error("출력 언어 설정을 다시 불러와 주세요.");
+  return S.aiConfig.output_language;
+};
+
+const S = {
+  docId: null,
+  loadedPaperId:null,openGeneration:0,loadingTask:null,openFailure:null,
+  pdf: null,
+  numPages: 0,
+  scale: 1.4,
+  zoom: { mode: "width", pct: 100 },  // see "PDF zoom"
+  // per page: {el, w1, h1 (size in points), canvas, textEl, rendered, gen, segs, translated, trLoading}
+  pages: [],
+  pageObs: null,  // IntersectionObserver for rendering/translating
+  dropObs: null,  // IntersectionObserver that frees the drawing of pages far from the view
+  anatomyLoaded: false,
+  anatomyModel: null,
+  summaryLoaded: false,
+  trToken: 0,
+  aiConfig: null,
+  rateLimited: null,
+};
+
+window.sundarkCurrentPdf=id=>S.docId===id&&S.loadedPaperId===id?S.pdf:null;
+function beginPaperOpen(){
+  const generation=++S.openGeneration;S.trToken++;S.ocrController?.abort();
+  resetTrNav();  // the old paper's sentences must not stay navigable or pinned in the new one
+  const old=S.pdf,loading=S.loadingTask;S.pdf=null;S.loadedPaperId=null;S.loadingTask=null;S.docId=null;
+  S.pageObs?.disconnect();S.dropObs?.disconnect();for(const P of S.pages)stopRender(P,true);S.pages=[];
+  if(old?.loadingTask)void old.loadingTask.destroy().catch(()=>{});
+  if(loading&&loading!==old?.loadingTask)void loading.destroy().catch(()=>{});
+  S.anatomyLoading=false;S.anatomyLoaded=false;S.summaryLoaded=false;
+  for(const id of ["pdfview","trlist","summary","anatomy","chatlog"])$(id).innerHTML="";
+  return generation;
+}
+class RateLimited extends Error {}
+
+const TASK_LABELS = { translate: "Translation", summary: "Summary", anatomy: "Anatomy",
+  chat: "Chat", explain: "Explain", equation: "Equations", brief: "Glossary", review: "Review" };
+
+function showRateLimit() {
+  $("ai-banner").textContent = "저장된 결과를 불러오지 못했어요. ChatGPT에서 생성·저장한 뒤 다시 불러오세요.";
+  show($("ai-banner"));
+}
+
+async function loadConfig() {
+  let output = "ko";
+  try { output = localStorage.getItem("sundark-original-language") || "ko"; } catch {}
+  const languages = ["ko", "en", "ja", "zh", "es", "fr", "de"];
+  S.aiConfig = {backend:"chatgpt-plugin", output_language:languages.includes(output)?output:"ko", output_languages:languages, concurrency:{"chatgpt-plugin":2}};
+  $("ai-badge").textContent = "ChatGPT 저장 결과 · " + lang();
+}
+function openSettings() {
+  const labels = {ko:"한국어", en:"English", ja:"日本語", zh:"中文", es:"Español", fr:"Français", de:"Deutsch"};
+  $("set-language").replaceChildren(...S.aiConfig.output_languages.map(value => {const option=document.createElement("option");option.value=value;option.textContent=labels[value];return option;}));
+  $("set-language").value=lang();
+  $("settings").showModal();
+}
+$("ai-badge").addEventListener("click",openSettings);
+$("settings-cancel").addEventListener("click",()=>$("settings").close());
+$("settings-form").addEventListener("submit",async e=>{
+  e.preventDefault();S.aiConfig.output_language=$("set-language").value;
+  try {localStorage.setItem("sundark-original-language",lang());} catch {}
+  $("settings").close();$("ai-badge").textContent="ChatGPT 저장 결과 · "+lang();
+  if(S.docId){window.sundarkClearCache?.();retranslateAll(true);S.summaryLoaded=false;S.anatomyLoaded=false;genSummary();loadAnatomy(true);loadChat();}
+});
+
+// ================= Library =================
+// Two sources: the papers folder, or the user's Zotero library (read-only, via Zotero's local API).
+let libSource = "folder";
+// Local filesystem and Zotero integrations are not available in this hosted private reader.
+
+function setLibSource(src) {
+  src = "folder"; libSource = src;
+  try { localStorage.setItem("libSource", src); } catch {}
+  $("src-folder").classList.toggle("active", src === "folder");
+  $("src-zotero").classList.toggle("active", src === "zotero");
+  $("zot-controls").classList.toggle("hidden", src !== "zotero");
+  loadLibrary();
+}
+$("src-folder").addEventListener("click", () => setLibSource("folder"));
+// Hosted adapter does not initiate Zotero account, local API, or OAuth requests.
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+  return res.json();
+}
+
+// Unsupported local Zotero code intentionally omitted from the hosted adapter.
+let folderGen=0;
+
+async function loadLibrary() {
+  const gen = ++folderGen;
+  const stale = () => gen !== folderGen || libSource !== "folder";
+  const list = $("paperlist");
+  list.innerHTML = '<li class="emptylib">Loading…</li>';
+  try {
+    const r = await fetch("/api/papers").then((x) => x.json());
+    if (stale()) return;
+    $("libdir").textContent = r.dir;
+    if (!r.papers.length) {
+      list.innerHTML = '<li class="emptylib">아직 PDF가 없습니다.<br>위의 PDF 추가 버튼으로 시작하세요.</li>';
+      return;
+    }
+    list.innerHTML = "";
+    for (const p of r.papers) {
+      const li = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "paper-action";
+      button.innerHTML = `${esc(p.name)}<span class="meta">${esc(p.file || "")} · ${fmtSize(p.size)}</span>`;
+      button.addEventListener("click", () => openFromLibrary(p.rel, li));
+      li.appendChild(button);
+      list.appendChild(li);
+    }
+  } catch (err) {
+    if (stale()) return;
+    list.innerHTML = '<li class="emptylib">Error: ' + esc(err.message) + "</li>";
+  }
+}
+$("refresh").addEventListener("click", () => { loadLibrary(); });
+
+// The topbar title is not rendered on narrow screens, so a failed open also goes to the alert
+// banner. Clearing takes down only that message, never another error shown there since.
+function showOpenFailure(text) { S.openFailure=text; $("ai-banner").textContent=text; show($("ai-banner")); }
+function clearOpenFailure() {
+  if(S.openFailure!==null&&$("ai-banner").textContent===S.openFailure){$("ai-banner").textContent="";hide($("ai-banner"));}
+  S.openFailure=null;
+}
+
+async function openFromLibrary(rel, li) {
+  const generation=beginPaperOpen();
+  clearOpenFailure();
+  document.querySelectorAll(".paperlist li").forEach((x) => x.classList.remove("active"));
+  if (li) li.classList.add("active");
+  setTitle("Opening…");
+  try {
+    const meta = await postJSON("/api/open", { rel });
+    if(generation!==S.openGeneration)return;
+    await openDoc(meta,generation);
+  } catch (err) { if(generation!==S.openGeneration)return;hide($("prep-overlay")); setTitle("열기 실패: " + err.message); showOpenFailure("열기 실패: " + err.message); }
+}
+
+$("file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  clearOpenFailure();
+  if(file.size>20*1024*1024){setTitle("PDF는 20MB 이하만 추가할 수 있어요.");showOpenFailure("PDF는 20MB 이하만 추가할 수 있어요.");$("file").value="";return;}
+  const generation=beginPaperOpen();
+  $("file").disabled=true;setTitle("PDF 추가 중…");
+  document.querySelectorAll(".paperlist li").forEach((x) => x.classList.remove("active"));
+  const fd = new FormData(); fd.append("file", file);
+  try {
+    const meta = await postForm("/api/upload", fd);
+    if(generation!==S.openGeneration)return;
+    await openDoc(meta,generation);
+    loadLibrary();  // the upload is now also saved under papers/, so refresh the list
+  } catch (err) { if(generation!==S.openGeneration)return;hide($("prep-overlay")); setTitle("업로드 실패: " + err.message); showOpenFailure("업로드 실패: " + err.message); } finally { $("file").disabled=false; $("file").value=""; }
+});
+
+// ================= Open document =================
+async function openDoc(meta,generation=beginPaperOpen()) {
+  if(generation!==S.openGeneration)return;
+  S.docId = meta.doc_id;
+  S.numPages = meta.num_pages;
+  setTitle(meta.title + (meta.byline ? "  ·  " + meta.byline : "") + "  ·  " + meta.num_pages + " pages");
+
+  // Cover the whole workspace with the loading screen the instant the paper is opened, before
+  // any await, so the PDF never flashes into view before it is ready. The warm-up below keeps it
+  // up until the first page is translated and a few pages of layout are buffered, then hides it.
+  const ov = $("prep-overlay");
+  $("prep-fill").style.width = "0%";
+  $("prep-text").textContent = "0%";
+  ov.classList.remove("hidden");
+
+  $("empty").classList.add("hidden");
+  $("pdfcol").classList.remove("hidden");
+  $("aipanel").classList.remove("hidden");
+  $("summary").innerHTML = "";
+  $("chatlog").innerHTML = "";
+  S.summaryLoaded = false;
+  S.anatomyLoaded = false; S.anatomyModel = null;
+  updateReviewBtn();
+  $("anatomy").innerHTML = '<p class="hint" style="padding:6px">ChatGPT에서 생성·저장한 구조 분석을 불러옵니다.</p>';
+
+  try {
+  const loading=pdfjsLib.getDocument({url:"/api/papers/"+encodeURIComponent(meta.doc_id)+"/file",withCredentials:true,cMapUrl:"/vendor/pdf/cmaps/",cMapPacked:true,standardFontDataUrl:"/vendor/pdf/standard_fonts/",wasmUrl:"/vendor/pdf/wasm/",enableXfa:false});
+  S.loadingTask=loading;
+  const pdf=await loading.promise;
+  if(generation!==S.openGeneration){await loading.destroy().catch(()=>{});return;}
+  S.pdf=pdf;S.loadedPaperId=meta.doc_id;S.loadingTask=null;
+  S.numPages=S.pdf.numPages;
+  setTitle(meta.title+(meta.byline?" · "+meta.byline:"")+" · "+S.numPages+" pages");
+
+  // page 1 sizes the fit modes (scale 1 = 1 CSS px per PDF point)
+  const first = await pdf.getPage(1);
+  if(generation!==S.openGeneration)return;
+  const vw = first.getViewport({ scale: 1 });
+  S.page1 = { w: vw.width, h: vw.height };
+  S.scale = zoomScale();
+  showZoom();
+
+  await buildPageShells(generation,pdf);
+  if(generation!==S.openGeneration)return; //  // MUST await: it fills S.pages (one getPage per page); translateAll's
+  } catch (err) {
+    if(generation!==S.openGeneration)return;
+    // The paper could not be read (missing file, lost connection, broken page): give the library
+    // back instead of blank reader columns, and forget the paper so OCR and settings skip it.
+    const task=S.loadingTask||S.pdf?.loadingTask;S.loadingTask=null;
+    if(task)void task.destroy().catch(()=>{});
+    // A later page can fail after the earlier shells are observed and drawing: stop them first.
+    S.pageObs?.disconnect();S.dropObs?.disconnect();for(const P of S.pages)stopRender(P,true);
+    S.pdf=null;S.loadedPaperId=null;S.pages=[];S.docId=null;
+    resetTrNav();
+    $("pdfview").innerHTML="";
+    $("pdfcol").classList.add("hidden");$("aipanel").classList.add("hidden");$("empty").classList.remove("hidden");
+    ov.classList.add("hidden");
+    throw err;
+  }
+  clearOpenFailure();
+  buildTrShells();          // producer reads S.pages[i], so it has to be fully built first.
+  showPageNum();
+  // Compatibility boundary: render immediately. Saved model output must never gate PDF use.
+  $("prep-fill").style.width="100%";$("prep-text").textContent="PDF 준비 완료";
+  $("prep-overlay").classList.add("hidden");
+  await ensureRendered(0);
+  if(generation!==S.openGeneration)return;
+  if($("autotr").checked) void translateAll();
+  void genSummary();void loadAnatomy();void loadChat();
+
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Matches a segment that is a bullet-list item (same glyphs the server splits on in pdf_utils).
+const BULLET_RE = /^\s*[•◦▪▫●○‣⁃∙]/;
+
+// Resolve once the server's background layout prewarm has at least `n` pages ready, so the first
+// screens scroll smoothly. Bails out if the user opens another doc. Usually near-instant, because
+// translating the first page already took longer than laying out a few pages.
+async function waitLayout(n) {
+  const token = S.docId;
+  for (;;) {
+    if (S.docId !== token) return;
+    const s = await fetch(`/api/status/${token}`).then((r) => r.json()).catch(() => null);
+    if (!s || !s.num_pages || s.finished || s.done >= n) return;
+    await sleep(300);
+  }
+}
+
+function resetObserver() {
+  if (S.pageObs) S.pageObs.disconnect();
+  if (S.dropObs) S.dropObs.disconnect();
+  S.pageObs = new IntersectionObserver(onPageVisible, {
+    root: $("pdfview"), rootMargin: "800px 0px", threshold: 0.01,
+  });
+  // At Retina density and a high zoom one page canvas holds tens of MB, so pages this far away
+  // give their drawing back and are drawn again when they come near.
+  S.dropObs = new IntersectionObserver(onPageFar, { root: $("pdfview"), rootMargin: "3000px 0px" });
+}
+
+async function buildPageShells(generation=S.openGeneration,pdf=S.pdf) {
+  const view = $("pdfview");
+  view.innerHTML = "";
+  S.pages = [];
+  resetObserver();
+  for (let i = 0; i < S.numPages; i++) {
+    const page = await pdf.getPage(i + 1);
+    if(generation!==S.openGeneration)return;
+    const vp = page.getViewport({ scale: 1 });  // in points; setScale() resizes the shell
+    const el = document.createElement("div");
+    el.className = "pdfpage";
+    el.style.width = vp.width * S.scale + "px";
+    el.style.height = vp.height * S.scale + "px";
+    el.dataset.page = i;
+    el.innerHTML = '<div class="ph">Page ' + (i + 1) + "</div>";
+    const hlLayer = document.createElement("div");
+    hlLayer.className = "hllayer";          // exists from the start -> highlight works pre-render
+    el.appendChild(hlLayer);
+    view.appendChild(el);
+    S.pages.push({ el, hllayer: hlLayer, w1: vp.width, h1: vp.height, gen: 0, rendered: false,
+      layoutLoaded: false, segs: null, translated: false, trLoading: false });
+    S.pageObs.observe(el);
+    S.dropObs.observe(el);
+  }
+}
+
+// An entry queued before a disconnect can still arrive; it names a shell that is gone, or one of
+// the previous paper, so it is only acted on while its target is still that page's shell.
+function shellOf(e) {
+  const P = S.pages[+e.target.dataset.page];
+  return P && P.el === e.target ? P : null;
+}
+
+function onPageVisible(entries) {
+  for (const e of entries) {
+    if (!e.isIntersecting || !shellOf(e)) continue;
+    ensureRendered(+e.target.dataset.page).catch(err=>{ $("ai-banner").textContent="페이지 표시 오류: "+err.message;show($("ai-banner")); });
+  }
+}
+
+function onPageFar(entries) {
+  for (const e of entries) {
+    const P = shellOf(e);
+    if (!e.isIntersecting && P) stopRender(P, true);
+  }
+}
+
+// Stop a page's drawing: cancel a render in flight and drop the text layer (its spans are placed
+// for the old scale). The canvas stays, stretched to the page's new size, until the redraw
+// replaces it, so a zoom does not flash blank pages; `release` frees it instead.
+function stopRender(P, release) {
+  P.gen += 1;  // a render already past its last await sees this and does not land
+  if (P.renderTask) { P.renderTask.cancel(); P.renderTask = null; }
+  P.rendered = false;
+  P.nativeTextLayer?.cancel();P.nativeTextLayer=null;
+  // The pointer gets no mouseleave from a removed layer, so the sentence it owned there goes too.
+  if (P.textEl && pdfHoverCur && pdfHoverCur.layer === P.textEl) clearPdfHover();
+  if (P.textEl) { P.textEl.remove(); P.textEl = null; }
+  if (!P.canvas) return;
+  if (release) {
+    P.canvas.width = P.canvas.height = 0;  // free the pixels now, not at the next GC
+    P.canvas.remove(); P.canvas = null;
+  } else {
+    P.canvas.style.width = "100%"; P.canvas.style.height = "100%";
+  }
+}
+
+// Watch every page anew: observe() reports each page's current state at once, so the pages now
+// near the view are drawn and the far ones released.
+function observePages() {
+  for (const obs of [S.pageObs, S.dropObs]) {
+    for (const P of S.pages) { obs.unobserve(P.el); obs.observe(P.el); }
+  }
+}
+
+// Fetch word geometry + sentences for a page (no canvas needed). Rects are in PDF points.
+// Caches the in-flight promise so concurrent callers (render + translateAll) share one fetch.
+function ensureLayout(i, allowExtract=false) {
+  const generation=S.openGeneration,docId=S.docId;
+  const P = S.pages[i];
+  if (!P) return Promise.resolve(null);
+  if (allowExtract && P.layout && !P.segs?.length) {P.layoutPromise=null;P.layout=null;}
+  if (P.layoutPromise) {
+    if(allowExtract&&!P.layoutExtracting)return P.layoutPromise.then(()=>{if(generation!==S.openGeneration)return null;if(P.segs?.length)return P.segs;P.layoutPromise=null;return ensureLayout(i,true);});
+    return P.layoutPromise;
+  }
+  P.layoutExtracting=allowExtract;
+  P.layoutPromise = (async () => {
+    try {
+      const L = await getJSON(`/api/layout/${docId}/${i}${allowExtract?"?extract=1":""}`);
+      if(generation!==S.openGeneration)return null;
+      P.layout = L;
+      P.segs = L.sentences.map((s) => ({
+        text: s.text,
+        tex: s.tex,  // the text with ^{...}/_{...} script marks, sent for translation only
+        para: s.para,
+        size: s.size,
+        heading: s.heading,
+        eqno: s.eqno || null,  // equation number "(1)" printed beside a display equation
+        rects: lineRects(s.words.map((wi) => L.words[wi]), !s.equation),  // in points
+        // A sentence that wraps to the next page carries that page's word boxes too, so the
+        // highlight can span both pages.
+        rectsNext: s.words_next ? lineRects(s.words_next) : null,
+        nextPage: s.cont_next_page ?? null,
+      }));
+    } catch (err) {
+      P.segs = [];
+    }
+    return P.segs;
+  })();
+  return P.layoutPromise;
+}
+
+// Largest page canvas in pixels. A high zoom on a Retina display would go past it, and a bigger
+// canvas costs too much memory or is not drawn at all, so such a page is drawn at a lower density.
+const MAX_CANVAS_PX = 2_000_000; // Keep the original density-aware rendering, cap hosted memory.
+
+async function ensureRendered(i) {
+  const generation=S.openGeneration,pdf=S.pdf;
+  if(!pdf)return;
+  const P = S.pages[i];
+  if (!P || P.rendered) return;
+  P.rendered = true;
+  const gen = P.gen;  // stopRender() bumps it when a zoom or the distance makes this render moot
+  const page = await pdf.getPage(i + 1);
+  if (generation!==S.openGeneration || P.gen !== gen) return;
+  const vp = page.getViewport({ scale: S.scale });
+
+  // Draw at the screen's pixel density: on a Retina display (2 device pixels per CSS pixel) a
+  // CSS-sized canvas is upscaled and the page looks soft. The CSS size is the backing size over
+  // dpr, not vp's fractional size, so each canvas pixel lands on exactly one device pixel.
+  const dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(MAX_CANVAS_PX / (vp.width * vp.height)));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(vp.width * dpr); canvas.height = Math.floor(vp.height * dpr);
+  canvas.style.width = canvas.width / dpr + "px"; canvas.style.height = canvas.height / dpr + "px";
+  const textEl = document.createElement("div");
+  textEl.className = "textlayer";
+
+  P.renderTask = page.render({
+    canvas, viewport: vp, annotationMode:0,
+    transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+  });
+  try { await P.renderTask.promise; } catch (err) { return; }  // cancelled by stopRender()
+  if (generation!==S.openGeneration || P.gen !== gen) return;
+  P.renderTask = null;
+  // Swap the drawing in; it replaces the stretched one a zoom left behind.
+  const ph = P.el.querySelector(".ph");
+  if (ph) ph.remove();
+  if (P.canvas) { P.canvas.width = P.canvas.height = 0; P.canvas.remove(); }
+  P.el.insertBefore(canvas, P.hllayer);  // order: canvas, hllayer, textlayer
+  P.canvas = canvas;
+
+  await ensureLayout(i,true);
+  if (generation!==S.openGeneration || P.gen !== gen) return;
+  const L = P.layout;
+  // Compatibility change: preserve PDF.js native character positioning and selectable text.
+  // Adapter layout is used only for original geometric highlight/scroll algorithms, never to
+  // manufacture word strings across item/line boxes.
+  textEl.classList.add("textLayer");
+  textEl.style.setProperty("--total-scale-factor",String(vp.scale));
+  textEl.style.setProperty("--scale-round-x","1px");textEl.style.setProperty("--scale-round-y","1px");
+  try { const layer=new pdfjsLib.TextLayer({textContentSource:await page.getTextContent(),container:textEl,viewport:vp}); P.nativeTextLayer=layer;await layer.render(); } catch {}
+  if (generation!==S.openGeneration || P.gen !== gen) return;
+  P.el.appendChild(textEl);
+  P.textEl = textEl;
+  attachPdfHover(i, textEl);
+}
+
+// Translate the whole document with PARAGRAPH-level parallelism: the unit of work is a paragraph
+// batch (not a page), and a pool of trPool() workers translates batches concurrently — so even one
+// page keeps the pool busy. A producer walks pages in order, lays each out, builds its (empty)
+// DOM, and enqueues its batches; workers drain the queue. Display stays strictly in order via the
+// sentence-level frontier (see paintFrontier). Equation vision is a second pass after.
+const trPool = () => (S.aiConfig && S.aiConfig.backend ? S.aiConfig.concurrency[S.aiConfig.backend] : 1);
+async function translateAll(force) {
+  if (!S.aiConfig || !S.aiConfig.backend) return;
+  if (!S.docId || !$("autotr").checked) return;
+  const token = ++S.trToken;
+  const targetLanguage = lang();
+  S.rateLimited = null; hide($("ai-banner"));
+  const queue = [];   // pending {page, batch} tasks, in document order
+  let produced = false;
+
+  (async function produce() {
+    for (let i = 0; i < S.numPages; i++) {
+      if (token !== S.trToken) break;
+      await ensureLayout(i);
+      if (token !== S.trToken) break;
+      const batches = preparePage(i);   // builds the page's empty DOM, returns its batches
+      if (!batches.length) paintFrontier();            // empty page: let the frontier pass it
+      for (const b of batches) queue.push({ page: i, batch: b });
+    }
+    produced = true;
+  })();
+
+  async function worker() {
+    for (;;) {
+      if (token !== S.trToken) return;
+      if (queue.length === 0) {
+        if (produced) return;
+        await sleep(40);                                // wait for the producer to enqueue more
+        continue;
+      }
+      const t = queue.shift();
+      if (S.rateLimited === token) { fillSource(t.page, t.batch, token); continue; }  // no more requests
+      await translateBatch(t.page, t.batch, force, token, targetLanguage);
+    }
+  }
+  await Promise.all(Array.from({ length: trPool() }, worker));
+
+  for (let i = 0; i < S.numPages; i++) {      // second pass: upgrade display equations
+    if (token !== S.trToken || S.rateLimited === token) return;
+    await fetchMath(i);
+  }
+}
+
+// Merge a sentence's word boxes into one rectangle per visual line (in PDF points).
+// A word joins the current line when its top is within 0.7 x its own height of the line's top.
+// Sub/superscript glyphs (x_d, k_{q,t}, m_t) sit on a shifted baseline, so the smaller ones fail
+// that test and would open a second, overlapping rect (a doubled highlight). Such a glyph is
+// folded into the current line when (a) it is script-size (<= 0.8 x the sentence's text height),
+// (b) its vertical center lies in the line's text band (median top..median bottom of its
+// regular-size words, +-25%), (c) it is horizontally next to a word already in the line, and
+// (d) its center is nearer this line than the next text line. A folded glyph does not move the
+// line's reference top, so it cannot pull the next line in, and tall math boxes never widen the
+// band. Words that pass the first test are handled as before, so a sentence without script
+// glyphs gets the same rects. Display equations (foldScripts = false) keep the plain rule: their
+// fractions and matrices are 2D, not lines.
+function lineRects(words, foldScripts = true) {
+  const ws = words
+    .map((w) => ({ x0: w.x0, y0: w.y0, x1: w.x1, y1: w.y1 }))
+    .sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+  if (!ws.length) return [];
+  const hs = ws.map((w) => w.y1 - w.y0).sort((a, b) => a - b);
+  const href = hs[Math.min(hs.length - 1, Math.floor(0.75 * hs.length))];  // full text height
+  // TeX math-font glyphs (CMSY10 x, -, F, H; CMEX10 hats, radicals, sums) get a word box that
+  // hangs 0.6-2 x the text height below the line (PyMuPDF sizes it from the font's descender),
+  // and a hat accent's box also starts above the line. Grouped like other words, such a box
+  // draws its line's rect down over the next line and, via the 0.7 x h test, joins the line
+  // above. So prose lines are built without them (they are < 25% of the words, as href is the
+  // upper quartile) and each is then attached, x-extent only, to the line rect that holds the
+  // centre of its top text-height slice (where the glyph is drawn).
+  const isTall = (w) => foldScripts && w.y1 - w.y0 > 1.3 * href;
+  const tall = ws.filter(isTall);
+  const body = tall.length ? ws.filter((w) => !isTall(w)) : ws;
+  const isScript = (h) => h <= 0.8 * href;
+  const isRegular = (h) => h > 0.8 * href && h <= 1.3 * href;
+  const median = (xs) => {
+    const s = [...xs].sort((a, b) => a - b), n = s.length;
+    return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+  };
+  const rects = [];
+  let cur = null;  // {x0,y0,x1,y1, top: first-test reference, xs: x-ranges, tops/bots: band}
+  const grow = (w) => {
+    cur.x0 = Math.min(cur.x0, w.x0); cur.y0 = Math.min(cur.y0, w.y0);
+    cur.x1 = Math.max(cur.x1, w.x1); cur.y1 = Math.max(cur.y1, w.y1);
+    cur.xs.push([w.x0, w.x1]);
+  };
+  const foldsInto = (w, i) => {
+    const t = median(cur.tops), b = median(cur.bots), pad = (b - t) * 0.25;
+    const cy = (w.y0 + w.y1) / 2;
+    if (!(cy > t - pad && cy < b + pad)) return false;
+    if (!cur.xs.some(([a, c]) => Math.max(a, w.x0) - Math.min(c, w.x1) <= href)) return false;
+    // The next text line starts at the first later regular word the first test would not join.
+    for (let j = i + 1; j < body.length; j++) {
+      const u = body[j], uh = u.y1 - u.y0;
+      if (isRegular(uh) && Math.abs(u.y0 - cur.top) > uh * 0.7) {
+        return Math.abs(cy - (t + b) / 2) < Math.abs(cy - (u.y0 + u.y1) / 2);
+      }
+    }
+    return true;
+  };
+  body.forEach((w, i) => {
+    const h = w.y1 - w.y0;
+    if (cur && Math.abs(w.y0 - cur.top) <= h * 0.7) {
+      grow(w);
+      cur.top = Math.min(cur.top, w.y0);
+      if (isRegular(h)) { cur.tops.push(w.y0); cur.bots.push(w.y1); }
+      return;
+    }
+    if (foldScripts && cur && cur.tops.length && isScript(h) && foldsInto(w, i)) {
+      grow(w);
+      return;
+    }
+    if (cur) rects.push(cur);
+    cur = { x0: w.x0, y0: w.y0, x1: w.x1, y1: w.y1, top: w.y0, xs: [[w.x0, w.x1]], tops: [], bots: [] };
+    if (isRegular(h)) { cur.tops.push(w.y0); cur.bots.push(w.y1); }
+  });
+  rects.push(cur);
+  for (const w of tall) {
+    const cy = w.y0 + href / 2, mid = (r) => Math.abs(cy - (r.y0 + r.y1) / 2);
+    let best = null;
+    for (const r of rects) {
+      const near = Math.max(r.x0 - w.x1, w.x0 - r.x1) <= href;
+      if (near && cy >= r.y0 && cy <= r.y1 && (!best || mid(r) < mid(best))) best = r;
+    }
+    if (best) { best.x0 = Math.min(best.x0, w.x0); best.x1 = Math.max(best.x1, w.x1); }
+    else rects.push({ x0: w.x0, y0: w.y0, x1: w.x1, y1: w.y0 + href });
+  }
+  return rects.map((r) => ({ left: r.x0, top: r.y0, w: r.x1 - r.x0, h: r.y1 - r.y0 }));
+}
+
+// ================= Translation =================
+function buildTrShells() {
+  resetTrNav();
+  const list = $("trlist");
+  S.frontier = 0; // earliest page not yet fully displayed (strict top-to-bottom reveal)
+  for (let i = 0; i < S.numPages; i++) {
+    const wrap = document.createElement("div");
+    wrap.className = "trpage"; wrap.dataset.page = i;
+    wrap.innerHTML = '<div class="ph"></div>';
+    list.appendChild(wrap);
+  }
+}
+
+// Stream a translation for one batch of segment texts, calling write(pageGlobalIndex, text) for
+// each result. The server numbers results from 0 within the batch, so we add the batch's start.
+async function streamTranslate(page, offset, texts, force, write, targetLanguage) {
+  const res = await fetch("/api/translate_stream", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_id: S.docId, page, start: offset, target_lang: targetLanguage, segments: texts, force: !!force }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw body.rate_limited ? new RateLimited(body.detail) : new Error(body.detail || res.statusText);
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+      if (!line.trim()) continue;
+      let obj; try { obj = JSON.parse(line); } catch { continue; }
+      if (obj.error) throw obj.rate_limited ? new RateLimited(obj.error) : new Error(obj.error);
+      write(offset + obj.i, obj.tr);
+    }
+  }
+}
+
+// Strict top-to-bottom display. Paragraph batches translate in parallel and land in per-page
+// buffers out of order, but a sentence is PAINTED only when every earlier sentence is painted.
+// S.frontier is the earliest page with an unpainted sentence; P.frontK is the next sentence to
+// paint within it. We paint the contiguous run of already-buffered sentences and stop at the
+// first gap (a sentence still being translated), so nothing ever appears out of order.
+function paintFrontier() {
+  while (S.frontier < S.numPages) {
+    const P = S.pages[S.frontier];
+    if (!P || !P.spanByK) break;                 // this page not prepared yet → wait
+    while (P.frontK < P.spanByK.length && P.trBuf[P.frontK] != null) {
+      if (P.spanByK[P.frontK]) P.spanByK[P.frontK].textContent = P.trBuf[P.frontK];
+      P.frontK += 1;
+      if (S.onFirstPaint) { const cb = S.onFirstPaint; S.onFirstPaint = null; cb(); }
+    }
+    if (P.frontK < P.spanByK.length) break;      // waiting for a sentence still in flight
+    if (P.loadingEl) { P.loadingEl.remove(); P.loadingEl = null; }
+    const wrap = $("trlist").children[S.frontier];
+    if (wrap) renderMath(wrap);
+    if (wrap && S.trSel && wrap.contains(S.trSel)) showTrPreview();
+    P.translated = true;
+    S.frontier += 1;
+  }
+  // Painting only adds sentences after the frontier, so it can only enable a disabled Next.
+  if ($("trnav-next").disabled) syncTrNav();
+  // Every page is displayed (or the whole document has no translatable sentences, e.g. a scanned
+  // PDF): release the loading cover even though nothing was painted, so it can never hang open.
+  if (S.frontier >= S.numPages && S.onFirstPaint) {
+    const cb = S.onFirstPaint; S.onFirstPaint = null; cb();
+  }
+}
+
+// Split a page's segments into paragraph-aligned batches. Each paragraph is its own batch, but a
+// batch keeps absorbing segments until it reaches MIN_BATCH, so a lone heading or a one-line
+// paragraph merges with its neighbour instead of costing a whole CLI call. Returns [{start,texts}].
+function paragraphBatches(segs) {
+  const MIN_BATCH = 3;
+  const batches = [];
+  let cur = null, prevPara = null;
+  segs.forEach((seg, k) => {
+    if (cur && seg.para !== prevPara && cur.texts.length >= MIN_BATCH) {
+      batches.push(cur); cur = null;
+    }
+    if (!cur) cur = { start: k, texts: [] };
+    cur.texts.push(seg.tex || seg.text);
+    prevPara = seg.para;
+  });
+  if (cur) batches.push(cur);
+  return batches;
+}
+
+// Build one page's (empty) translation DOM and return its paragraph batches. Stores P.spanByK
+// (spans by segment index), P.trBuf (translations as they arrive), P.frontK (next sentence to
+// paint), and P.loadingEl. Called once per page by the producer, in document order.
+function preparePage(i) {
+  const P = S.pages[i];
+  if (!P) return [];
+  const wrap = $("trlist").children[i];
+  // The selected (and maybe pinned) sentence is about to go: release it with its span.
+  const owned = wrap && S.trSel && wrap.contains(S.trSel);
+  if (owned) { unpinTr(); selectTr(null); }
+  if (wrap) wrap.innerHTML = "";
+  if (owned) syncTrNav();
+  P.spanByK = []; P.trBuf = []; P.frontK = 0; P.loadingEl = null;
+  if (!P.segs || !P.segs.length) {if(wrap){const hint=document.createElement("p");hint.className="hint";hint.textContent=`${i+1}페이지 · 저장된 원문이 없습니다. 해당 페이지를 열어 텍스트를 추출하거나 현재 페이지 OCR을 실행한 뒤, ChatGPT에서 생성·저장 필요`;wrap.appendChild(hint);}return [];}
+  // Paragraph structure: sentences of the same block flow inline in one <p>. Paragraph font-size
+  // follows the source (headings bigger), scaled to the body size.
+  const sizes = P.segs.map((s) => s.size).filter((x) => x > 0).sort((a, b) => a - b);
+  const bodySize = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 10;
+  let para = null, curPara = null;
+  P.segs.forEach((seg, k) => {
+    const isBullet = BULLET_RE.test(seg.text);
+    if (!para || seg.para !== curPara) {
+      para = document.createElement("div"); para.className = "trpara";
+      const ratio = seg.size > 0 ? seg.size / bodySize : 1;
+      para.style.fontSize = Math.max(12, Math.min(26, 13.5 * ratio)) + "px";
+      if (seg.heading || ratio >= 1.22) { para.style.fontWeight = "700"; para.classList.add("trhead"); }
+      wrap.appendChild(para); curPara = seg.para;
+    } else if (isBullet) {
+      // A bullet item is its own line even inside the same block, so a list reads as a list.
+      para.appendChild(document.createElement("br"));
+    }
+    const sp = makeTrSeg(i, k, "");
+    if (seg.eqno) sp.dataset.eqno = seg.eqno;
+    if (isBullet) sp.classList.add("trbullet");
+    para.appendChild(sp);
+    if (seg.eqno) {
+      // Shown beside the translated equation until the image-read LaTeX takes it as \tag.
+      const no = document.createElement("span");
+      no.className = "treqno"; no.textContent = "(" + seg.eqno + ")";
+      para.appendChild(no);
+    }
+    para.appendChild(document.createTextNode(" "));
+    P.spanByK[k] = sp;
+  });
+  const loading = document.createElement("div");
+  loading.className = "ph"; loading.textContent = "저장된 번역 불러오는 중…";
+  wrap.appendChild(loading);
+  P.loadingEl = loading;
+  return paragraphBatches(P.segs);
+}
+
+// Translate one paragraph batch and buffer its sentences; paintFrontier() then shows whatever
+// contiguous prefix is now ready. On failure, fall back to the source text for that batch so the
+// frontier is never permanently stalled on a missing sentence.
+// Fill a batch's still-missing sentences with the source text and repaint. Used when a batch
+// gives up, and for every batch still queued after a rate limit, so the frontier never stalls.
+function fillSource(page, b, token) {
+  const P = S.pages[page];
+  if (!P || token !== S.trToken || !P.trBuf) return;
+  for (let k = b.start; k < b.start + b.texts.length; k++) {
+    if (P.trBuf[k] == null) P.trBuf[k] = "[ChatGPT에서 생성·저장 필요]";
+  }
+  paintFrontier();
+}
+
+async function translateBatch(page, b, force, token, targetLanguage) {
+  const P = S.pages[page];
+  if (!P) return;
+  const end = b.start + b.texts.length;
+  // A retranslate bumps S.trToken and nulls P.trBuf; guard every buffer touch
+  // so a lingering old-run worker can't throw on a null buffer or paint stale text into a new run.
+  const live = () => token === S.trToken && P.trBuf;
+  const write = (k, tr) => { if (!live()) return; P.trBuf[k] = tr; paintFrontier(); };
+  const hasGap = () => { if (!live()) return false; for (let k = b.start; k < end; k++) if (P.trBuf[k] == null) return true; return false; };
+  // Retry a batch that FAILED (e.g. a 502 under heavy parallelism) OR that came back with a gap
+  // (the model occasionally drops a numbered line). Retries force a fresh call so they don't just
+  // replay the cached partial. This is what keeps the odd sentence from staying untranslated.
+  for (let attempt = 0; attempt < 1; attempt++) {
+    if (!live() || S.rateLimited === token) break;
+    try {
+      await streamTranslate(page, b.start, b.texts, force || attempt > 0, write, targetLanguage);
+    } catch (err) {
+      if (err instanceof RateLimited) { S.rateLimited = token; showRateLimit(); break; }
+    }
+    if (!hasGap()) break;
+  }
+  // Last resort: fill any segment still missing with the source text, so a null gap can never
+  // permanently stall the strict-order frontier (every later sentence would otherwise stay hidden).
+  fillSource(page, b, token);
+}
+
+// Display equations come out of the PDF text layer scrambled; the server re-reads each from
+// the rendered crop (a vision call) and returns clean LaTeX. Runs as a post-translation pass.
+async function fetchMath(i, wrap) {
+  const generation=S.openGeneration;
+  wrap = wrap || $("trlist").children[i];
+  if (!wrap) return;
+  try {
+    const r = await fetch(`/api/math/${S.docId}/${i}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if(generation!==S.openGeneration)return;
+    if (!d.equations || !d.equations.length) return;
+    for (const eq of d.equations) {
+      const sp = wrap.querySelector(`.trseg[data-i="${eq.i}"]`);
+      if (!sp || !eq.latex) continue;
+      // Keep the translation's own math if KaTeX cannot render the image-read LaTeX.
+      if (window.katex) {
+        try { window.katex.renderToString(eq.latex, { displayMode: true, throwOnError: true }); }
+        catch { continue; }
+      }
+      const tag = sp.dataset && sp.dataset.eqno ? " \\tag{" + sp.dataset.eqno + "}" : "";
+      sp.textContent = "\\[ " + eq.latex + tag + " \\]";
+      const no = sp.nextElementSibling;
+      if (tag && no && no.classList.contains("treqno")) no.remove();
+    }
+    renderMath(wrap);
+    if (S.trSel && wrap.contains(S.trSel)) showTrPreview();
+  } catch { /* best-effort: keep the original text if math fetch fails */ }
+}
+
+function makeTrSeg(i, k, tr) {
+  const d = document.createElement("span");
+  d.className = "trseg"; d.dataset.page = i; d.dataset.i = k;
+  d.textContent = tr;
+  // Hover only highlights (both sides); the PDF is scrolled on CLICK, not on hover, so the
+  // eyes are not yanked around while skimming the translation.
+  d.addEventListener("mouseenter", () => setHover(i, k, true));
+  d.addEventListener("mouseleave", () => setHover(i, k, false));
+  d.addEventListener("click", () => { selectTr(d); toggleTrPin(d); });
+  return d;
+}
+
+// Pin a sentence and scroll the PDF to its source; on the pinned one, release it (so does Esc,
+// below). A click on the sentence and the navigator's Pin source button both come here.
+function toggleTrPin(d) {
+  if (d.classList.contains("pinned")) unpinTr();
+  else {
+    unpinTr();
+    d.classList.add("pinned");
+    highlightSource(Number(d.dataset.page), Number(d.dataset.i), true, "center");
+  }
+  syncTrNav();
+}
+
+// Release the pinned translation sentence. A pin made from the keyboard keeps its highlight drawn
+// (no mouseleave clears it), so clear it here unless the pointer is on it and owns the hover.
+function unpinTr() {
+  document.querySelectorAll(".trseg.pinned").forEach((x) => {
+    x.classList.remove("pinned");
+    if (x.classList.contains("hl") && !x.matches(":hover")) {
+      setHover(Number(x.dataset.page), Number(x.dataset.i), false);
+    }
+  });
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { unpinTr(); syncTrNav(); } });
+
+// Unified: highlight one sentence on BOTH sides — a continuous bar over its lines on
+// the PDF, and its translation segment in the panel.
+function drawHlRects(P, rects, on) {
+  if (!P || !P.hllayer) return;
+  P.hllayer.innerHTML = "";
+  if (!on) return;
+  const sc = S.scale;  // rects are in PDF points; scale to pixels
+  // The layer holds one sentence and is translucent as a whole (styles.css), so where its
+  // rects overlap (line boxes taller than the line spacing) the colour does not stack into
+  // a darker seam. Outlines go in first; the fills drawn after them cover every outline
+  // part that falls inside the highlight, leaving one outline around the whole shape.
+  for (const cls of ["hlrect hlring", "hlrect"]) {
+    for (const r of rects) {
+      const d = document.createElement("div");
+      d.className = cls;
+      d.style.left = (r.left * sc) + "px"; d.style.top = (r.top * sc) + "px";
+      d.style.width = (r.w * sc) + "px"; d.style.height = (r.h * sc) + "px";
+      P.hllayer.appendChild(d);
+    }
+  }
+}
+
+function setHover(page, k, on) {
+  const P = S.pages[page];
+  const seg = P && P.segs && P.segs[k];
+  if (!seg) return;
+  drawHlRects(P, seg.rects, on);
+  // A sentence that wraps across the page break highlights on the next page too.
+  if (seg.nextPage != null && seg.rectsNext) {
+    drawHlRects(S.pages[seg.nextPage], seg.rectsNext, on);
+  }
+  const t = $("trlist").querySelector(`.trseg[data-page="${page}"][data-i="${k}"]`);
+  if (t) t.classList.toggle("hl", on);
+}
+
+// From the translation side (click): highlight both + scroll the PDF to the source.
+function highlightSource(page, k, on, scroll) {
+  setHover(page, k, on);
+  if (on && scroll) scrollPdfToSeg(page, k, scroll === "center");
+}
+
+// A sentence's highlight as separate blocks: one per page, and within a page one per column (or
+// per run of lines that a figure interrupts). Each block keeps its page, its extent and the
+// area-weighted sum of its line rects' centres, all in PDF points. Cached on the segment.
+function segParts(page, k) {
+  const seg = S.pages[page].segs[k];
+  if (seg.parts) return seg.parts;
+  const parts = [];
+  const split = (pg, rects) => {
+    if (!rects || !rects.length) return;
+    const hs = rects.map((r) => r.h).sort((a, b) => a - b), h = hs[hs.length >> 1];
+    let cur = null;
+    for (const r of [...rects].sort((a, b) => a.top - b.top)) {
+      // A line joins the block above it unless a gap of more than 3 lines parts them. Sorted top
+      // to bottom, a sentence that goes on in the next column jumps from that column's top to the
+      // previous one's foot. Not an x-overlap test: a sentence that starts at the end of a line
+      // has a first rect that does not overlap its second.
+      if (!cur || r.top - cur.bot > 3 * h) {
+        cur = { page: pg, left: r.left, right: r.left + r.w, top: r.top, bot: r.top + r.h, area: 0, sum: 0 };
+        parts.push(cur);
+      }
+      cur.left = Math.min(cur.left, r.left); cur.right = Math.max(cur.right, r.left + r.w);
+      cur.bot = Math.max(cur.bot, r.top + r.h);
+      const a = r.w * r.h;
+      cur.area += a; cur.sum += a * (r.top + r.h / 2);
+    }
+  };
+  split(page, seg.rects);
+  if (seg.nextPage != null) split(seg.nextPage, seg.rectsNext);
+  return (seg.parts = parts);
+}
+
+// Screen y of a block's middle.
+function partY(p) {
+  const mid = p.area > 0 ? p.sum / p.area : (p.top + p.bot) / 2;
+  return S.pages[p.page].el.getBoundingClientRect().top + mid * S.scale;
+}
+
+// Screen y of a sentence's middle: the area-weighted centre of all its blocks. Not the centre of
+// its bounding box: for a sentence that ends a column and goes on at the top of the next one,
+// that falls in the gap between the two.
+function segMidY(page, k) {
+  const P = S.pages[page];
+  if (!P || !P.segs || !P.segs[k]) return null;
+  let area = 0, sum = 0;
+  for (const p of segParts(page, k)) { area += p.area; sum += p.area * partY(p); }
+  return area > 0 ? sum / area : null;
+}
+
+// Index of the block of sentence (pg, k) nearest the pointer (x, y) on page `page`.
+function partAt(pg, k, page, x, y) {
+  const b = S.pages[page].el.getBoundingClientRect();
+  const px = (x - b.left) / S.scale, py = (y - b.top) / S.scale;  // pointer in PDF points
+  let best = -1, bestD = Infinity;
+  segParts(pg, k).forEach((p, j) => {
+    if (p.page !== page) return;
+    const dx = Math.max(p.left - px, 0, px - p.right), dy = Math.max(p.top - py, 0, py - p.bot);
+    if (dx * dx + dy * dy < bestD) { bestD = dx * dx + dy * dy; best = j; }
+  });
+  return best;
+}
+
+// Scroll the PDF so the highlighted sentence's middle sits at the vertical center of the view.
+function scrollPdfToSeg(page, k, center) {
+  const y = segMidY(page, k);
+  if (y == null) return;
+  const view = $("pdfview");
+  const yInView = y - view.getBoundingClientRect().top;
+  if (center || yInView < 60 || yInView > view.clientHeight - 60) {
+    view.scrollTo({ top: view.scrollTop + yInView - view.clientHeight * 0.5, behavior: "smooth" });
+  }
+}
+
+// From the PDF side: hovering source text highlights that sentence (both sides).
+let pdfHoverCur = null;
+function sourceSegmentAt(page,x,y) {
+  const P=S.pages[page];if(!P)return null;const bounds=P.el.getBoundingClientRect();
+  const px=(x-bounds.left)/S.scale,py=(y-bounds.top)/S.scale;
+  for(const pg of [page,page-1]){const owner=S.pages[pg];if(!owner?.segs)continue;for(let k=0;k<owner.segs.length;k++){
+    const seg=owner.segs[k],rects=pg===page?seg.rects:seg.nextPage===page?seg.rectsNext:[];
+    if(rects?.some(r=>px>=r.left&&px<=r.left+r.w&&py>=r.top&&py<=r.top+r.h))return {page:pg,k};
+  }}return null;
+}
+function attachPdfHover(page, textEl) {
+  const P = S.pages[page];
+  if (!P.segs) return;
+  textEl.addEventListener("mousemove", (e) => {
+    const sp = e.target && e.target.closest ? e.target.closest("span") : null;
+    const hit = sourceSegmentAt(page,e.clientX,e.clientY);
+    const k = sp?._seg ?? hit?.k;
+    if (k == null) return; // Keep the original no-flicker behavior between source regions.
+    const pg = sp?._segPage ?? hit?.page ?? page;  // a continuation word belongs to the previous page's sentence
+    // The translation sits beside the block under the pointer, and follows it when the pointer
+    // moves on to the sentence's other column or page.
+    const part = partAt(pg, k, page, e.clientX, e.clientY);
+    const same = pdfHoverCur && pdfHoverCur.page === pg && pdfHoverCur.k === k;
+    if (same && pdfHoverCur.part === part) return;
+    if (!same) {
+      clearPdfHover();
+      setHover(pg, k, true);
+    }
+    pdfHoverCur = { page: pg, k, part, layer: textEl };
+    const t = $("trlist").querySelector(`.trseg[data-page="${pg}"][data-i="${k}"]`);
+    if (t && $("tab-translation").classList.contains("active")) {
+      scrollTrTo(t, part >= 0 ? partY(segParts(pg, k)[part]) : segMidY(pg, k));
+    }
+  });
+  textEl.addEventListener("mouseleave", clearPdfHover);
+}
+function clearPdfHover() {
+  if (!pdfHoverCur) return;
+  setHover(pdfHoverCur.page, pdfHoverCur.k, false);
+  pdfHoverCur = null;
+  // The hover took the page's one highlight layer from the pinned sentence: draw that again.
+  const pin = $("trlist").querySelector(".trseg.pinned");
+  if (pin) setHover(Number(pin.dataset.page), Number(pin.dataset.i), true);
+}
+
+// Scroll the translation panel so the middle of translation `t` is level with screen y `mid`
+// (the middle of the highlighted block under the pointer), so the eyes move straight across.
+// Instant, not smooth: sweeping the mouse over the PDF changes the target several times a
+// second, and a smooth scroll would keep restarting and trail behind the pointer.
+function scrollTrTo(t, mid) {
+  if (mid == null) return;
+  const list = $("trlist");  // the panel's scroller (flex child of #tab-translation)
+  const lb = list.getBoundingClientRect(), tb = t.getBoundingClientRect();
+  let y = mid - tb.height / 2;  // where the translation's top goes
+  // Near the panel's edges, keep the whole translation visible instead.
+  y = Math.max(lb.top, Math.min(y, lb.bottom - tb.height));
+  // #trlist is zoomed by trScale, so its scrollTop is in unzoomed px.
+  const max = list.scrollHeight - list.clientHeight;
+  list.scrollTo({ top: Math.max(0, Math.min(max, list.scrollTop + (tb.top - y) / trScale)), behavior: "instant" });
+}
+
+// Auto-translate toggle and explicit retranslation. Settings changes reload the page.
+// Turning it back on rebuilds the list like a retranslation (fresh shells, frontier, selection),
+// but without force, so saved translations are reused.
+$("autotr").addEventListener("change", () => { if ($("autotr").checked) retranslateAll(false); });
+$("retranslate").addEventListener("click", () => retranslateAll(true));
+
+// Translation panel text-size control (dynamic, persisted)
+let trScale = parseFloat(localStorage.getItem("trScale") || "1") || 1;
+function applyTrScale() { try { $("trlist").style.zoom = trScale; } catch (e) {} }
+function bumpTrScale(d) {
+  trScale = Math.max(0.7, Math.min(2.0, Math.round((trScale + d) * 10) / 10));
+  try { localStorage.setItem("trScale", String(trScale)); } catch (e) {}
+  applyTrScale();
+}
+$("tr-smaller").addEventListener("click", () => bumpTrScale(-0.1));
+$("tr-bigger").addEventListener("click", () => bumpTrScale(0.1));
+applyTrScale();
+
+// Markdown -> HTML without breaking LaTeX. marked treats "\(" as an escaped "(" and "_x_" as
+// emphasis, which destroys math before KaTeX sees it. Shield math spans with placeholders,
+// run marked, then put the math back (HTML-escaped) for renderMath() to typeset.
+function mdMath(text) {
+  const spans = [];
+  const shielded = (text || "").replace(/\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$\$[\s\S]+?\$\$/g, (m) => {
+    spans.push(m);
+    return "@@MATH" + (spans.length - 1) + "@@";
+  });
+  const escape = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return DOMPurify.sanitize(marked.parse(shielded).replace(/@@MATH(\d+)@@/g, (_, k) => escape(spans[Number(k)] || "")), {USE_PROFILES:{html:true},FORBID_TAGS:["img","style","form","input","button","iframe","object","embed"],FORBID_ATTR:["style","srcset"]});
+}
+
+// copy-tex writes LaTeX to text/plain but keeps rendered math in text/html.
+// Register after deferred copy-tex has loaded; only postprocess its HTML payload.
+queueMicrotask(() => {
+  document.addEventListener("copy", (e) => {
+    const data = e.clipboardData;
+    if (!data || !e.defaultPrevented) return;
+    const box = document.createElement("div");
+    box.innerHTML = DOMPurify.sanitize(data.getData("text/html"));
+    const formulas = box.querySelectorAll(".katex");
+    if (!formulas.length) return;
+    formulas.forEach((k) => {
+      const source = k.querySelector('annotation[encoding="application/x-tex"]');
+      if (!source) return;
+      const display = k.closest(".katex-display");
+      const delimiter = display ? "$$" : "$";
+      (display || k).replaceWith(document.createTextNode(delimiter + source.textContent + delimiter));
+    });
+    data.setData("text/html", box.innerHTML);
+  });
+});
+
+function renderMath(el) {
+  if (!window.renderMathInElement) return;
+  try {
+    renderMathInElement(el, {
+      delimiters: [
+        { left: "\\[", right: "\\]", display: true },
+        { left: "\\(", right: "\\)", display: false },
+        { left: "$$", right: "$$", display: true },
+        { left: "$", right: "$", display: false },
+      ],
+      throwOnError: false, trust: false, maxExpand: 1000, maxSize: 20,
+    });
+  } catch (e) { /* leave raw TeX if KaTeX fails */ }
+}
+
+function retranslateAll(force) {
+  if (!S.docId) return;
+  window.sundarkClearCache?.();
+  buildTrShells();
+  S.pages.forEach((P) => {
+    P.translated = false; P.trLoading = false;
+    P.trBuf = null; P.spanByK = null; P.frontK = 0; P.loadingEl = null;
+  });
+  translateAll(force);
+}
+
+// ================= Sentence navigator =================
+// Native Previous/Next/Pin source buttons give the keyboard (and a screen reader) the sentence
+// click: the sentences stay plain text, so math, paragraphs and selection read as before.
+// S.trSel is the selected sentence: a click or Previous/Next selects it, Pin source pins it.
+function selectTr(d) {
+  if (S.trSel === d) return;
+  if (S.trSel) S.trSel.classList.remove("selected");
+  S.trSel = d;
+  if (d) d.classList.add("selected");
+  showTrPreview();
+}
+
+// The translation list is going (a new paper, a failed one, reloading saved results): release its
+// pin and PDF highlight while the spans are still there, then forget the selection with them.
+// A detached span gets no mouseleave, so a hovered or pinned one is cleared here too, but not
+// the sentence the pointer is on in the PDF: that text layer stays and keeps owning its bar.
+function resetTrNav() {
+  const pdfOwned = (x) =>
+    pdfHoverCur && pdfHoverCur.page === Number(x.dataset.page) && pdfHoverCur.k === Number(x.dataset.i);
+  let cleared = false;
+  $("trlist").querySelectorAll(".trseg.pinned").forEach((x) => x.classList.remove("pinned"));
+  $("trlist").querySelectorAll(".trseg.hl").forEach((x) => {
+    if (pdfOwned(x)) return;
+    setHover(Number(x.dataset.page), Number(x.dataset.i), false);
+    cleared = true;
+  });
+  // Clearing wipes a whole page's layer, which may hold the PDF-owned bar as well.
+  if (cleared && pdfHoverCur) setHover(pdfHoverCur.page, pdfHoverCur.k, true);
+  $("trlist").innerHTML = "";
+  S.trSel = null;
+  $("trnav-status").textContent = "";
+  syncTrNav();
+}
+
+// Sentences that can be selected, in document order: painted and not empty (an unpainted
+// sentence is an empty span, and a translation can come back empty).
+function trNavEntries() {
+  return [...$("trlist").querySelectorAll(".trseg")].filter((d) => d.textContent.trim());
+}
+
+function trNavStep(entries, cur, dir) {
+  const at = entries.indexOf(cur);
+  if (at < 0) return dir > 0 ? entries[0] || null : null;
+  return entries[at + dir] || null;
+}
+
+function trNavPlace(d) {
+  return "Page " + (Number(d.dataset.page) + 1) + ", sentence " + (Number(d.dataset.i) + 1);
+}
+
+// A copy of the selected sentence beside the buttons, math kept as rendered math.
+function showTrPreview() {
+  const box = $("trnav-preview");
+  box.replaceChildren();
+  if (!S.trSel) return;
+  for (const n of S.trSel.childNodes) box.appendChild(n.cloneNode(true));
+  // A sentence painted before its page finished is still raw TeX.
+  if (!box.querySelector(".katex")) renderMath(box);
+}
+
+// Bring the buttons and the visible context in line with S.trSel. Never moves focus or speaks.
+function syncTrNav() {
+  const d = S.trSel && S.trSel.isConnected ? S.trSel : null;
+  const entries = trNavEntries();
+  $("trnav-prev").disabled = !trNavStep(entries, d, -1);
+  $("trnav-next").disabled = !trNavStep(entries, d, 1);
+  const pin = $("trnav-pin");
+  pin.disabled = !d;
+  pin.setAttribute("aria-pressed", String(!!d && d.classList.contains("pinned")));
+  $("trnav-pos").textContent = d ? trNavPlace(d) : "None selected";
+  if (!d) $("trnav-preview").replaceChildren();
+}
+
+// Moving the selection releases a pin, so only one sentence is ever marked as shown in the PDF.
+// A button that reaches the end disables itself and would drop its focus to the page: the user
+// who pressed it keeps focus in the group, on Pin source (enabled once a sentence is selected).
+function moveTr(dir) {
+  const d = trNavStep(trNavEntries(), S.trSel, dir);
+  if (!d) return;
+  const from = $(dir > 0 ? "trnav-next" : "trnav-prev");
+  const pressed = document.activeElement === from;
+  unpinTr();
+  selectTr(d);
+  d.scrollIntoView({ block: "nearest" });
+  syncTrNav();
+  if (pressed && from.disabled) $("trnav-pin").focus();
+  $("trnav-status").textContent = trNavPlace(d);
+}
+
+$("trnav-prev").addEventListener("click", () => moveTr(-1));
+$("trnav-next").addEventListener("click", () => moveTr(1));
+$("trnav-pin").addEventListener("click", () => {
+  // A sentence whose span is gone cannot be pinned: forget it instead.
+  if (S.trSel && !S.trSel.isConnected) { selectTr(null); syncTrNav(); }
+  if (S.trSel) toggleTrPin(S.trSel);
+});
+
+// ================= Tabs =================
+document.querySelectorAll(".tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((b) => {
+      b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-pressed", String(b === btn));
+    });
+    document.querySelectorAll(".tabpane").forEach((p) => p.classList.remove("active"));
+    $("tab-" + btn.dataset.tab).classList.add("active");
+    // Generate lazily on first view so they don't compete with translation on open.
+    if (btn.dataset.tab === "anatomy") loadAnatomy();
+    if (btn.dataset.tab === "summary" && S.docId && !S.summaryLoaded) genSummary();
+  });
+});
+
+// ================= Research Anatomy =================
+const ANAT = [
+  ["problem", "Problem", "이 논문은 어떤 문제를 해결하려 하는가?"],
+  ["gap", "Gap", "기존 연구에서 무엇이 부족한가?"],
+  ["claim", "Main Claim", "저자가 주장하는 핵심은?"],
+  ["method", "Method", "무엇을 제안·변경했는가?"],
+  ["evidence", "Evidence", "어떤 근거가 주장을 뒷받침하는가?"],
+  ["limitations", "Limitations", "결론은 어디까지 성립하는가?"],
+];
+const EV_SUB = [["dataset_test", "Dataset/Test"], ["metric", "Metric"], ["baseline", "Baseline"], ["ablation", "Ablation"]];
+
+async function loadAnatomy(force) {
+  const generation=S.openGeneration;
+  if (!S.docId) return;
+  if (!force && S.anatomyLoaded) return;
+  if (S.anatomyLoading) return;  // already in flight (open + a tab click would double-fire)
+  S.anatomyLoading = true;
+  const box = $("anatomy");
+  box.innerHTML = '<p class="loading" style="padding:6px">저장된 구조 분석 불러오는 중…</p>';
+  try {
+    const d = await postJSON("/api/anatomy", { output_language: lang(), doc_id: S.docId, force: !!force });
+    if(generation!==S.openGeneration)return;
+    renderAnatomy(d); S.anatomyLoaded = true;
+  } catch (err) {
+    if(generation!==S.openGeneration)return;
+    box.innerHTML = '<p class="loading" style="padding:6px">Error: ' + esc(err.message) + "</p>";
+  } finally {
+    if(generation!==S.openGeneration)return;
+    S.anatomyLoading = false;
+    updateReviewBtn();
+  }
+}
+$("re-anatomy").addEventListener("click", () => { S.anatomyLoaded = false; loadAnatomy(true); });
+
+function renderAnatomy(d) {
+  const box = $("anatomy"); box.innerHTML = "";
+  for (const [key, name, q] of ANAT) {
+    box.appendChild(key === "evidence" ? evidenceCard(d.evidence || {}, name, q) : cardEl(name, q, d[key]));
+  }
+}
+function cardShell(name, q) {
+  const el = document.createElement("div"); el.className = "anat-card";
+  el.innerHTML = `<div class="anat-head"><span class="name">${esc(name)}</span><span class="q">${esc(q)}</span></div>`;
+  const body = document.createElement("div"); body.className = "anat-body";
+  el.appendChild(body);
+  return { el, body };
+}
+function cardEl(name, q, card) {
+  const { el, body } = cardShell(name, q);
+  body.appendChild(pointsEl(card));
+  return el;
+}
+function evidenceCard(ev, name, q) {
+  const { el, body } = cardShell(name, q);
+  for (const [sk, sname] of EV_SUB) {
+    const h = document.createElement("div"); h.className = "anat-sub"; h.textContent = sname;
+    body.appendChild(h);
+    body.appendChild(pointsEl(ev[sk]));
+  }
+  return el;
+}
+function pointsEl(card) {
+  const wrap = document.createElement("div");
+  const pts = (card && card.points) || [];
+  if (!pts.length) {
+    const n = document.createElement("div"); n.className = "anat-none";
+    n.textContent = card && card.status === "not_present" ? "해당 없음" : "논문에서 명확히 확인되지 않음";
+    wrap.appendChild(n); return wrap;
+  }
+  const KIND = { author_stated: ["author", "저자 명시"], synthesis: ["synthesis", "종합"], ai_interpretation: ["ai", "AI 해석"] };
+  for (const p of pts) {
+    const d = document.createElement("div"); d.className = "anat-pt";
+    const kind = KIND[p.kind] || KIND.ai_interpretation;
+    const vb = p.quote ? (p.verified ? '<span class="badge ok">근거확인</span>' : '<span class="badge warn">근거불명</span>') : "";
+    d.innerHTML = `<span class="anat-badges"><span class="badge ${kind[0]}">${kind[1]}</span>${vb}</span><span class="ptx">${esc(p.text || "")}</span>`;
+    if (p.quote) {
+      const qd = document.createElement("span"); qd.className = "anat-quote"; qd.textContent = "“" + p.quote + "”";
+      qd.title = "Click to highlight in the PDF";
+      qd.addEventListener("click", () => highlightQuote(p.quote));
+      d.appendChild(qd);
+    }
+    wrap.appendChild(d);
+  }
+  return wrap;
+}
+
+// click an anatomy quote -> find & highlight its source sentence in the (rendered) PDF
+function highlightQuote(quote) {
+  const nq = quote.replace(/\s+/g, " ").trim().toLowerCase();
+  S.pages.forEach((P) => { if (P.hllayer) P.hllayer.innerHTML = ""; });
+  for (let pi = 0; pi < S.pages.length; pi++) {
+    const P = S.pages[pi];
+    if (!P.segs) continue;
+    for (let k = 0; k < P.segs.length; k++) {
+      if (P.segs[k].text.replace(/\s+/g, " ").toLowerCase().includes(nq)) {
+        setHover(pi, k, true);
+        scrollPdfToSeg(pi, k, true);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// ================= Summary =================
+function resetSummary() { if (S.docId) { S.summaryLoaded = false; $("summary").innerHTML = ""; } }
+async function genSummary() {
+  const generation=S.openGeneration;
+  if (!S.docId || S.summaryLoaded) return;
+  S.summaryLoaded = true;
+  $("summary").innerHTML = '<p class="loading">저장된 요약 불러오는 중…</p>';
+  try {
+    const r = await postJSON("/api/summarize", { output_language: lang(), doc_id: S.docId });
+    if(generation!==S.openGeneration)return;
+    $("summary").innerHTML = mdMath(r.summary);
+    renderMath($("summary"));
+  } catch (err) {
+    if(generation!==S.openGeneration)return;
+    S.summaryLoaded = false;
+    $("summary").innerHTML = '<p class="loading">Error: ' + esc(err.message) + "</p>";
+  }
+  updateReviewBtn();
+}
+$("gen-summary").addEventListener("click", () => { S.summaryLoaded = false; genSummary(); });
+
+// The review combines summary + anatomy (+ chat), so enable the button only once both are
+// generated — in the normal flow their caches are then guaranteed to exist.
+function updateReviewBtn() {
+  const btn=$("export-review");btn.disabled=!S.docId;
+  btn.title="ChatGPT 플러그인에 저장된 6개 섹션 리뷰와 연결된 그림을 ZIP으로 내보냅니다. 리뷰가 없으면 생성·저장이 필요합니다.";
+}
+
+$("export-review").addEventListener("click", async () => {
+  if (!S.docId) return;
+  const btn = $("export-review"), label = btn.textContent;
+  btn.disabled = true; btn.textContent = "내보내는 중…";
+  try {
+    const res = await fetch(`/api/review/${S.docId}?output_language=${encodeURIComponent(lang())}`, { method: "POST" });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      if (d.rate_limited) showRateLimit();
+      throw new Error(d.detail || res.statusText);
+    }
+    const blob = await res.blob();
+    const m = (res.headers.get("Content-Disposition") || "").match(/filename="?([^"]+)"?/);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : "review.zip";
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(a.href);
+  } catch (e) {
+    alert("리뷰 내보내기 실패: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+});
+
+async function loadChat() {
+  const generation=S.openGeneration;
+  $("chatlog").innerHTML = "";
+  try {
+    const r = await (await fetch(`/api/chat/${S.docId}`)).json();
+    if(generation!==S.openGeneration)return;
+    if (!r.turns?.length) {const note=document.createElement("p");note.className="hint";note.textContent="저장된 대화가 없습니다. 새 질문은 ChatGPT의 Sundark 플러그인에서 생성·저장한 뒤 불러오세요.";$("chatlog").appendChild(note);}
+    for (const t of r.turns || []) {
+      const div = addMsg(t.role === "user" ? "user" : "bot", t.text);
+      if (t.role !== "user") { div.innerHTML = mdMath(t.text); renderMath(div); }
+    }
+  } catch(err) {if(generation!==S.openGeneration)return;const note=document.createElement("p");note.className="hint";note.textContent="저장 대화 불러오기 실패: "+err.message;$("chatlog").appendChild(note);} 
+}
+$("chat-reset").addEventListener("click", () => { window.sundarkClearCache?.();loadChat(); });
+
+// ================= Chat =================
+let chatCite = null;
+function setChatCite(text) {
+  chatCite = text;
+  $("chatcite-text").textContent = "“" + text + "”";
+  $("chatcite").classList.remove("hidden");
+}
+function clearChatCite() { chatCite = null; $("chatcite-text").textContent = ""; $("chatcite").classList.add("hidden"); }
+$("chatcite-x").addEventListener("click", clearChatCite);
+
+// Enter adds a line; Cmd/Ctrl+Enter sends. Not while an IME (e.g. Korean) is still composing,
+// or the Enter that commits the last syllable would send a half-typed question.
+$("chatinput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) {
+    e.preventDefault();
+    $("chatform").requestSubmit();
+  }
+});
+$("chatinput").addEventListener("input", fitChatInput);
+// Grow the box with its text; CSS max-height caps it and it scrolls from there.
+function fitChatInput() {
+  const el = $("chatinput");
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + (el.offsetHeight - el.clientHeight) + "px";
+}
+
+$("chatform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const generation=S.openGeneration;
+  const input = $("chatinput");
+  const q = input.value.trim();
+  const cite = chatCite;
+  if ((!q && !cite) || !S.docId) return;
+  input.value = "";
+  fitChatInput();
+  clearChatCite();
+
+  const userMsg = addMsg("user", q || "(선택한 부분에 대해)");
+  if (cite) {
+    const cd = document.createElement("div");
+    cd.className = "msg-cite"; cd.textContent = "“" + cite + "”";
+    userMsg.insertBefore(cd, userMsg.firstChild);
+  }
+  const bot = addMsg("bot", "…");
+  const question = cite
+    ? `논문의 다음 부분에 대한 질문입니다:\n"${cite}"\n\n${q || "이 부분을 설명해줘."}`
+    : q;
+  try {
+    const r = await postJSON("/api/chat", { output_language: lang(), doc_id: S.docId, question });
+    if(generation!==S.openGeneration)return;
+    bot.innerHTML = mdMath(r.answer);
+    renderMath(bot);
+  } catch (err) { if(generation!==S.openGeneration)return;bot.textContent = "Error: " + err.message; }
+  $("chatlog").scrollTop = $("chatlog").scrollHeight;
+});
+function addMsg(role, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + role; div.textContent = text;
+  $("chatlog").appendChild(div);
+  $("chatlog").scrollTop = $("chatlog").scrollHeight;
+  return div;
+}
+
+// ================= Selection -> Ask in chat =================
+let lastSelection = "";
+$("pdfview").addEventListener("mouseup", () => {
+  setTimeout(() => {
+    const sel = window.getSelection();
+    const text = sel ? sel.toString().replace(/\s+/g, " ").trim() : "";
+    if (text.length < 3) { hide($("selpop")); return; }
+    lastSelection = text;
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    const pop = $("selpop");
+    pop.style.left = Math.max(8, rect.left + rect.width / 2 - 70) + "px";
+    pop.style.top = (rect.top - 42) + "px";
+    show(pop);
+  }, 10);
+});
+document.addEventListener("mousedown", (e) => {
+  if (!$("selpop").contains(e.target)) hide($("selpop"));
+});
+$("btn-ask").addEventListener("click", () => {
+  hide($("selpop"));
+  if (!lastSelection) return;
+  setChatCite(lastSelection);                               // show as a citation block
+  document.querySelector('.tab[data-tab="chat"]').click();  // auto-switch to Chat
+  $("chatinput").value = "";
+  fitChatInput();
+  $("chatinput").focus();
+});
+
+// ================= helpers =================
+function setTitle(t) { $("title").textContent = t; }
+function show(el) { el.classList.remove("hidden"); }
+function hide(el) { el.classList.add("hidden"); }
+function fmtSize(b) { return b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(0) + " KB" : (b / 1048576).toFixed(1) + " MB"; }
+function fmtDate(e) { return new Date(e * 1000).toLocaleDateString(); }
+function esc(s) { return String(s??"").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+async function postJSON(url, body) {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    if (data.rate_limited) showRateLimit();
+    throw new Error(data.detail || res.statusText);
+  }
+  return res.json();
+}
+async function postForm(url, fd) {
+  const res = await fetch(url, { method: "POST", body: fd });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+  return res.json();
+}
+
+// ================= PDF zoom =================
+// S.zoom.mode is "width" (fit the page width, the default), "page" (fit a whole page) or "pct"
+// (a fixed S.zoom.pct). The fit modes refit when the pane changes size; a percentage stays.
+// 100% is the paper's real size: pdf.js scale 1 is 1 CSS px per point, and CSS has 96 px per
+// inch against 72 points.
+const PT_PX = 96 / 72;
+const ZOOM_STEPS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
+try {
+  const z = JSON.parse(localStorage.getItem("pdfZoom"));
+  if (z && ["width", "page", "pct"].includes(z.mode) && z.pct > 0) S.zoom = z;
+} catch (e) {}
+
+// The scale the zoom choice gives for the pane's current size.
+function zoomScale() {
+  const view = $("pdfview");
+  let s = S.zoom.pct / 100 * PT_PX;
+  if (S.zoom.mode !== "pct") {
+    s = (view.clientWidth - 48) / S.page1.w;  // 24 px of dark margin each side
+    // a whole page plus the gaps above and below it
+    if (S.zoom.mode === "page") s = Math.min(s, (view.clientHeight - 40) / S.page1.h);
+  }
+  const lo = ZOOM_STEPS[0] / 100 * PT_PX, hi = ZOOM_STEPS[ZOOM_STEPS.length - 1] / 100 * PT_PX;
+  return Math.min(hi, Math.max(lo, s));
+}
+
+function showZoom() {
+  $("zoom-pct").textContent = Math.round(S.scale / PT_PX * 100) + "%";
+  $("fit-width").classList.toggle("on", S.zoom.mode === "width");
+  $("fit-page").classList.toggle("on", S.zoom.mode === "page");
+}
+
+function setZoom(z, anchor) {
+  S.zoom = z;
+  try { localStorage.setItem("pdfZoom", JSON.stringify(z)); } catch (e) {}
+  if (S.pdf && S.pages.length) setScale(zoomScale(), anchor);
+  showZoom();
+}
+
+// One step up or down from the current zoom, which a fit mode may have left between steps.
+function stepZoom(dir) {
+  const cur = S.scale / PT_PX * 100;
+  const next = dir > 0
+    ? ZOOM_STEPS.find((p) => p > cur + 0.5)
+    : [...ZOOM_STEPS].reverse().find((p) => p < cur - 0.5);
+  if (next) setZoom({ mode: "pct", pct: next });
+}
+
+// "3 / 16" in the PDF bar: the page at the middle of the view, of all pages. The pages are
+// stacked top to bottom, so a binary search measures only a few of them per scroll frame.
+function showPageNum() {
+  if (!S.pages.length) { $("page-num").textContent = ""; return; }
+  const view = $("pdfview"), vb = view.getBoundingClientRect();
+  const mid = vb.top + view.clientHeight / 2;
+  let lo = 0, hi = S.pages.length - 1;  // the last page whose top is above the middle
+  while (lo < hi) {
+    const m = (lo + hi + 1) >> 1;
+    if (S.pages[m].el.getBoundingClientRect().top <= mid) lo = m; else hi = m - 1;
+  }
+  $("page-num").textContent = `${lo + 1} / ${S.pages.length}`;
+}
+let pageNumFrame = 0;
+$("pdfview").addEventListener("scroll", () => {
+  if (!pageNumFrame) pageNumFrame = requestAnimationFrame(() => { pageNumFrame = 0; showPageNum(); });
+}, { passive: true });
+
+$("zoom-in").addEventListener("click", () => stepZoom(1));
+$("zoom-out").addEventListener("click", () => stepZoom(-1));
+$("fit-width").addEventListener("click", () => setZoom({ mode: "width", pct: S.zoom.pct }));
+$("fit-page").addEventListener("click", () => setZoom({ mode: "page", pct: S.zoom.pct }));
+
+// Only the PDF pane consumes Ctrl+wheel (including trackpad pinch). Everywhere else the
+// browser keeps its normal whole-app zoom. Coalesce high-frequency input into one redraw.
+let wheelZoomFrame = 0, wheelZoomDelta = 0, wheelZoomAnchor;
+$("pdfview").addEventListener("wheel", (e) => {
+  if (!e.ctrlKey || !e.cancelable || !S.pdf || !S.pages.length || !e.deltaY) return;
+  e.preventDefault();  // also at the zoom limits: never fall through to browser zoom here
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? $("pdfview").clientHeight : 1;
+  wheelZoomDelta += e.deltaY * unit;
+  wheelZoomAnchor = { x: e.clientX, y: e.clientY };
+  if (wheelZoomFrame) return;
+  wheelZoomFrame = requestAnimationFrame(() => {
+    wheelZoomFrame = 0;
+    const delta = Math.max(-100, Math.min(100, wheelZoomDelta));
+    wheelZoomDelta = 0;
+    if (!S.pdf || !S.pages.length) return;
+    // setScale may skip a tiny redraw; keep accumulating from the requested zoom.
+    const currentPct = S.zoom.mode === "pct" ? S.zoom.pct : S.scale / PT_PX * 100;
+    const pct = Math.max(ZOOM_STEPS[0], Math.min(ZOOM_STEPS[ZOOM_STEPS.length - 1],
+      currentPct * Math.exp(-delta * 0.002)));
+    setZoom({ mode: "pct", pct }, wheelZoomAnchor);
+  });
+}, { passive: false });
+
+// Resize every page to scale `ns` in place and keep the point under the pointer (or the
+// middle of the view for buttons/refitting) where it is. The pages keep their layout,
+// sentences and translation state (rebuilding S.pages would orphan a translation still in
+// progress); only their drawing is redone, near the view first.
+function setScale(ns, anchor) {
+  if (Math.abs(ns - S.scale) < 0.001) return;
+  const view = $("pdfview"), vb = view.getBoundingClientRect();
+  const ax = anchor ? anchor.x : vb.left + view.clientWidth / 2;
+  const ay = anchor ? anchor.y : vb.top + view.clientHeight / 2;
+  // the page under the anchor (or the last one above it) and the anchor's place on it, in points
+  let at = 0;
+  for (let i = 1; i < S.pages.length && S.pages[i].el.getBoundingClientRect().top <= ay; i++) at = i;
+  const r0 = S.pages[at].el.getBoundingClientRect();
+  const fx = (ax - r0.left) / S.scale, fy = (ay - r0.top) / S.scale;
+  clearPdfHover();
+  S.scale = ns;
+  for (const P of S.pages) {
+    P.el.style.width = P.w1 * ns + "px";
+    P.el.style.height = P.h1 * ns + "px";
+    P.hllayer.innerHTML = "";  // drawn for the old scale
+    stopRender(P, false);
+  }
+  const r1 = S.pages[at].el.getBoundingClientRect();
+  view.scrollLeft += r1.left + fx * ns - ax;
+  view.scrollTop += r1.top + fy * ns - ay;
+  observePages();
+}
+
+// ================= Resizable panels =================
+// The pane changed size: a fit mode refits, a fixed percentage stays.
+function refitPdf() {
+  if (!S.pdf || !S.pages.length || S.zoom.mode === "pct") return;
+  const ns = zoomScale();
+  if (Math.abs(ns - S.scale) < 0.03) return;
+  setScale(ns);
+  showZoom();
+}
+
+(function initResizers() {
+  const ws = document.querySelector(".workspace");
+  const c1 = localStorage.getItem("c1"), c3 = localStorage.getItem("c3");
+  try { if (c1) ws.style.setProperty("--c1", c1); if (c3) ws.style.setProperty("--c3", c3); } catch (e) {}
+
+  function drag(handle, varName, fromRight) {
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); handle.setPointerCapture(e.pointerId); handle.classList.add("active");
+      const rect = ws.getBoundingClientRect();
+      const move = (ev) => {
+        let w = fromRight ? rect.right - ev.clientX : ev.clientX - rect.left;
+        w = Math.max(150, Math.min(rect.width * 0.6, w));
+        ws.style.setProperty(varName, w + "px");
+      };
+      const up = () => {
+        handle.classList.remove("active");
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", up);
+        try { localStorage.setItem(varName === "--c1" ? "c1" : "c3", ws.style.getPropertyValue(varName)); } catch (e) {}
+        refitPdf();
+      };
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", up);
+    });
+  }
+  drag($("rz1"), "--c1", false);
+  drag($("rz2"), "--c3", true);
+})();
+
+let resizeT;
+window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(refitPdf, 300); });
+
+window.S = S; // expose for debugging
+window.restorePrivatePaper = async (id) => {
+  if(!/^[a-f0-9-]{36}$/i.test(id)) throw new Error("올바르지 않은 논문 ID입니다.");
+  await loadConfig(); await openFromLibrary(id,null);
+};
+window.sundarkOriginalReady = loadConfig().then(async()=>{setLibSource("folder");const id=new URLSearchParams(location.search).get("paper");if(id)await window.restorePrivatePaper(id);}).catch(err=>{hide($("prep-overlay"));setTitle(err.message);});
+
+
+// Explicit per-page OCR, never automatic and never a full-paper scan.
+$("original-ocr").addEventListener("click",async()=>{
+  if(!S.docId||S.ocrController)return;
+  if(typeof window.sundarkOcrPage!=="function"){ $("ocr-status").textContent="OCR 연결을 준비하지 못했어요.";show($("ocr-status"));return; }
+  const id=S.docId,page=Math.max(1,parseInt($("page-num").textContent,10)||1),controller=new AbortController();S.ocrController=controller;
+  $("original-ocr").disabled=true;show($("original-ocr-cancel"));show($("ocr-status"));
+  $("ocr-status").textContent=`${page}페이지 영어 OCR 준비 중 · 첫 실행은 언어 모델 약 11MB를 이 사이트에서 내려받습니다. 문서는 외부 OCR 서비스로 보내지 않습니다.`;
+  const timeout=setTimeout(()=>controller.abort(),120000);
+  try {
+    await window.sundarkOcrPage(id,page,(fraction,status)=>{if(S.docId===id)$("ocr-status").textContent=`${page}페이지 영어 OCR ${Math.round(Math.min(1,Math.max(0,fraction||0))*100)}% · ${status||"진행 중"}`;},controller.signal);
+    if(S.docId!==id)return;window.sundarkClearCache?.();const P=S.pages[page-1];if(P){P.layoutPromise=null;P.layout=null;P.segs=null;stopRender(P,false);await ensureRendered(page-1);}retranslateAll(true);
+    $("ocr-status").textContent=`${page}페이지 OCR을 저장했어요. 번역은 ChatGPT 플러그인에서 생성·저장한 뒤 불러오세요.`;
+  } catch(err){if(S.docId===id)$("ocr-status").textContent=controller.signal.aborted?"OCR을 취소했거나 120초 제한을 초과했어요.":"OCR 실패: "+err.message;}
+  finally{clearTimeout(timeout);if(S.ocrController===controller)S.ocrController=null;$("original-ocr").disabled=false;hide($("original-ocr-cancel"));}
+});
+$("original-ocr-cancel").addEventListener("click",()=>S.ocrController?.abort());

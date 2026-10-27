@@ -59,6 +59,9 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   no build step. Highlighting maps server word coordinates (PDF points) to the
   viewport, so highlights are sentence-accurate.
 - **`app/store.py`** persists uploads + cached AI results under `data/`.
+- **`hosted-reader/`** is the hosted ChatGPT Site's source, a byte-exact `git archive` export
+  of a Site commit (`docs/hosted-reader.md`). Never edit it here: change the Site, then
+  re-export. Root Ruff skips it; `.github/workflows/hosted-reader.yml` builds and tests it.
 
 ## Security (do not weaken)
 

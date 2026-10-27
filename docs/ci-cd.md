@@ -36,6 +36,16 @@ the workflow does not consume secrets. New runs cancel older runs for the same
 PR or branch. The Ubuntu job has a 30-minute limit; the Windows auth job has a
 10-minute limit. Landing-page delivery runs in a separate Pages workflow.
 
+## Hosted reader checks
+
+`.github/workflows/hosted-reader.yml` (**Hosted Reader**) runs only for changes under
+`hosted-reader/` or to itself. On Ubuntu 24.04 with Node 24 it installs from
+`hosted-reader/package-lock.json` with `npm ci` (npm cache keyed on that lockfile), then runs
+`tsc --noEmit`, `npm run build`, the `node --test` suite (the Markdown test in the runner's
+Chrome), the original-reader regression scripts, the attachment reader's Playwright browser
+tests, and its local workerd checks in production and development modes. It has `contents: read`, uses no secrets
+and never deploys. What it leaves out, and why, is in [hosted-reader.md](hosted-reader.md).
+
 ## Windows credential regression checks
 
 A separate `windows-latest` job installs Python 3.12 and only `requirements.txt`.

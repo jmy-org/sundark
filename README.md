@@ -13,6 +13,8 @@ Inspired by sites like themoonlight.io, but kept simple and private.
 > starts AI processes; serving other people would need a billable API backend there.
 
 The public landing page lives in [`site/`](site/README.md), separate from the local reader.
+The hosted ChatGPT reader's source lives in [`hosted-reader/`](docs/hosted-reader.md), exported
+from its Site and also separate from the local reader.
 
 ## Requirements (macOS)
 
