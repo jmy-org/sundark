@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `ec45aa9346dcdacebf7ae74e19e9f281cd39dbce` ("Align widget discovery and add opt-in MCP tracing"; reader added in `7c2b570`) |
+| Exported Site commit | `566fd9f99a60197b9aceb81e8b576e10f6958c51` ("Remove the temporary small widget control"; reader added in `7c2b570`) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 
@@ -150,6 +150,41 @@ remaining live gates are visible original-PDF rendering, ordered translation, pa
 navigation, grounded Q&A, export/restore and reopen behavior in actual ChatGPT.
 Do not describe the workflow as ready until these gates pass; a model response claiming
 that it opened the reader is insufficient evidence.
+
+### Widget lookup checkpoint (2026-10-27)
+
+The installed connection's App ID and MCP URL matched the Sites-provisioned Sundark
+plugin. A controlled CSP-enforcement-on probe still failed at
+`GET https://chatgpt.com/backend-api/ecosystem/widget` with HTTP 404 for the exact
+advertised action and template pointer. The native browser tools did not expose the
+response body, so there is no underlying error code or explanation to report.
+
+A second probe correlated browser and server evidence in UTC:
+
+| Observation | Time | Result |
+| --- | --- | --- |
+| Server `tools/call` for the empty reader | 03:06:08.620 | Success |
+| Server `resources/read` for the attachment template | 03:06:10.209 | Success, 2,034,560 bytes |
+| Browser widget lookup | Approximately 03:06:08–03:06:11 | HTTP 404; no observed widget iframe |
+
+Thus the template was fetched during rendering, not only during metadata refresh.
+Adding the documented `ui.domain` and `openai/widgetDomain` fields on a fresh v3 URI
+did not resolve the 404; that experimental override was removed. The v3 URI remains
+an unadvertised read alias of the restored v2 resource for existing conversations.
+
+The five UI tools now declare a permissive object `outputSchema`, following the
+documented structured-output guidance without changing returned data. A 2,243-byte
+modern MCP Apps control then used the launcher's authentication, annotations, input,
+output, normalized template metadata and CSP, with a tested initialization handshake.
+Both the product reader and this control returned the same widget-lookup 404 in
+separate fresh chats. This argues against a problem confined to the large PDF bundle;
+it does not identify a unique platform cause. The temporary control was removed.
+
+The cleanup source passed the complete local Node contract suite, 30 reader
+state/Chromium tests, TypeScript/build checks, and production/development workerd
+checks (26/62). These checks still do not establish real ChatGPT usability. Further
+diagnosis needs the widget lookup's backend reason or a confirmed provisioning
+requirement; changing more template fields without such evidence is not a verified fix.
 
 ## Licenses
 

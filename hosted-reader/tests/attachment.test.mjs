@@ -459,6 +459,8 @@ const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v2.html';
 const SAVED_URI = 'ui://sundark/reader-compat-v3.html';
 // URIs earlier tool results named; hosts that cached them must still read the current body.
 const OLD_ATTACHMENT_URI = 'ui://sundark/attachment-reader.html', OLD_SAVED_URI = 'ui://sundark/reader-compat-v2.html';
+// The failed widget-domain experiment's URI: a read-only alias of the restored v2 body.
+const FAILED_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v3.html';
 const LEGACY = ['prepare_paper_task', 'list_paper_figures', 'read_paper_figure', 'render_paper_reader', 'search_library', 'list_paper_sources', 'read_paper_source',
   'read_paper_page', 'read_paper_notes', 'read_paper_analysis', 'save_paper_analysis', 'import_paper_pdf', 'extract_paper_pages', 'import_paper_text'];
 
@@ -506,6 +508,9 @@ test('route: new tools are read-only, file-param and reader-template tools', asy
   assert.equal(read.contents[0].mimeType, 'text/html;profile=mcp-app');
   assert.deepEqual(read.contents[0]._meta.ui.csp, {connectDomains: ['https://files.oaiusercontent.com'], resourceDomains: []});
   assert.deepEqual(read.contents[0]._meta['openai/widgetCSP'], {connect_domains: ['https://files.oaiusercontent.com'], resource_domains: []});
+  // The restored reader keeps the host's default widget origin.
+  assert.equal(read.contents[0]._meta.ui.domain, undefined);
+  assert.equal(read.contents[0]._meta['openai/widgetDomain'], undefined);
 });
 
 test('route: old reader URIs read the current body but only the new URIs are advertised', async () => {
@@ -513,8 +518,8 @@ test('route: old reader URIs read the current body but only the new URIs are adv
   assert.deepEqual(resources.map(r => r.uri).sort(), [ATTACHMENT_URI, SAVED_URI].sort());
   const {tools} = await noStorage(() => rpc('tools/list'));
   const named = JSON.stringify(tools);
-  assert(!named.includes(OLD_ATTACHMENT_URI) && !named.includes(OLD_SAVED_URI), 'tool metadata names only the new URIs');
-  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI]]) {
+  assert(![OLD_ATTACHMENT_URI, FAILED_ATTACHMENT_URI, OLD_SAVED_URI].some(u => named.includes(u)), 'tool metadata names only the new URIs');
+  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [ATTACHMENT_URI, FAILED_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI]]) {
     const now = (await rpc('resources/read', {uri: current})).contents[0];
     const alias = (await rpc('resources/read', {uri: old})).contents[0];
     assert.equal(alias.uri, old, 'echoes the URI the host asked for');
@@ -544,8 +549,11 @@ test('route: UI tool metadata matches what the installed ext-apps registerAppToo
       assert.equal(t._meta?.ui, undefined, `${t.name} has no UI`);
       assert.equal(t._meta?.[RESOURCE_URI_META_KEY], undefined, t.name);
       assert.equal(t._meta?.['openai/outputTemplate'], undefined, t.name);
+      assert.equal(t.outputSchema, undefined, `${t.name} declares no outputSchema`);
       continue;
     }
+    // structuredContent is declared, permissively, as the object it always is.
+    assert.deepEqual(t.outputSchema, {type: 'object', additionalProperties: true}, t.name);
     assert.deepEqual([t._meta.ui.resourceUri, t._meta[RESOURCE_URI_META_KEY], t._meta['openai/outputTemplate']], [uri, uri, uri], t.name);
     assert.deepEqual(registered(t._meta), t._meta, `${t.name} is already normalized`);
     const {[RESOURCE_URI_META_KEY]: _legacy, ...current} = t._meta;
@@ -600,6 +608,9 @@ test('route: read and render return model text, structuredContent and no URL', a
   const entry = await noStorage(() => rpc('tools/call', {name: 'open_pdf_file', arguments: {file: {name: 'synthetic.pdf', resourceUri: 'synthetic-resource://file/1'}}}));
   assert.equal(entry.isError, undefined);
   assert.deepEqual(entry.structuredContent.fileEntrypoint, {fileName: 'synthetic.pdf'});
+  // Conforms to the declared outputSchema {type: 'object'}.
+  for (const r of [read, render, launcher, entry])
+    assert(r.structuredContent && typeof r.structuredContent === 'object' && !Array.isArray(r.structuredContent));
 });
 
 test('route: errors name the reason, never the URL; sign-in is still required', async () => {

@@ -49,7 +49,7 @@ downloads nothing and does not echo the resource URI.
   translation:{language,instructions,batches:[{page,sourceHash,language,segmentIds}]},storageNotice}` as both model
   text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader-v2.html`
   (`_meta.ui.resourceUri` plus the `openai/outputTemplate` alias; the earlier
-  `ui://sundark/attachment-reader.html` and the saved reader's `ui://sundark/reader-compat-v2.html`
+  `ui://sundark/attachment-reader.html` and `ui://sundark/attachment-reader-v3.html`, and the saved reader's `ui://sundark/reader-compat-v2.html`
   stay readable with the same body for existing chats, but are no longer listed), so the first requested page's source
   shows before any translation. The download URL is never echoed, stored or logged.
 - `sourceHash` is per page: sha256 over the original file's sha256 and that page's exact geometry and
@@ -97,6 +97,8 @@ downloads nothing and does not echo the resource URI.
   identity, paper text and error messages are never logged; responses are unchanged.
 - The reader resource's CSP `connectDomains` (and `openai/widgetCSP`) list exactly the hosts the
   server download gate allows; nothing broader.
+- The UI tools (the four attachment reader tools and `render_paper_reader`) declare `outputSchema`
+  `{type:"object",additionalProperties:true}`: their `structuredContent` is always an object; the schema adds no shape.
 - ChatGPT's own file retention is outside Sundark. Results live only in the conversation.
 
 ## PDF attached in ChatGPT: explicit save
