@@ -5,9 +5,19 @@
  * size); `host` is set only for unsupported_host and is a parsed, HOST-validated hostname. */
 export class PdfFileError extends Error {status:number;reason:string;host?:string;constructor(status:number,message:string,reason='download',host?:string){super(message);this.status=status;this.reason=reason;this.host=host}}
 export const MAX_PDF=20*1024*1024;
-// Candidate ChatGPT file host. Not an official guarantee: the live host gate decides,
-// and SUNDARK_FILE_HOSTS replaces it with an exact-host list.
-export const DEFAULT_FILE_HOSTS=['files.oaiusercontent.com'];
+// ChatGPT serves attachments from per-region hosts under oaiusercontent.com (files., sdmntprwestus2.,
+// sdmntprindiasocentral., ...), minted per call, so an exact list cannot converge. OpenAI lists
+// oaiusercontent.com on the Public Suffix List: every single label under it is its own site, and
+// other labels are separate tenants (app sandbox origins among them). Passing this rule proves
+// only that the host is in that OpenAI namespace. It is not a provenance guarantee: it does not
+// prove the URL is a ChatGPT file, or this user's file. A model or prompt injection could point a
+// call at another tenant's PDF; those bytes are untrusted, like any attachment, and go only to the
+// caller's own conversation. Nor does it check the address a name resolves to: that is left to
+// OpenAI's DNS for its namespace. pdfSha256 binds the original pane to the bytes that produced the
+// translation, not to where they came from.
+const CHATGPT_FILE_NAMESPACE=/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.oaiusercontent\.com$/;
+// Exact extra hosts outside that namespace; SUNDARK_FILE_HOSTS replaces this list.
+export const DEFAULT_FILE_HOSTS:string[]=[];
 const HOST=/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 export function fileHosts(value?:string){if(value===undefined)return DEFAULT_FILE_HOSTS;return value.split(',').map(h=>h.trim().toLowerCase()).filter(h=>HOST.test(h))}
 export interface FilePolicy{hosts:string[];devOrigin?:string}
@@ -15,7 +25,7 @@ const missing=()=>new PdfFileError(400,'The attachment reference has no download
 const malformed=()=>new PdfFileError(400,'The attachment download URL is malformed. Call again with a fresh file reference to the attached PDF.','malformed');
 const unsafe=()=>new PdfFileError(400,'The attachment download URL is not a plain https file URL (credentials, IP addresses and custom ports are refused). Nothing was downloaded.','unsafe_url');
 // A configuration error: reattaching the same file cannot fix it, so do not ask the user to.
-const unsupported=(host:string)=>new PdfFileError(400,`The attachment file host ${host} is not in this Sundark deployment's allowed file hosts (SUNDARK_FILE_HOSTS). Reattaching will not help; the Site owner must allow this exact host if it is a genuine ChatGPT file host. Nothing was downloaded.`,'unsupported_host',host);
+const unsupported=(host:string)=>new PdfFileError(400,`The attachment file host ${host} is outside the ChatGPT file namespace (one label under oaiusercontent.com) and not in this Sundark deployment's exact extra file hosts (SUNDARK_FILE_HOSTS). Reattaching will not help; the Site owner must list this exact host if it is a genuine ChatGPT file host. Nothing was downloaded.`,'unsupported_host',host);
 export function checkFileUrl(raw:unknown,policy:FilePolicy){
  if(typeof raw!=='string'||!raw)throw missing();
  if(raw.length>4096)throw malformed();
@@ -24,7 +34,7 @@ export function checkFileUrl(raw:unknown,policy:FilePolicy){
  // Local fixture server, only when the dev build supplies its exact loopback origin.
  if(policy.devOrigin&&/^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(policy.devOrigin)&&url.origin===policy.devOrigin)return url;
  if(url.protocol!=='https:'||url.port!==''||!HOST.test(url.hostname))throw unsafe();
- if(!policy.hosts.includes(url.hostname))throw unsupported(url.hostname);
+ if(!CHATGPT_FILE_NAMESPACE.test(url.hostname)&&!policy.hosts.includes(url.hostname))throw unsupported(url.hostname);
  return url;
 }
 export function isPdf(bytes:Uint8Array){return bytes.length>=8&&new TextDecoder().decode(bytes.slice(0,5))==='%PDF-'}

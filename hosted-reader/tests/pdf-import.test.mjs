@@ -26,9 +26,76 @@ test('local fixture origin is exact and only honored when supplied', () => {
 });
 
 test('host allowlist parsing keeps exact hostnames and drops wildcards, IPs and URLs', () => {
-  assert.deepEqual(fileHosts(undefined), ['files.oaiusercontent.com']);
+  assert.deepEqual(fileHosts(undefined), [], 'the namespace rule covers files.oaiusercontent.com; extras are exact hosts only');
   assert.deepEqual(fileHosts(' A.example.com ,*.blob.core.windows.net,10.0.0.1,https://x.example/,b.example '), ['a.example.com', 'b.example']);
   assert.deepEqual(fileHosts(''), []);
+});
+
+// Regional ChatGPT file hosts observed live (read on one, render on the other). Only these two
+// exact hosts are asserted under the default policy; the final host policy is still open.
+const REGIONAL = ['sdmntprindiasocentral.oaiusercontent.com', 'sdmntprwestus2.oaiusercontent.com'];
+const defaults = {hosts: fileHosts(undefined)};
+
+test('default policy accepts the two observed regional file hosts', () => {
+  for (const host of REGIONAL)
+    assert.equal(checkFileUrl(`https://${host}/files/SYNTHETIC/raw?se=2026&sig=x`, defaults).hostname, host);
+});
+
+test('regional host boundaries stay blocked under the default policy', () => {
+  for (const host of REGIONAL) {
+    for (const raw of ['https://oaiusercontent.com/f', `https://x.${host}/f`, `https://${host}.evil.example/f`,
+      `http://${host}/f`, `https://user:pw@${host}/f`, `https://${host}:8443/f`, `ftp://${host}/f`,
+      'https://127.0.0.1/f', 'https://[::1]/f', 'https://10.0.0.1/f', 'https://20.0.0.1/f'])
+      rejects(raw, defaults);
+  }
+});
+
+test('a regional download does not follow a redirect, even to the other regional host', async () => {
+  const calls = [];
+  const fetcher = async (href, init) => {
+    calls.push({href, redirect: init.redirect});
+    return new Response(null, {status: 302, headers: {Location: `https://${REGIONAL[1]}/files/SYNTHETIC/raw?sig=SECRET-TOKEN`}});
+  };
+  const url = new URL(`https://${REGIONAL[0]}/files/SYNTHETIC/raw?sig=SECRET-TOKEN`);
+  await assert.rejects(downloadPdf(url, {fetcher}), e => e instanceof PdfFileError && e.status === 502 && !e.message.includes('SECRET') && !e.message.includes('oaiusercontent'));
+  assert.deepEqual(calls, [{href: url.href, redirect: 'manual'}]);
+});
+
+// The ChatGPT file namespace: exactly one DNS label under oaiusercontent.com, with no extra host
+// listed. It proves the namespace only, not that the file is the user's (see lib/pdf-file.ts).
+const none = {hosts: []};
+test('namespace rule: any single label under oaiusercontent.com, nothing else', () => {
+  for (const host of ['files.oaiusercontent.com', 'sdmntprwestus2.oaiusercontent.com', 'zz9q.oaiusercontent.com', 'a.oaiusercontent.com', `${'a'.repeat(63)}.oaiusercontent.com`, 'x-1.oaiusercontent.com'])
+    assert.equal(checkFileUrl(`https://${host}/files/SYNTHETIC/raw?sig=x`, none).hostname, host);
+  for (const raw of ['https://oaiusercontent.com/f', 'https://a.b.oaiusercontent.com/f', 'https://xoaiusercontent.com/f', 'https://x.xoaiusercontent.com/f',
+    'https://oaiusercontent.com.evil.example/f', 'https://x.oaiusercontent.com.evil.example/f', 'https://-x.oaiusercontent.com/f', 'https://x-.oaiusercontent.com/f',
+    `https://${'a'.repeat(64)}.oaiusercontent.com/f`, 'https://x.oaiusercontent.com./f', 'https://x_y.oaiusercontent.com/f',
+    'http://x.oaiusercontent.com/f', 'https://x.oaiusercontent.com:443x/f', 'https://x.oaiusercontent.com:8443/f', 'https://u:p@x.oaiusercontent.com/f',
+    'https://evil.example\\@x.oaiusercontent.com/f', 'https://evil.example#@x.oaiusercontent.com/f', 'https://127.0.0.1/f', 'https://[::1]/f', 'https://10.0.0.1/f',
+    'file:///x.oaiusercontent.com/f', 'javascript:alert(1)//x.oaiusercontent.com', 'ftp://x.oaiusercontent.com/f'])
+    rejects(raw, none);
+  // Unsupported vs unsafe: a plain https name outside the namespace is a configuration refusal.
+  assert.throws(() => checkFileUrl('https://a.b.oaiusercontent.com/f', none), e => e.reason === 'unsupported_host' && /exact/.test(e.message));
+  assert.throws(() => checkFileUrl('https://x.oaiusercontent.com:8443/f', none), e => e.reason === 'unsafe_url');
+});
+
+test('namespace rule: WHATWG normalization is what the gate sees', () => {
+  // Uppercase is lowercased; the default port is dropped; a percent-encoded dot is decoded into a second label.
+  assert.equal(checkFileUrl('https://FILES.OaiUserContent.COM/f', none).hostname, 'files.oaiusercontent.com');
+  assert.equal(checkFileUrl('https://x.oaiusercontent.com:443/f', none).hostname, 'x.oaiusercontent.com');
+  assert.equal(new URL('https://a%2Eb.oaiusercontent.com/f').hostname, 'a.b.oaiusercontent.com');
+  rejects('https://a%2Eb.oaiusercontent.com/f', none);
+  // A backslash ends the authority for https, so the host is the namespace label and the rest is path.
+  assert.equal(new URL('https://x.oaiusercontent.com\\@evil.example/f').hostname, 'x.oaiusercontent.com');
+  assert.equal(checkFileUrl('https://x.oaiusercontent.com\\@evil.example/f', none).hostname, 'x.oaiusercontent.com');
+});
+
+test('an exact extra host passes only when it is listed', () => {
+  const extra = 'oaisdmntprwestus2.blob.core.windows.net';
+  rejects(`https://${extra}/f`, none);
+  assert.equal(checkFileUrl(`https://${extra}/f`, {hosts: fileHosts(extra)}).hostname, extra);
+  rejects(`https://x.${extra}/f`, {hosts: fileHosts(extra)});
+  rejects('https://other.blob.core.windows.net/f', {hosts: fileHosts(extra)});
 });
 
 test('PDF signature and stored name', () => {

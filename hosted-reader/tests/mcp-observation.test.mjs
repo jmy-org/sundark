@@ -31,7 +31,7 @@ const {POST} = await import('../app/mcp/route.ts');
 const {attachmentReaderHtml} = await import('../lib/attachment-reader.ts');
 
 const SECRET = 'SECRET-MARKER';
-const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v2.html';
+const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
 const SAVED_URI = 'ui://sundark/reader-compat-v3.html';
 const signedIn = {'oai-authenticated-user-id': `user-${SECRET}`, 'oai-authenticated-user-email': `${SECRET}@example.invalid`};
 const file = {download_url: `${origin}/two.pdf?sig=${SECRET}`, file_id: `file-${SECRET}`, file_name: `${SECRET}.pdf`};
@@ -101,20 +101,29 @@ test('flag on: protocol methods log enum fields, versions and the resource size 
 
 test('flag on: whitelisted tool calls map to enum names, other tools to other; no storage', async () => {
   flag('1');
-  let read;
-  const {events} = await observe(async () => {
+  let read, original;
+  const {events, all} = await observe(async () => {
     read = await send({method: 'tools/call', params: {name: 'read_attached_pdf', arguments: {file}}});
     const sourceHash = read.body.result.structuredContent.sourceHash;
     await send({method: 'tools/call', params: {name: 'render_attached_reader', arguments: {file, page: 1, sourceHash}}});
+    const pdfSha256 = read.body.result.structuredContent.attachment.pdfSha256;
+    original = await send({method: 'tools/call', params: {name: 'read_attachment_original', arguments: {file, pdfSha256, offset: 0}}});
+    await send({method: 'tools/call', params: {name: 'read_attachment_original', arguments: {file, pdfSha256: '0'.repeat(64), offset: 0}}});
     await send({method: 'tools/call', params: {name: 'prepare_attachment_task', arguments: {file, pages: [1], kind: 'summary'}}});
     await send({method: 'tools/call', params: {name: 'open_attachment_reader', arguments: {}}});
     await send({method: 'tools/call', params: {name: 'open_pdf_file', arguments: {file: {name: `${SECRET}.pdf`, resourceUri: `x://${SECRET}`}}}});
     await send({method: 'tools/call', params: {name: `tool-${SECRET}`, arguments: {}}});
   });
   assert.equal(read.body.result.isError, undefined);
+  const chunk = original.body.result._meta['sundark/originalChunk'];
+  assert.equal(Buffer.from(chunk, 'base64').length, pdf.length);
+  // Neither the original's bytes nor its arguments reach the log: enum, status and reason only.
+  assert(!all.includes(chunk.slice(0, 64)) && !all.includes(read.body.result.structuredContent.attachment.pdfSha256), 'no bytes or digest logged');
   assert.deepEqual(events.map(e => [e.method, e.tool, e.outcome, e.status, e.reason]), [
     ['tools/call', 'read_attached', 'ok', undefined, undefined],
     ['tools/call', 'render_attached', 'ok', undefined, undefined],
+    ['tools/call', 'original', 'ok', undefined, undefined],
+    ['tools/call', 'original', 'error', 409, 'source_changed'],
     ['tools/call', 'prepare', 'ok', undefined, undefined],
     ['tools/call', 'open', 'ok', undefined, undefined],
     ['tools/call', 'open', 'ok', undefined, undefined],

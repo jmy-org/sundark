@@ -18,8 +18,8 @@ globalThis.__workerEnv = new Proxy(vars, {
     return target[key];
   },
 });
-const {readAttached, renderAttached, prepareAttachedTask, attachmentLauncher, attachmentFileEntrypoint} = await import('../lib/attachment.ts');
-const {MAX_PDF} = await import('../lib/pdf-file.ts');
+const {readAttached, readAttachedOriginal, ORIGINAL_CHUNK, renderAttached, prepareAttachedTask, attachmentLauncher, attachmentFileEntrypoint} = await import('../lib/attachment.ts');
+const {MAX_PDF, fileHosts} = await import('../lib/pdf-file.ts');
 
 const routes = new Map();
 const server = http.createServer((req, res) => {
@@ -43,6 +43,11 @@ routes.set('/redirect.pdf', (req, res) => { res.writeHead(302, {Location: '/two.
 routes.set('/slow.pdf', (req, res) => { res.writeHead(200); res.write('%PDF-1.4'); });
 for (const code of [401, 403, 404, 410]) status(`/expired-${code}.pdf`, code);
 status('/broken.pdf', 500);
+// 5 MiB: a real PDF header and body, padded after %%EOF. The original tool never opens it with pdf.js.
+const BIG = Buffer.concat([Buffer.from(twoPagePdf()), Buffer.alloc(5 * 1024 * 1024 - twoPagePdf().length, 0x25)]);
+serve('/big.pdf', BIG);
+let bigRequests = 0;
+routes.set('/counted.pdf', (req, res) => { bigRequests++; res.writeHead(200, {'Content-Type': 'application/pdf'}); res.end(BIG); });
 
 const deps = {policy: {hosts: [], devOrigin: origin}};
 const SECRET = 'SECRET-SIGNATURE';
@@ -325,6 +330,131 @@ test('only an unsupported host logs a diagnostic, with the validated hostname an
   } finally { Object.assign(console, saved); }
 });
 
+// Regional ChatGPT file hosts observed live: the same attachment was read from one and rendered
+// from the other. Only these two exact hosts are asserted; the final host policy is still open.
+const INDIA = 'sdmntprindiasocentral.oaiusercontent.com', WESTUS2 = 'sdmntprwestus2.oaiusercontent.com';
+// Default policy: no SUNDARK_FILE_HOSTS, no extra hosts, no dev origin.
+const regional = served => {
+  const fetched = [];
+  const fetcher = async (href, init) => {
+    fetched.push({host: new URL(href).hostname, redirect: init.redirect});
+    return served ? served(href) : new Response(twoPagePdf(), {status: 200, headers: {'Content-Type': 'application/pdf'}});
+  };
+  return {fetched, deps: {policy: {hosts: fileHosts(undefined)}, fetcher}};
+};
+const regionalFile = (host, extra = {}) => ({download_url: `https://${host}/files/SYNTHETIC/raw?se=2026&sig=${SECRET}`, file_id: 'file-SYNTHETIC-ID',
+  mime_type: 'application/pdf', file_name: 'synthetic.pdf', ...extra});
+
+test('regional hosts: read on indiasocentral then render on westus2 under the default policy, nothing stored', async () => {
+  const {fetched, deps: d} = regional();
+  const read = await noStorage(() => readAttached({file: regionalFile(INDIA)}, d));
+  clean(read);
+  assert.equal(JSON.stringify(read).includes('oaiusercontent'), false, 'no file host in output');
+  assert.equal(read.mode, 'ephemeral');
+  assert.equal(read.persistent, false);
+  assert.equal(read.attachment.pdfSha256, sha(twoPagePdf()));
+  const shown = await noStorage(() => renderAttached({file: regionalFile(WESTUS2), page: 1, sourceHash: read.sourceHash}, d));
+  clean(shown);
+  assert.equal(JSON.stringify(shown).includes('oaiusercontent'), false, 'no file host in output');
+  assert.equal(shown.sourceHash, read.sourceHash, 'same bytes from either region give the same source');
+  assert.deepEqual(fetched, [{host: INDIA, redirect: 'manual'}, {host: WESTUS2, redirect: 'manual'}]);
+});
+
+test('regional hosts: URL boundaries stay blocked under the default policy', async () => {
+  const {fetched, deps: d} = regional();
+  for (const host of [INDIA, WESTUS2]) {
+    // Apex, nested and suffix-spoofed names are not the observed host.
+    for (const raw of ['https://oaiusercontent.com/f', `https://x.${host}/f`, `https://${host}.evil.example/f`])
+      await fails(() => readAttached({file: {download_url: raw, file_id: 'f'}}, d), 'unsupported_host');
+    for (const raw of [`http://${host}/f`, `https://user:pw@${host}/f`, `https://${host}:8443/f`, `ftp://${host}/f`,
+      'https://127.0.0.1/f', 'https://[::1]/f', 'https://10.0.0.1/f', 'https://20.0.0.1/f'])
+      await fails(() => readAttached({file: {download_url: raw, file_id: 'f'}}, d), 'unsafe_url', e => { assert.equal(e.host, undefined, raw); assert(!e.message.includes('pw')); return true; });
+  }
+  assert.deepEqual(fetched, [], 'nothing downloaded for a blocked URL');
+});
+
+test('regional hosts: a redirect is not followed, even to another regional host', async () => {
+  const {fetched, deps: d} = regional(() => new Response(null, {status: 302, headers: {Location: `https://${WESTUS2}/files/SYNTHETIC/raw?sig=${SECRET}`}}));
+  await fails(() => readAttached({file: regionalFile(INDIA)}, d), 'download');
+  assert.deepEqual(fetched, [{host: INDIA, redirect: 'manual'}], 'one request, redirect not followed');
+});
+
+test('regional hosts: a never-seen single label in the namespace reads and renders too', async () => {
+  const {fetched, deps: d} = regional();
+  const read = await noStorage(() => readAttached({file: regionalFile('zz9q.oaiusercontent.com')}, d));
+  const shown = await noStorage(() => renderAttached({file: regionalFile(INDIA), page: 1, sourceHash: read.sourceHash}, d));
+  assert.equal(shown.sourceHash, read.sourceHash);
+  assert.deepEqual(fetched.map(f => f.host), ['zz9q.oaiusercontent.com', INDIA]);
+});
+
+// --- read_attachment_original ---------------------------------------------------------------
+const b64 = meta => Buffer.from(meta['sundark/originalChunk'], 'base64');
+test('original: a 5 MiB PDF arrives in three aligned chunks, byte-equal, nothing stored', async () => {
+  assert.equal(ORIGINAL_CHUNK, 2 * 1024 * 1024);
+  const pdfSha256 = sha(BIG), parts = [];
+  for (let offset = 0, done = false; !done;) {
+    const {data, meta} = await noStorage(() => readAttachedOriginal({file: file('/big.pdf'), pdfSha256, offset}, deps));
+    clean(data);
+    assert.deepEqual(Object.keys(data).sort(), ['done', 'fileId', 'length', 'offset', 'pdfSha256', 'total']);
+    assert.deepEqual(Object.keys(meta), ['sundark/originalChunk']);
+    const bytes = b64(meta);
+    assert.equal(bytes.length, data.length);
+    assert.equal(data.offset, offset);
+    assert.equal(data.total, BIG.length);
+    assert.equal(data.pdfSha256, pdfSha256);
+    assert.equal(data.fileId, 'file-SYNTHETIC-ID');
+    parts.push({done: data.done, bytes});
+    offset += data.length; done = data.done;
+  }
+  assert.deepEqual(parts.map(p => [p.bytes.length, p.done]), [[ORIGINAL_CHUNK, false], [ORIGINAL_CHUNK, false], [BIG.length - 2 * ORIGINAL_CHUNK, true]]);
+  const whole = Buffer.concat(parts.map(p => p.bytes));
+  assert(whole.equals(BIG));
+  assert.equal(sha(whole), pdfSha256);
+  // A file of one chunk or less is done at once.
+  const small = await readAttachedOriginal({file: file('/two.pdf'), pdfSha256: sha(twoPagePdf()), offset: 0}, deps);
+  assert.deepEqual([small.data.length, small.data.total, small.data.done], [twoPagePdf().length, twoPagePdf().length, true]);
+});
+
+test('original: bytes only for the exact file; offsets, arguments and files are checked', async () => {
+  const pdfSha256 = sha(BIG);
+  await fails(() => readAttachedOriginal({file: file('/big.pdf'), pdfSha256: sha(twoPagePdf()), offset: 0}, deps), 'source_changed', e => e.status === 409);
+  await fails(() => readAttachedOriginal({file: file('/two.pdf'), pdfSha256, offset: 0}, deps), 'source_changed');
+  for (const offset of [-ORIGINAL_CHUNK, 1, ORIGINAL_CHUNK / 2, 1.5, '0', null, undefined, 3 * ORIGINAL_CHUNK, 4 * ORIGINAL_CHUNK])
+    await fails(() => readAttachedOriginal({file: file('/big.pdf'), pdfSha256, offset}, deps), 'invalid_arguments');
+  for (const bad of [undefined, '', 'A'.repeat(64), 'g'.repeat(64), pdfSha256.slice(1), 42])
+    await fails(() => readAttachedOriginal({file: file('/big.pdf'), pdfSha256: bad, offset: 0}, deps), 'invalid_arguments');
+  await fails(() => readAttachedOriginal({file: file('/big.pdf'), pdfSha256, offset: 0, url: 'https://evil.example/'}, deps), 'invalid_arguments');
+  await fails(() => readAttachedOriginal([], deps), 'invalid_arguments');
+  await fails(() => readAttachedOriginal({pdfSha256, offset: 0}, deps), 'missing');
+  await fails(() => readAttachedOriginal({file: file('/html.pdf'), pdfSha256: sha(Buffer.from('<html>not a pdf</html>')), offset: 0}, deps), 'not_pdf');
+  await fails(() => readAttachedOriginal({file: file('/redirect.pdf'), pdfSha256: sha(twoPagePdf()), offset: 0}, deps), 'download');
+  for (const code of [401, 403, 404, 410])
+    await fails(() => readAttachedOriginal({file: file(`/expired-${code}.pdf`), pdfSha256, offset: 0}, deps), 'expired');
+  await fails(() => readAttachedOriginal({file: file('/huge.pdf'), pdfSha256, offset: 0}, deps), 'size');
+  await fails(() => readAttachedOriginal({file: {download_url: `https://cdn.example.com/x.pdf?sig=${SECRET}`, file_id: 'f'}, pdfSha256, offset: 0}, {policy: {hosts: []}}), 'unsupported_host');
+});
+
+test('original: the download sends only Accept, follows no redirect, even inside the namespace', async () => {
+  const calls = [];
+  const fetcher = async (href, init) => {
+    calls.push({host: new URL(href).hostname, init});
+    return href.includes('hop') ? new Response(null, {status: 302, headers: {Location: `https://${WESTUS2}/files/SYNTHETIC/raw?sig=${SECRET}`}})
+      : new Response(twoPagePdf(), {status: 200, headers: {'Content-Type': 'application/pdf'}});
+  };
+  const d = {policy: {hosts: []}, fetcher};
+  const ok = await readAttachedOriginal({file: regionalFile(INDIA), pdfSha256: sha(twoPagePdf()), offset: 0}, d);
+  assert.equal(ok.data.done, true);
+  await fails(() => readAttachedOriginal({file: {...regionalFile(INDIA), download_url: `https://${INDIA}/hop?sig=${SECRET}`}, pdfSha256: sha(twoPagePdf()), offset: 0}, d), 'download');
+  assert.deepEqual(calls.map(c => c.host), [INDIA, INDIA], 'the redirect target is never requested');
+  for (const {init} of calls) {
+    assert.equal(init.redirect, 'manual');
+    assert.equal(init.method, 'GET');
+    assert.deepEqual(init.headers, {Accept: 'application/pdf'});
+    assert.equal(init.credentials, undefined);
+    assert.equal(init.referrer, undefined);
+  }
+});
+
 test('download errors: expired asks for a fresh reference, others are bounded', async () => {
   for (const code of [401, 403, 404, 410])
     await fails(() => readAttached({file: file(`/expired-${code}.pdf`)}, deps), 'expired', e => /fresh/i.test(e.message));
@@ -455,12 +585,12 @@ async function rpc(method, params, headers = signedIn) {
     return (await response.json()).result;
   } finally { globalThis.__requestHeaders = undefined; }
 }
-const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v2.html';
+const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
 const SAVED_URI = 'ui://sundark/reader-compat-v3.html';
 // URIs earlier tool results named; hosts that cached them must still read the current body.
 const OLD_ATTACHMENT_URI = 'ui://sundark/attachment-reader.html', OLD_SAVED_URI = 'ui://sundark/reader-compat-v2.html';
-// The failed widget-domain experiment's URI: a read-only alias of the restored v2 body.
-const FAILED_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v3.html';
+// The failed widget-domain experiment's URI, and v2, whose CSP let the widget fetch the file itself.
+const FAILED_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v3.html', V2_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v2.html';
 const LEGACY = ['prepare_paper_task', 'list_paper_figures', 'read_paper_figure', 'render_paper_reader', 'search_library', 'list_paper_sources', 'read_paper_source',
   'read_paper_page', 'read_paper_notes', 'read_paper_analysis', 'save_paper_analysis', 'import_paper_pdf', 'extract_paper_pages', 'import_paper_text'];
 
@@ -506,8 +636,9 @@ test('route: new tools are read-only, file-param and reader-template tools', asy
   assert.equal(read.contents[0].text, attachmentReaderHtml);
   assert.equal(read.contents[0].uri, ATTACHMENT_URI);
   assert.equal(read.contents[0].mimeType, 'text/html;profile=mcp-app');
-  assert.deepEqual(read.contents[0]._meta.ui.csp, {connectDomains: ['https://files.oaiusercontent.com'], resourceDomains: []});
-  assert.deepEqual(read.contents[0]._meta['openai/widgetCSP'], {connect_domains: ['https://files.oaiusercontent.com'], resource_domains: []});
+  // No widget egress at all: the original PDF comes in-band, even with SUNDARK_FILE_HOSTS set.
+  assert.deepEqual(read.contents[0]._meta.ui.csp, {connectDomains: [], resourceDomains: []});
+  assert.deepEqual(read.contents[0]._meta['openai/widgetCSP'], {connect_domains: [], resource_domains: []});
   // The restored reader keeps the host's default widget origin.
   assert.equal(read.contents[0]._meta.ui.domain, undefined);
   assert.equal(read.contents[0]._meta['openai/widgetDomain'], undefined);
@@ -518,12 +649,13 @@ test('route: old reader URIs read the current body but only the new URIs are adv
   assert.deepEqual(resources.map(r => r.uri).sort(), [ATTACHMENT_URI, SAVED_URI].sort());
   const {tools} = await noStorage(() => rpc('tools/list'));
   const named = JSON.stringify(tools);
-  assert(![OLD_ATTACHMENT_URI, FAILED_ATTACHMENT_URI, OLD_SAVED_URI].some(u => named.includes(u)), 'tool metadata names only the new URIs');
-  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [ATTACHMENT_URI, FAILED_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI]]) {
+  assert(![OLD_ATTACHMENT_URI, FAILED_ATTACHMENT_URI, V2_ATTACHMENT_URI, OLD_SAVED_URI].some(u => named.includes(u)), 'tool metadata names only the new URIs');
+  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [ATTACHMENT_URI, FAILED_ATTACHMENT_URI], [ATTACHMENT_URI, V2_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI]]) {
     const now = (await rpc('resources/read', {uri: current})).contents[0];
     const alias = (await rpc('resources/read', {uri: old})).contents[0];
     assert.equal(alias.uri, old, 'echoes the URI the host asked for');
     assert.deepEqual({...alias, uri: current}, now, `${old} serves the same body, MIME and CSP`);
+    if (current === ATTACHMENT_URI) assert.deepEqual([alias._meta.ui.csp.connectDomains, alias._meta['openai/widgetCSP'].connect_domains], [[], []], old);
   }
   const unknown = await rpc('resources/read', {uri: 'ui://sundark/attachment-reader-v1.html'});
   assert.equal(unknown.isError, true, 'unknown URIs still fail');
@@ -546,7 +678,9 @@ test('route: UI tool metadata matches what the installed ext-apps registerAppToo
   for (const t of tools) {
     const uri = ui[t.name];
     if (!uri) {
-      assert.equal(t._meta?.ui, undefined, `${t.name} has no UI`);
+      // An app-only tool without a template carries only its visibility.
+      if (t.name === 'read_attachment_original') assert.deepEqual(t._meta.ui, {visibility: ['app']}, t.name);
+      else assert.equal(t._meta?.ui, undefined, `${t.name} has no UI`);
       assert.equal(t._meta?.[RESOURCE_URI_META_KEY], undefined, t.name);
       assert.equal(t._meta?.['openai/outputTemplate'], undefined, t.name);
       assert.equal(t.outputSchema, undefined, `${t.name} declares no outputSchema`);
@@ -559,7 +693,7 @@ test('route: UI tool metadata matches what the installed ext-apps registerAppToo
     const {[RESOURCE_URI_META_KEY]: _legacy, ...current} = t._meta;
     assert.deepEqual(registered(current), t._meta, `${t.name} equals the SDK registration of its current-key metadata`);
   }
-  assert.deepEqual(tools.filter(t => t._meta?.ui).map(t => t.name).sort(), Object.keys(ui).sort());
+  assert.deepEqual(tools.filter(t => t._meta?.ui?.resourceUri).map(t => t.name).sort(), Object.keys(ui).sort());
 });
 
 test('route: initialize carries standard instructions that route an attached PDF to read', async () => {
@@ -623,4 +757,65 @@ test('route: errors name the reason, never the URL; sign-in is still required', 
   clean(expired);
   const anonymous = await noStorage(() => rpc('tools/call', {name: 'read_attached_pdf', arguments: {file: file('/two.pdf')}}, new Headers()));
   assert.equal(anonymous.isError, true);
+});
+
+test('route: read_attachment_original is app-only, file-param, and not offered to the model', async () => {
+  const {tools} = await noStorage(() => rpc('tools/list'));
+  const t = tools.find(x => x.name === 'read_attachment_original');
+  assert(t);
+  assert.deepEqual(t._meta, {ui: {visibility: ['app']}, 'openai/fileParams': ['file'], 'openai/widgetAccessible': true});
+  assert.deepEqual(t.inputSchema.required, ['file', 'pdfSha256', 'offset']);
+  assert.equal(t.inputSchema.additionalProperties, false);
+  assert.equal(t.inputSchema.properties.pdfSha256.pattern, '^[0-9a-f]{64}$');
+  assert.deepEqual(t.inputSchema.properties.offset, {type: 'integer', minimum: 0, description: t.inputSchema.properties.offset.description});
+  assert.deepEqual(t.inputSchema.properties.file.required, ['download_url', 'file_id']);
+  assert.deepEqual([t.annotations.readOnlyHint, t.annotations.destructiveHint, t.annotations.openWorldHint], [true, false, true]);
+  assert.match(t.description, /not for the model/i);
+  assert.equal(t.outputSchema, undefined);
+});
+
+test('route: original bytes travel only in _meta; model-visible fields stay small', async () => {
+  const pdfSha256 = sha(BIG);
+  const first = await noStorage(() => rpc('tools/call', {name: 'read_attachment_original', arguments: {file: file('/big.pdf'), pdfSha256, offset: 0}}));
+  assert.equal(first.isError, undefined);
+  clean(first.structuredContent); clean(first.content);
+  const chunk = first._meta['sundark/originalChunk'];
+  assert.deepEqual(Object.keys(first._meta), ['sundark/originalChunk']);
+  assert(b64(first._meta).equals(BIG.subarray(0, ORIGINAL_CHUNK)));
+  assert.deepEqual(first.structuredContent, {fileId: 'file-SYNTHETIC-ID', pdfSha256, offset: 0, length: ORIGINAL_CHUNK, total: BIG.length, done: false});
+  assert.deepEqual(JSON.parse(first.content[0].text), first.structuredContent);
+  assert.equal(first.content.length, 1);
+  for (const visible of [first.content[0].text, JSON.stringify(first.structuredContent)]) {
+    assert(Buffer.byteLength(visible) < 1024, visible);
+    assert(!visible.includes(chunk.slice(0, 32)) && !visible.includes('originalChunk'), 'no chunk in model-visible fields');
+  }
+  // Other tools carry no result _meta.
+  const read = await rpc('tools/call', {name: 'read_attached_pdf', arguments: {file: file('/two.pdf')}});
+  assert.equal(read._meta, undefined);
+  const mismatch = await noStorage(() => rpc('tools/call', {name: 'read_attachment_original', arguments: {file: file('/big.pdf'), pdfSha256: sha(twoPagePdf()), offset: 0}}));
+  assert.equal(mismatch.isError, true);
+  assert.match(mismatch.content[0].text, /^Attachment error \(source_changed\)/);
+  assert.equal(mismatch._meta, undefined, 'no bytes on error');
+  assert.equal(mismatch.structuredContent, undefined);
+  clean(mismatch);
+});
+
+test('route: original requires sign-in and a same-origin request, before any download', async () => {
+  const before = bigRequests;
+  const args = {name: 'read_attachment_original', arguments: {file: file('/counted.pdf'), pdfSha256: sha(BIG), offset: 0}};
+  const anonymous = await noStorage(() => rpc('tools/call', args, new Headers()));
+  assert.equal(anonymous.isError, true);
+  assert.equal(anonymous._meta, undefined);
+  globalThis.__requestHeaders = signedIn;
+  try {
+    const response = await POST(new Request('https://site.example/mcp', {method: 'POST', headers: {'content-type': 'application/json', origin: 'https://widget.example'},
+      body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'tools/call', params: args})}));
+    const body = await response.json();
+    assert.equal(body.result.isError, true);
+    assert.match(body.result.content[0].text, /Cross-origin/);
+  } finally { globalThis.__requestHeaders = undefined; }
+  assert.equal(bigRequests, before, 'nothing downloaded without identity or from another origin');
+  const ok = await rpc('tools/call', args);
+  assert.equal(ok.structuredContent.offset, 0);
+  assert.equal(bigRequests, before + 1);
 });

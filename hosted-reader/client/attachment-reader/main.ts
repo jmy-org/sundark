@@ -2,7 +2,8 @@
  * with progress, summary, anatomy and questions handed to the ChatGPT conversation.
  * Sundark storage is never written from here; saving is an explicit, disclosed request. */
 import { Host, type FileEntry } from './host';
-import { base64Bytes, drawPage, extractPage, fetchPdf, openPdfBytes, sha256Hex, type PdfDoc } from './pdf';
+import { loadOriginalBytes, ORIGINAL_TOOL } from './original';
+import { base64Bytes, checked, drawPage, extractPage, openPdfBytes, sha256Hex, type PdfDoc } from './pdf';
 import { emptyDoc, exportJson, exportMarkdown, frontier, merge, orderedPages, parseOutput, progress, readWidgetState,
   restoreJson, safeFilename, sameAttachment, widgetState, type Doc, type PageSource, type ReaderOutput, type Segment } from './state';
 
@@ -30,6 +31,10 @@ let doc: Doc = emptyDoc();
 let pdf: PdfDoc | null = null;
 let pdfFor = '';
 let pdfSha = '';
+/** The file and digest whose original load failed. Its causes (no _meta, a size refusal, a
+ * changed source, a broken chunk) do not heal by asking again, so later tool results of the
+ * same document never start another download; a new document clears it. */
+let originalFailed = '';
 let page = 1;
 let selected: string | null = null;
 let firstError = '';
@@ -53,7 +58,7 @@ function resetViewer() {
   render?.abort(); render = null;
   loading?.abort(); loading = null;
   void pdf?.loadingTask.destroy();
-  pdf = null; pdfFor = ''; pdfSha = '';
+  pdf = null; pdfFor = ''; pdfSha = ''; originalFailed = '';
   const canvas = $<HTMLCanvasElement>('canvas');
   canvas.width = 0; canvas.height = 0;
   $('text-layer').replaceChildren(); $('hl').replaceChildren();
@@ -220,27 +225,39 @@ async function adoptPdf(bytes: Uint8Array, key: string, g: number) {
   return sha;
 }
 
-/** Fresh URL from the host for an authorized file id, fetched once with bounds. */
+/** The original PDF, in-band through read_attachment_original (see original.ts); the browser
+ * itself fetches nothing. The assembled bytes are hashed again before they are shown. */
 async function loadOriginal() {
   const a = doc.attachment;
   // Already open (same bytes, e.g. from the file entrypoint): never download again.
   if (!a?.fileId || pdfFor === a.fileId || (pdf && a.pdfSha256 && a.pdfSha256 === pdfSha)) return;
+  const identity = a.fileId + ':' + a.pdfSha256;
+  if (originalFailed === identity) return;
   pdfFor = a.fileId;
   const g = gen;
   const msg = $('original-msg');
-  msg.hidden = false; msg.className = 'muted'; msg.textContent = '원문 PDF를 불러오는 중이에요.';
+  const say = (text: string) => { msg.hidden = false; msg.className = 'muted'; msg.textContent = text; };
+  say('원문 PDF를 불러오는 중이에요.');
+  // A newer document or teardown aborts this load (resetViewer), and no further chunk is asked.
   loading?.abort();
   const controller = loading = new AbortController();
   try {
-    const url = await host.fileUrl(a.fileId);
+    if (!a.pdfSha256) throw new Error('도구 결과에 원문 PDF의 해시가 없어서 원문을 확인할 수 없어요.');
+    // A result can arrive before the host connection settles (window.openai.toolOutput is
+    // read first): wait for it, so capabilities not yet known are never recorded as missing.
+    await host.ready;
     fence(g);
-    const bytes = await fetchPdf(url, controller.signal);
+    if (controller.signal.aborted) throw new Stale('stale');
+    if (!host.canLoadOriginal) throw new Error('이 호스트는 앱이 Sundark 도구로 원문 PDF를 받아 오도록 허용하지 않아요.');
+    const bytes = await loadOriginalBytes({ fileUrl: id => host.fileUrl(id), call: (args, options) => host.callToolResult(ORIGINAL_TOOL, args, options) },
+      { fileId: a.fileId, fileName: a.fileName, pdfSha256: a.pdfSha256 }, controller.signal,
+      (calls, expected) => { if (g === gen) say(`원문 PDF를 불러오는 중이에요 (${calls}/${expected}).`); });
     fence(g);
-    await adoptPdf(bytes, a.fileId, g);
+    await adoptPdf(checked(bytes), a.fileId, g);
     await showPage();
   } catch (error) {
     if (g !== gen || isAbort(error)) return;
-    pdfFor = '';
+    pdfFor = ''; originalFailed = identity;
     msg.className = 'error';
     msg.textContent = '원문 PDF를 표시할 수 없어요: ' + (error instanceof Error ? error.message : String(error)) + ' 번역과 원문 문장은 오른쪽에서 계속 볼 수 있어요.';
   }

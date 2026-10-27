@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `566fd9f99a60197b9aceb81e8b576e10f6958c51` ("Remove the temporary small widget control"; reader added in `7c2b570`) |
+| Exported Site commit | `1be30a6ad2401f9aec33b068e8bb09dd3d274ea7` ("Deliver attachment originals through the authenticated app bridge"; reader added in `7c2b570`) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 
@@ -195,3 +195,23 @@ requirement; changing more template fields without such evidence is not a verifi
   license files with them. `pdf.mjs` keeps its Apache-2.0 header; Tesseract's Apache-2.0
   notice is not shipped with `public/vendor/ocr/` yet, which the Site should fix.
 - `public/sundark-original/` adapts this repository's own `web/` files.
+
+### Regional attachment delivery repair (2026-10-27)
+
+The server accepts one DNS label under `oaiusercontent.com`, plus explicitly configured
+extra hosts. This namespace boundary is not proof that a URL belongs to an attached file
+or the current user. HTTPS, no userinfo/custom ports, no redirects, bounded downloads
+and untrusted-PDF handling remain enforced.
+
+The widget obtains original PDF bytes through the authenticated, app-only
+`read_attachment_original` tool. Each response carries a bounded chunk only in hidden
+`_meta`, with full-file digest checks on the server and again after assembly in the
+widget. There is no browser file fetch, new storage or new secret. The v4 resource and
+all compatibility aliases declare empty connection and resource domain lists.
+
+Original loading waits for host initialization, fences document switches, bounds each
+call and the full load, and suppresses automatic retry after a failed load for the same
+file and digest. Local verification passed 110 unit/contract tests, 44 reader
+state/browser tests, TypeScript, production build, and 93 development/38 production
+attachment checks. These checks do not prove ChatGPT widget mounting or hidden metadata
+delivery; actual ChatGPT acceptance remains pending.

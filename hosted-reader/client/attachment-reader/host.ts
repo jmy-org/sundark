@@ -27,6 +27,10 @@ export class Host {
   readonly ext = new OpenAIExtensions(this.app);
   connected = false;
   connectError = '';
+  private settle!: () => void;
+  /** Settles once connect() has succeeded or failed (the SDK bounds its handshake):
+   * host capabilities are unknown before it, not absent. */
+  readonly ready = new Promise<void>(resolve => { this.settle = resolve; });
 
   /** Listeners go on before connect() so the initial tool input/result is not missed. */
   async start(events: HostEvents) {
@@ -63,6 +67,7 @@ export class Host {
     fromGlobals();
     try { await this.app.connect(); this.connected = true; }
     catch (error) { this.connectError = error instanceof Error ? error.message : String(error); }
+    finally { this.settle(); }
   }
 
   private caps() { return this.connected ? this.app.getHostCapabilities() : undefined; }
@@ -70,6 +75,8 @@ export class Host {
   get canFetchFileUrl() { return typeof openai()?.getFileDownloadUrl === 'function'; }
   get canMessage() { return !!this.caps()?.message || typeof openai()?.sendFollowUpMessage === 'function'; }
   get canCallTool() { return !!this.caps()?.serverTools || typeof openai()?.callTool === 'function'; }
+  /** The original PDF arrives in-band: a fresh file URL for the server, and a tool call back. */
+  get canLoadOriginal() { return this.canCallTool && this.canFetchFileUrl; }
   get canDownload() { return !!this.caps()?.downloadFile; }
 
   async readFileResource(uri: string): Promise<string> {
@@ -113,6 +120,23 @@ export class Host {
     const result = await call(name, args) as { structuredContent?: unknown; isError?: boolean; content?: unknown } | undefined;
     if (result?.isError) throw new Error(toolErrorText(result.content));
     return result?.structuredContent;
+  }
+
+  /** callTool with the full result envelope: _meta carries what only the view may see
+   * (the original PDF's bytes); the model sees neither it nor any byte in structuredContent.
+   * options cancel and bound the MCP Apps request; window.openai.callTool takes neither. */
+  async callToolResult(name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal; timeout?: number }): Promise<{ structuredContent?: unknown; meta?: Record<string, unknown> }> {
+    const meta = (m: unknown) => m && typeof m === 'object' && !Array.isArray(m) ? m as Record<string, unknown> : undefined;
+    if (this.caps()?.serverTools) {
+      const result = await this.app.callServerTool({ name, arguments: args }, options);
+      if (result.isError) throw new Error(toolErrorText(result.content));
+      return { structuredContent: result.structuredContent, meta: meta(result._meta) };
+    }
+    const call = openai()?.callTool;
+    if (typeof call !== 'function') throw new Error('이 호스트에서는 리더가 Sundark 도구를 실행할 수 없어요.');
+    const result = await call(name, args) as { structuredContent?: unknown; isError?: boolean; content?: unknown; _meta?: unknown } | undefined;
+    if (result?.isError) throw new Error(toolErrorText(result.content));
+    return { structuredContent: result?.structuredContent, meta: meta(result?._meta) };
   }
 
   async download(name: string, mimeType: string, text: string) {

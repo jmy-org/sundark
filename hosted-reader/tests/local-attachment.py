@@ -9,13 +9,14 @@ dev applies drizzle/ migrations to .wrangler/state when they are missing, seeds 
 paper through the legacy import, and proves every attachment call leaves D1 and R2 unchanged.
 prod proves the production bundle ignores SUNDARK_DEV_FILE_ORIGIN (import.meta.env.DEV=false).
 """
-import glob,hashlib,http.server,json,os,signal,socket,sqlite3,subprocess,sys,tempfile,threading,time,urllib.error,urllib.request,uuid
+import base64,glob,hashlib,http.server,json,os,signal,socket,sqlite3,subprocess,sys,tempfile,threading,time,urllib.error,urllib.request,uuid
 from concurrent.futures import ThreadPoolExecutor
 ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODE=sys.argv[1] if len(sys.argv)>1 else 'dev'
 assert MODE in ('dev','prod'),'mode is dev or prod'
-SECRET='sig=SYNTHETIC-SIGNED-TOKEN-a7c1';FILE_HOST='files.oaiusercontent.com';URI='ui://sundark/attachment-reader-v2.html'
-checks=[]
+SECRET='sig=SYNTHETIC-SIGNED-TOKEN-a7c1';FILE_HOST='files.oaiusercontent.com';URI='ui://sundark/attachment-reader-v4.html'
+ALIASES=('ui://sundark/attachment-reader.html','ui://sundark/attachment-reader-v2.html','ui://sundark/attachment-reader-v3.html');CHUNK=2*1024*1024
+checks=[];chunk_heads=[]
 def check(name,condition,detail:object=''):
  if not condition:raise AssertionError(f'{name} {detail}'.strip())
  checks.append(name)
@@ -28,6 +29,8 @@ const d=process.argv[1];for(const [n,b] of Object.entries({'two-page.pdf':twoPag
 """,work],cwd=ROOT,check=True)
 pdfs={n:open(os.path.join(work,n),'rb').read() for n in os.listdir(work)}
 pdfs['swap.pdf']=pdfs['two-page.pdf']
+# Over one chunk: the two-page PDF padded with comment lines after %%EOF, so the original takes two chunks.
+pdfs['big.pdf']=pdfs['two-page.pdf']+(b'%'+b'p'*1022+b'\n')*2600
 hits={}
 class Fixture(http.server.BaseHTTPRequestHandler):
  def log_message(self,format,*args):pass
@@ -76,6 +79,8 @@ def rpc(method,params=None,**kw):
 def tool(name,args,**kw):
  s,r=rpc('tools/call',{'name':name,'arguments':args},**kw);r=r['result']
  return r if r.get('isError') else {**json.loads(r['content'][0]['text']),'_structured':'structuredContent' in r}
+def original(args,**kw):
+ s,r=rpc('tools/call',{'name':'read_attachment_original','arguments':args},**kw);return r['result']
 def attach(name,query=SECRET):return {'download_url':f'{FIXTURE}/{name}?{query}','file_id':'file-SYNTHETIC-'+uuid.uuid4().hex[:8],'mime_type':'application/pdf','file_name':name}
 def reason(r):return r.get('isError') and r['content'][0]['text'].split('(')[1].split(')')[0].split(',')[0] if r.get('isError') else None
 def wait_ready():
@@ -114,6 +119,8 @@ try:
   check('prod bundle dropped the DEV-only origin (import.meta.env.DEV=false)','SUNDARK_DEV_FILE_ORIGIN' not in bundle_js)
   r=tool('read_attached_pdf',{'file':attach('two-page.pdf')})
   check('prod: fixture origin refused although SUNDARK_DEV_FILE_ORIGIN is set',reason(r)=='unsafe_url',r)
+  r=original({'file':attach('two-page.pdf'),'pdfSha256':hashlib.sha256(pdfs['two-page.pdf']).hexdigest(),'offset':0})
+  check('prod: original refuses the fixture origin too',reason(r)=='unsafe_url' and '_meta' not in r,r)
   check('prod: nothing fetched from the fixture',sum(hits.values())==0,hits)
   check('prod: anonymous refused',tool('read_attached_pdf',{'file':attach('two-page.pdf')},user=False).get('isError'))
  s,init=rpc('initialize',{'protocolVersion':'2026-07-28','capabilities':{},'clientInfo':{'name':'synthetic','version':'0'}});init=init['result']
@@ -131,11 +138,21 @@ try:
  check('file entrypoint: app-only PDF entrypoint on the reader',em['ui']=={'resourceUri':URI,'visibility':['app']} and em['openai/ui']=={'entrypoints':[{'type':'file','extensions':['.pdf']}]} and 'openai/fileParams' not in em,em)
  check('file entrypoint: injected {name,resourceUri} input, read-only',e['inputSchema']['properties']['file']['required']==['name','resourceUri'] and e['annotations']['readOnlyHint'] is True and e['annotations']['openWorldHint'] is False)
  check('read: unreadPages declared',tools['read_attached_pdf']['inputSchema']['properties']['unreadPages']['maxItems']==200)
+ o=tools['read_attachment_original'];om=o['_meta'];oi=o['inputSchema']
+ check('original: app-only, no template of its own',om['ui']=={'visibility':['app']} and 'openai/outputTemplate' not in om and 'ui/resourceUri' not in om,om)
+ check('original: fileParams file, widget-callable',om['openai/fileParams']==['file'] and om.get('openai/widgetAccessible') is True,om)
+ check('original: exactly file, pdfSha256, offset',sorted(oi['required'])==['file','offset','pdfSha256'] and sorted(oi['properties'])==['file','offset','pdfSha256'] and oi['additionalProperties'] is False,oi)
+ check('original: sha pattern and non-negative integer offset',oi['properties']['pdfSha256']['pattern']=='^[0-9a-f]{64}$' and oi['properties']['offset']=={**oi['properties']['offset'],'type':'integer','minimum':0},oi)
+ check('original: read-only, non-destructive, open-world hints',o['annotations']['readOnlyHint'] is True and o['annotations']['destructiveHint'] is False and o['annotations']['openWorldHint'] is True)
+ check('original: description says app-only',all(w in o['description'] for w in ('App-only','not for the model')))
  res=rpc('resources/list')[1]['result']['resources'];ar=next((r for r in res if r['uri']==URI),None)
  check('resource listed as an MCP App',ar is not None and ar['mimeType']=='text/html;profile=mcp-app',ar)
  c=rpc('resources/read',{'uri':URI})[1]['result']['contents'][0];meta=c['_meta']
  check('resource read: uri, mime, html body',c['uri']==URI and c['mimeType']=='text/html;profile=mcp-app' and '<' in c['text'] and len(c['text'])>1000)
- check('resource CSP: exactly the allowed file host',meta['ui']['csp']=={'connectDomains':[f'https://{FILE_HOST}'],'resourceDomains':[]} and meta['openai/widgetCSP']=={'connect_domains':[f'https://{FILE_HOST}'],'resource_domains':[]},meta)
+ check('resource CSP: no widget egress at all',meta['ui']['csp']=={'connectDomains':[],'resourceDomains':[]} and meta['openai/widgetCSP']=={'connect_domains':[],'resource_domains':[]},meta)
+ for alias in ALIASES:
+  ac=rpc('resources/read',{'uri':alias})[1]['result']['contents'][0]
+  check(f'alias {alias}: same body, empty CSP',ac['text']==c['text'] and ac['_meta']['ui']['csp']=={'connectDomains':[],'resourceDomains':[]} and ac['_meta']['openai/widgetCSP']=={'connect_domains':[],'resource_domains':[]},ac['_meta'])
  resource_meta={k:(sorted(v) if isinstance(v,dict) else v) for k,v in meta.items()}
 
  if MODE=='dev':
@@ -224,6 +241,31 @@ try:
   # The dev Sites plugin or the route refuses it: an HTTP 403, or a JSON-RPC error result.
   check('cross-origin refused',s==403 or (s==200 and json.loads(b)['result'].get('isError')),s)
 
+  # The original PDF in chunks, bytes only in _meta; the model-visible parts stay small.
+  bsha=hashlib.sha256(pdfs['big.pdf']).hexdigest();n=hits.get('big.pdf',0);parts=[];offset=0;results=[]
+  while True:
+   r=original({'file':attach('big.pdf'),'pdfSha256':bsha,'offset':offset});results.append(r)
+   check(f'original chunk {offset}: ok',not r.get('isError') and isinstance(r.get('_meta',{}).get('sundark/originalChunk'),str),r.get('content'))
+   chunk_heads.append(r['_meta']['sundark/originalChunk'][:48]);sc=r['structuredContent'];data=base64.b64decode(r['_meta']['sundark/originalChunk'],validate=True);parts.append(data)
+   check(f'original chunk {offset}: fields',sorted(sc)==['done','fileId','length','offset','pdfSha256','total'] and sc['offset']==offset and sc['length']==len(data) and sc['total']==len(pdfs['big.pdf']) and sc['pdfSha256']==bsha,sc)
+   check(f'original chunk {offset}: content text is the small object, no bytes',json.loads(r['content'][0]['text'])==sc and len(r['content'])==1 and len(r['content'][0]['text'])<1024 and len(json.dumps(sc))<1024 and r['_meta']['sundark/originalChunk'][:64] not in json.dumps(r['content'])+json.dumps(sc))
+   offset+=sc['length']
+   if sc['done']:break
+   check('original: bounded call count',len(parts)<10)
+  check('original: two chunks of 2 MiB, done on the last only',[x['structuredContent']['offset'] for x in results]==[0,CHUNK] and [x['structuredContent']['done'] for x in results]==[False,True])
+  check('original: chunks reconstruct the exact file',b''.join(parts)==pdfs['big.pdf'])
+  check('original: each chunk downloaded the file again (no cache)',hits['big.pdf']==n+2,(n,hits.get('big.pdf')))
+  one=original({'file':attach('two-page.pdf'),'pdfSha256':hashlib.sha256(pdfs['two-page.pdf']).hexdigest(),'offset':0})
+  check('original: a small file is one done chunk',one['structuredContent']['done'] is True and base64.b64decode(one['_meta']['sundark/originalChunk'])==pdfs['two-page.pdf'])
+  bad=original({'file':attach('big.pdf'),'pdfSha256':'0'*64,'offset':0})
+  check('original: hash mismatch is source_changed, no bytes',reason(bad)=='source_changed' and '_meta' not in bad and 'structuredContent' not in bad,bad)
+  for args,why in (({'offset':1},'unaligned'),({'offset':-CHUNK},'negative'),({'offset':CHUNK*2},'past the end'),({'offset':0.5},'non-integer'),({'pdfSha256':'ABC'},'bad sha'),({'extra':1},'unknown argument')):
+   r=original({'file':attach('big.pdf'),'pdfSha256':bsha,'offset':0,**args})
+   check(f'original: {why} refused without bytes',r.get('isError') and '_meta' not in r,r)
+  check('original: expired reference asks for a fresh one',reason(original({'file':attach('expired-2.pdf'),'pdfSha256':bsha,'offset':0}))=='expired')
+  n=sum(hits.values())
+  check('original: anonymous refused before any download',original({'file':attach('big.pdf'),'pdfSha256':bsha,'offset':0},user=False).get('isError') and sum(hits.values())==n)
+
   after_rows,after_r2=d1_counts(),r2_objects()
   check('D1 rows unchanged by every attachment call',after_rows==before_rows,{k:(before_rows.get(k),after_rows.get(k)) for k in set(before_rows)|set(after_rows) if before_rows.get(k)!=after_rows.get(k)})
   check('R2 objects unchanged by every attachment call',after_r2==before_r2,(before_r2,after_r2))
@@ -235,7 +277,11 @@ finally:
  stop();log.close()
 log_text=open(log_path,encoding='utf8',errors='replace').read()
 if first_failure is None:
- try:check('no signed query in the server log','SYNTHETIC-SIGNED-TOKEN' not in log_text)
+ try:
+  check('no signed query in the server log','SYNTHETIC-SIGNED-TOKEN' not in log_text)
+  check('no download_url or fixture file URL in the server log','download_url' not in log_text and FIXTURE+'/' not in log_text)
+  # Base64 of a PDF starts JVBERi0 (%PDF-); every chunk's own head is checked too.
+  check('no PDF bytes in the server log','JVBERi0' not in log_text and not any(h in log_text for h in chunk_heads))
  except AssertionError as e:first_failure=str(e)
 summary={'mode':MODE,'runtime':'vinext dev (Cloudflare Vite plugin, workerd)' if MODE=='dev' else 'wrangler dev --local on dist/ (workerd)','passed':len(checks),'firstFailure':first_failure,'checks':checks,'serverLog':log_path}
 if MODE=='dev' and first_failure is None:summary.update({'d1Counts':after_rows,'r2Objects':after_r2,'resourceMeta':resource_meta})

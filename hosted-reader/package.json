@@ -12,7 +12,7 @@
     "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
-    "test:attachment-reader": "node scripts/build-attachment-reader.mjs && node --test tests/attachment-reader-state.test.mjs tests/attachment-reader.browser.mjs",
+    "test:attachment-reader": "node scripts/build-attachment-reader.mjs && node --test tests/attachment-reader-state.test.mjs tests/attachment-reader-original.test.mjs tests/attachment-reader.browser.mjs",
     "test:browsers:install": "playwright install chromium",
     "prebuild": "node scripts/prepare-reader-assets.mjs && node scripts/build-attachment-reader.mjs",
     "predev": "node scripts/prepare-reader-assets.mjs && node scripts/build-attachment-reader.mjs"

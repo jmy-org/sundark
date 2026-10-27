@@ -198,6 +198,34 @@ function checkTranslations(given:{id?:unknown;text?:unknown}[],p:{page:number;se
  return out;
 }
 
+/** Raw bytes per read_attachment_original call (about 2.8 MB as base64). */
+export const ORIGINAL_CHUNK=2*1024*1024;
+/** read_attachment_original: app-only. The reader view fetches the original PDF through the host
+ * bridge instead of the browser, one aligned slice per call. Each call downloads the whole file
+ * into memory again (nothing is stored or cached), and returns bytes only when they are a PDF whose
+ * SHA-256 equals pdfSha256, the digest read_attached_pdf returned. That digest is caller-supplied:
+ * it proves consistency with the translated bytes, not authorization or prior possession; the
+ * file reference passes the same gate as read_attached_pdf. App-only visibility is the host's to
+ * enforce: the route authenticates the user, not whether the view or the model called. The slice
+ * goes in meta, which the route puts in the result _meta for the view alone; data holds only small
+ * numbers. */
+export async function readAttachedOriginal(raw:unknown,deps:Deps={}){
+ const a=only(raw,['file','pdfSha256','offset']);
+ if(typeof a.pdfSha256!=='string'||!/^[0-9a-f]{64}$/.test(a.pdfSha256))throw new AttachmentError(400,'invalid_arguments','pdfSha256 must be the attachment.pdfSha256 read_attached_pdf returned.');
+ const offset=a.offset;
+ if(!Number.isInteger(offset)||(offset as number)<0||(offset as number)%ORIGINAL_CHUNK!==0)throw new AttachmentError(400,'invalid_arguments',`offset must be a non-negative multiple of ${ORIGINAL_CHUNK}.`);
+ const ref=reference(a.file,deps);
+ let bytes:Uint8Array;
+ try{bytes=await downloadPdf(ref.url,{timeoutMs:deps.timeoutMs,fetcher:deps.fetcher})}catch(e){throw fileError(e)}
+ if(!isPdf(bytes))throw new AttachmentError(415,'not_pdf','The attachment is not a PDF. Nothing was stored.');
+ if(await hex(bytes)!==a.pdfSha256)throw new AttachmentError(409,'source_changed','The attachment differs from the one read. Nothing was returned.');
+ const total=bytes.length,start=offset as number;
+ if(start>=total)throw new AttachmentError(400,'invalid_arguments',`offset must be below the file size of ${total} bytes.`);
+ const slice=bytes.subarray(start,Math.min(start+ORIGINAL_CHUNK,total));
+ let binary='';for(let i=0;i<slice.length;i+=8192)binary+=String.fromCharCode(...slice.subarray(i,i+8192));
+ return {data:{fileId:ref.fileId,pdfSha256:a.pdfSha256,offset:start,length:slice.length,total,done:start+slice.length===total},meta:{'sundark/originalChunk':btoa(binary)}};
+}
+
 /** open_pdf_file: the app-only PDF file entrypoint. The host injects {file:{name,resourceUri}} and
  * the reader view reads that resource through the host; the server downloads nothing, stores nothing
  * and does not echo the resource URI. Like the SDK's non-strict input schema, other top-level keys

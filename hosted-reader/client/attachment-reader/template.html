@@ -64,7 +64,7 @@ textarea{width:100%;min-height:64px;resize:vertical;border:1px solid var(--line)
 <button id="prev-page" type="button" aria-label="이전 페이지">‹ 이전</button>
 <output id="page-label" aria-live="polite">—</output>
 <button id="next-page" type="button" aria-label="다음 페이지">다음 ›</button></div>
-<div class="scroll" id="original-scroll"><p id="original-msg" class="muted">원문 PDF를 불러오는 중이에요.</p>
+<div class="scroll" id="original-scroll"><p id="original-msg" class="muted" role="status" aria-live="polite">원문 PDF를 불러오는 중이에요.</p>
 <div id="stage" hidden><canvas id="canvas" role="img" aria-label="원문 PDF 페이지"></canvas><div id="text-layer" class="textLayer"></div><div id="hl" aria-hidden="true"></div></div></div>
 </section>
 <section class="panel" id="translation" aria-labelledby="translation-title">

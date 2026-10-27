@@ -10,7 +10,6 @@ import type { PageSource } from './state';
 
 export type PdfDoc = pdfjs.PDFDocumentProxy;
 export const MAX_PDF_BYTES = 20 * 1024 * 1024;
-const FETCH_TIMEOUT_MS = 20_000;
 
 export async function sha256Hex(bytes: Uint8Array) {
   const digest = await crypto.subtle.digest('SHA-256', bytes as BufferSource);
@@ -21,47 +20,7 @@ export function isPdf(bytes: Uint8Array) {
   return bytes.length > 4 && String.fromCharCode(...bytes.subarray(0, Math.min(1024, bytes.length))).includes('%PDF-');
 }
 
-/** Reads a host-issued, short-lived file URL with size and time bounds. The URL is
- * used once and never stored, logged or shown. */
-export async function fetchPdf(url: string, signal?: AbortSignal): Promise<Uint8Array> {
-  const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), FETCH_TIMEOUT_MS);
-  const stop = () => timeout.abort();
-  signal?.addEventListener('abort', stop, { once: true });
-  try {
-    let response: Response;
-    try { response = await fetch(url, { credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', signal: timeout.signal }); }
-    catch (error) {
-      if (timeout.signal.aborted && !signal?.aborted) throw new Error('PDF 다운로드가 20초를 넘었어요.');
-      if (signal?.aborted) throw error;
-      // fetch() reports CSP and CORS refusals only as a network TypeError.
-      throw new Error('호스트가 PDF 다운로드를 막았어요(네트워크, CSP 또는 CORS). 이 환경에서는 원문 페이지를 볼 수 없어요.');
-    }
-    if (!response.ok) throw new Error(response.status === 403 || response.status === 404 || response.status === 410
-      ? 'PDF 링크가 만료됐어요. PDF를 다시 첨부해 주세요.' : `PDF 다운로드에 실패했어요(HTTP ${response.status}).`);
-    const declared = Number(response.headers.get('content-length'));
-    if (declared > MAX_PDF_BYTES) throw new Error('PDF가 20MB보다 커요.');
-    if (!response.body) return checked(new Uint8Array(await response.arrayBuffer()));
-    const reader = response.body.getReader();
-    const parts: Uint8Array[] = [];
-    let size = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.length;
-      if (size > MAX_PDF_BYTES) { await reader.cancel(); throw new Error('PDF가 20MB보다 커요.'); }
-      parts.push(value);
-    }
-    const bytes = new Uint8Array(size);
-    let offset = 0;
-    for (const part of parts) { bytes.set(part, offset); offset += part.length; }
-    return checked(bytes);
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', stop);
-  }
-}
-function checked(bytes: Uint8Array) {
+export function checked(bytes: Uint8Array) {
   if (bytes.length > MAX_PDF_BYTES) throw new Error('PDF가 20MB보다 커요.');
   if (!isPdf(bytes)) throw new Error('받은 파일이 PDF가 아니에요.');
   return bytes;

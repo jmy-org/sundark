@@ -1,6 +1,8 @@
 // Ephemeral attachment reader in real Chromium: a fake MCP Apps host (official AppBridge)
 // drives the built widget with REAL read_attached_pdf/render_attached_reader results for a
 // synthetic PDF, inside an opaque-origin sandbox with a strict CSP. Synthetic data only.
+// The original PDF arrives in-band: the widget calls read_attachment_original through the
+// bridge, the REAL server tool answers, and the widget's CSP allows no network at all.
 // Run with `npm run test:attachment-reader` (builds the widget first); Chromium comes from
 // `npm run test:browsers:install`. Playwright is a dev dependency: a missing module or
 // browser fails this file, it never skips.
@@ -20,11 +22,16 @@ import {manyPagePdf, twoPagePdf} from './fixtures/synthetic-pdf.mjs';
 
 register('./fixtures/worker-loader.mjs', import.meta.url);
 globalThis.__workerEnv = new Proxy({}, {get(t, key) { if (key === 'DB' || key === 'BUCKET') throw new Error('storage access'); return t[key]; }});
-const {readAttached, renderAttached, prepareAttachedTask, attachmentLauncher} = await import('../lib/attachment.ts');
-const {attachmentReaderHtml, attachmentReaderUri} = await import('../lib/attachment-reader.ts');
+const {readAttached, readAttachedOriginal, ORIGINAL_CHUNK, renderAttached, prepareAttachedTask, attachmentLauncher} = await import('../lib/attachment.ts');
+const {attachmentReaderHtml, attachmentReaderUri, attachmentReaderAliases} = await import('../lib/attachment-reader.ts');
 
 const pdf = twoPagePdf();
 const pdfSha = createHash('sha256').update(pdf).digest('hex');
+// Over one 2 MiB chunk: the same two pages with comment padding after %%EOF (pdf.js finds
+// startxref by scanning back), so the original arrives in two chunks.
+const big = Buffer.concat([pdf, Buffer.from(('%' + 'p'.repeat(1022) + '\n').repeat(2600), 'latin1')]);
+const bigSha = createHash('sha256').update(big).digest('hex');
+const FILE_URL = 'file.pdf?token=short-lived';
 const requests = [];
 // The widget accepts only https file URLs, so the fixture host is https with a throwaway cert.
 const certDir = mkdtempSync(join(tmpdir(), 'sundark-reader-test-'));
@@ -35,8 +42,9 @@ rmSync(certDir, {recursive: true, force: true});
 const server = https.createServer(tls, async (req, res) => {
   const url = new URL(req.url, origin);
   requests.push(url.pathname);
+  // The host-issued file URL. The widget must never request it; it stays servable so a
+  // regression would show up as a request here, not as a silent failure.
   if (url.pathname === '/file.pdf') {
-    if (url.searchParams.get('delay')) await new Promise(r => setTimeout(r, Number(url.searchParams.get('delay'))));
     res.writeHead(200, {'Content-Type': 'application/pdf', 'Access-Control-Allow-Origin': '*'});
     return res.end(pdf);
   }
@@ -52,13 +60,13 @@ const server = https.createServer(tls, async (req, res) => {
   if (url.pathname === '/pdf-harness.js') { res.writeHead(200, {'Content-Type': 'text/javascript'}); return res.end(pdfJs); }
   if (url.pathname === '/widget.html') {
     const q = url.searchParams;
-    const fileUrl = `${origin}/file.pdf?token=short-lived${q.get('delay') ? '&delay=' + q.get('delay') : ''}`;
+    const fileUrl = `${origin}/${FILE_URL}`;
     const stub = `<script>window.__csp=[];document.addEventListener('securitypolicyviolation',e=>window.__csp.push(e.violatedDirective+' '+e.blockedURI+' '+e.lineNumber+':'+e.columnNumber));` +
-      (q.get('openai') ? `window.__states=[];window.openai={widgetState:${q.get('state') || 'null'},setWidgetState(s){this.widgetState=s;window.__states.push(JSON.stringify(s));${q.get('globals') ? "dispatchEvent(new CustomEvent('openai:set_globals',{detail:{globals:{widgetState:s}}}))" : ''}},getFileDownloadUrl:async({fileId})=>fileId==='file-TEST'?{downloadUrl:${JSON.stringify(fileUrl)}}:Promise.reject(new Error('unknown file'))};` : '') +
+      (q.get('openai') ? `window.__states=[];window.openai={widgetState:${q.get('state') || 'null'},setWidgetState(s){this.widgetState=s;window.__states.push(JSON.stringify(s));${q.get('globals') ? "dispatchEvent(new CustomEvent('openai:set_globals',{detail:{globals:{widgetState:s}}}))" : ''}},fileUrls:0,${q.get('output') ? `toolOutput:${JSON.stringify(read1).replace(/</g, '\\u003c')},` : ''}getFileDownloadUrl:async({fileId})=>{await new Promise(r=>setTimeout(r,${Number(q.get('urldelay')) || 0}));return fileId==='file-TEST'?(window.openai.fileUrls++,{downloadUrl:${JSON.stringify(fileUrl)}}):Promise.reject(new Error('unknown file'))}};` : '') +
       '</script>';
     res.writeHead(200, {'Content-Type': 'text/html',
-      // As strict as a host sandbox: inline code only, and fetch only to the file host.
-      'Content-Security-Policy': `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; connect-src ${q.get('csp') === 'block' ? "'none'" : origin}`});
+      // As strict as the resource's declared CSP (connectDomains []): inline code only, no network.
+      'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; connect-src 'none'"});
     return res.end(attachmentReaderHtml.replace('<script>', () => stub + '<script>'));
   }
   res.writeHead(404); res.end();
@@ -72,8 +80,8 @@ const pdfJs = (await build({stdin: {contents: "import {drawPage, openPdfBytes} f
 const hostJs = (await build({entryPoints: [new URL('./fixtures/attachment-host.mjs', import.meta.url).pathname], bundle: true, write: false, format: 'iife', platform: 'browser', logLevel: 'silent'})).outputFiles[0].text;
 
 // The server tools read the same bytes from a plain-http dev origin (the only kind their
-// download gate allows besides the real file host).
-const backend = http.createServer((req, res) => { res.writeHead(200, {'Content-Type': 'application/pdf'}); res.end(pdf); });
+// download gate allows besides the real file host). /big.pdf is the two-chunk file.
+const backend = http.createServer((req, res) => { res.writeHead(200, {'Content-Type': 'application/pdf'}); res.end(req.url.startsWith('/big.pdf') ? big : pdf); });
 await new Promise(r => backend.listen(0, '127.0.0.1', r));
 const backendOrigin = `http://127.0.0.1:${backend.address().port}`;
 const deps = {policy: {hosts: [], devOrigin: backendOrigin}};
@@ -84,20 +92,54 @@ const ids = read1.pages[0].segments.map(s => s.id);
 const render = n => renderAttached({file, page: 1, sourceHash: read1.sourceHash, translations: ids.slice(0, n).map((id, i) => ({id, text: `번역된 문장 ${i + 1}입니다.`}))}, deps);
 // The reader view must show the server's sources, never a URL.
 for (const r of [read1, read2, await render(1)]) assert(!JSON.stringify(r).includes(backendOrigin), 'tool results carry no file URL');
+const bigRead = await readAttached({file: {...file, download_url: `${backendOrigin}/big.pdf`}, pages: [1]}, deps);
+assert.equal(bigRead.attachment.pdfSha256, bigSha);
+assert(big.length > ORIGINAL_CHUNK && big.length < 2 * ORIGINAL_CHUNK, 'the big fixture takes exactly two chunks');
+
+/** The server side of read_attachment_original, called by the host fixture: the REAL tool,
+ * downloading the backend copy of the file the host URL stands for. `fault` bends one reply the
+ * way a broken or hostile host might; `delay` holds every reply back. */
+function originalServer(state) {
+  return async args => {
+    if (state.delay) await new Promise(r => setTimeout(r, state.delay));
+    assert.equal(args.file.download_url, `${origin}/${FILE_URL}`, 'the server is handed the fresh host URL');
+    // Consistent but hostile: one-byte slices of the big file, so a load would never end on its own.
+    if (state.fault === 'tiny') {
+      const data = big.subarray(args.offset, args.offset + 1);
+      const sc = {fileId: args.file.file_id, pdfSha256: args.pdfSha256, offset: args.offset, length: 1, total: big.length, done: args.offset + 1 === big.length};
+      return {content: [{type: 'text', text: JSON.stringify(sc)}], structuredContent: sc, _meta: {'sundark/originalChunk': data.toString('base64')}};
+    }
+    let r;
+    try { r = await readAttachedOriginal({...args, file: {...args.file, download_url: `${backendOrigin}/${state.source || 'file.pdf'}`}}, deps); }
+    catch (e) { return {content: [{type: 'text', text: `${e.message} ${args.file.download_url}`}], isError: true}; }
+    const result = {content: [{type: 'text', text: JSON.stringify(r.data)}], structuredContent: {...r.data}, _meta: {...r.meta}};
+    const later = r.data.offset > 0;
+    if (state.fault === 'meta') delete result._meta;
+    if (state.fault === 'total' && later) result.structuredContent.total += ORIGINAL_CHUNK;
+    if (state.fault === 'offset' && later) result.structuredContent.offset -= 1;
+    if (state.fault === 'sha') result.structuredContent.pdfSha256 = 'f'.repeat(64);
+    if (state.fault === 'bytes' && r.data.done) {
+      const b = Buffer.from(r.meta['sundark/originalChunk'], 'base64'); b[b.length - 1] ^= 1;
+      result._meta['sundark/originalChunk'] = b.toString('base64');
+    }
+    return result;
+  };
+}
 
 let browser;
 before(async () => { browser = await chromium.launch(); });
 after(async () => { await browser?.close(); for (const s of [server, backend]) { s.closeAllConnections(); s.close(); } });
 
-async function open(query = 'openai=1', viewport = {width: 1320, height: 960}) {
+async function open(query = 'openai=1', viewport = {width: 1320, height: 960}, original = {}) {
   const page = await browser.newPage({viewport, ignoreHTTPSErrors: true});
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
+  await page.exposeFunction('serveOriginal', originalServer(original));
   await page.goto(`${origin}/host.html?${query}`);
   await page.waitForFunction(() => window.testHost);
   await page.evaluate(() => window.testHost.ready());
   const frame = () => page.frames().find(f => f.url().includes('/widget.html'));
-  return {page, errors, frame: frame(), host: (fn, arg) => page.evaluate(fn, arg)};
+  return {page, errors, original, frame: frame(), host: (fn, arg) => page.evaluate(fn, arg)};
 }
 const text = (frame, sel) => frame.$eval(sel, e => e.textContent);
 const painted = frame => frame.$eval('#canvas', c => {
@@ -107,7 +149,11 @@ const painted = frame => frame.$eval('#canvas', c => {
 });
 
 test('exports the resource the backend registers', () => {
-  assert.equal(attachmentReaderUri, 'ui://sundark/attachment-reader-v2.html');
+  // The CSP is part of the host's template cache key: the empty-CSP body gets a new URI.
+  assert.equal(attachmentReaderUri, 'ui://sundark/attachment-reader-v4.html');
+  for (const old of ['ui://sundark/attachment-reader.html', 'ui://sundark/attachment-reader-v2.html', 'ui://sundark/attachment-reader-v3.html'])
+    assert(attachmentReaderAliases.includes(old), `${old} still served`);
+  assert(attachmentReaderHtml.includes('read_attachment_original'));
   assert(attachmentReaderHtml.startsWith('<!doctype html>'));
   // Self-contained: no external script, stylesheet, font or worker URL.
   assert(!/<script[^>]+src=|<link[^>]+href=|\/vendor\//.test(attachmentReaderHtml));
@@ -126,10 +172,10 @@ test('launcher shows first-use onboarding and stores nothing', async () => {
 
 test('source paints before the original PDF, then the PDF renders with text layer and geometry', async () => {
   requests.length = 0;
-  const {page, frame, host, errors} = await open('openai=1&delay=1500');
+  const {page, frame, host, errors} = await open('openai=1', undefined, {delay: 1500});
   await host(o => window.testHost.result(o), read1);
   await frame.waitForSelector('#segments li[role=option]');
-  // The PDF is still downloading (1.5 s delay): sources and status are already on screen.
+  // The original is still on its way (1.5 s delay): sources and status are already on screen.
   assert(await frame.$eval('#stage', e => e.hidden), 'canvas not shown yet');
   assert.equal(await frame.$$eval('#segments li[role=option]', l => l.length), ids.length);
   assert.match(await text(frame, '#segments li[role=option] .src'), /SYNTHETIC IMPORT FIXTURE ONLY/);
@@ -143,9 +189,15 @@ test('source paints before the original PDF, then the PDF renders with text laye
   const boxes = await frame.$$eval('#hl div', d => d.map(x => x.getBoundingClientRect()).map(r => [r.width, r.height]));
   assert(boxes.length >= 1 && boxes.every(([w, h]) => w > 10 && h > 3), JSON.stringify(boxes));
   assert.equal(await text(frame, '#page-label'), '1 / 2');
-  // Only the widget and the host-issued file URL were requested; nothing else, no Sundark API.
-  assert.deepEqual([...new Set(requests)].sort(), ['/file.pdf', '/host.html', '/host.js', '/widget.html']);
-  assert.deepEqual(await frame.evaluate(() => window.__csp), [], 'self-contained under a strict CSP');
+  // Only the host page and the widget were requested: the file URL never, no Sundark API.
+  assert.deepEqual([...new Set(requests)].sort(), ['/host.html', '/host.js', '/widget.html']);
+  assert.deepEqual(await frame.evaluate(() => window.__csp), [], 'self-contained under connect-src none: nothing even tried the network');
+  // One bridge call for this one-chunk file, with a fresh host URL and the server-read hash.
+  const originals = await host(() => window.testHost.calls.originals.map(c => c.arguments));
+  assert.equal(originals.length, 1);
+  assert.deepEqual(Object.keys(originals[0]).sort(), ['file', 'offset', 'pdfSha256']);
+  assert.deepEqual([originals[0].offset, originals[0].pdfSha256, originals[0].file.file_id], [0, pdfSha, 'file-TEST']);
+  assert.equal(await frame.evaluate(() => window.openai.fileUrls), 1);
   assert.equal(await frame.evaluate(() => { try { return localStorage.length; } catch { return 0; } }), 0);
   assert.deepEqual(errors, []);
   await page.close();
@@ -314,19 +366,169 @@ test('summary, analysis results, export and explicit save', async () => {
   await page.close();
 });
 
-test('host gates fail visibly: CSP-blocked download and missing file URL API', async () => {
-  const blocked = await open('openai=1&csp=block');
-  await blocked.host(o => window.testHost.result(o), read1);
-  await blocked.frame.waitForFunction(() => document.getElementById('original-msg').classList.contains('error'), null, {timeout: 15000});
-  assert.match(await text(blocked.frame, '#original-msg'), /CSP|CORS/);
-  assert(await blocked.frame.$eval('#stage', e => e.hidden), 'no fake original view');
-  assert.equal(await blocked.frame.$$eval('#segments li[role=option]', l => l.length), ids.length, 'sources still readable');
-  await blocked.page.close();
+// Each fault is one way a host or server reply can be wrong. The view must stop, say so in the
+// original pane, keep the sources readable and never show a canvas.
+async function originalFails(original, data, pattern) {
+  const v = await open('openai=1', undefined, original);
+  await v.host(o => window.testHost.result(o), data);
+  await v.frame.waitForFunction(() => document.getElementById('original-msg').classList.contains('error'), null, {timeout: 15000});
+  const msg = await text(v.frame, '#original-msg');
+  assert.match(msg, pattern, JSON.stringify(original));
+  assert(!/https?:|token|example\.invalid/.test(msg), 'no URL in the error');
+  assert(await v.frame.$eval('#stage', e => e.hidden), 'no original view');
+  assert.equal(await v.frame.$eval('#text-layer', e => e.childElementCount), 0, 'no text layer drawn');
+  assert(await v.frame.$$eval('#segments li[role=option]', l => l.length) > 0, 'sources still readable');
+  assert.deepEqual(v.errors, []);
+  return v;
+}
 
+test('the original arrives in chunks through the bridge and renders from the reassembled bytes', async () => {
+  requests.length = 0;
+  const bigFile = {...file, download_url: `${backendOrigin}/big.pdf`};
+  const {page, frame, host, errors} = await open('openai=1', undefined, {source: 'big.pdf', delay: 700});
+  await host(o => window.testHost.result(o), bigRead);
+  // Progress is spoken: it lands in a live region while the second chunk is on its way.
+  await frame.waitForFunction(() => /\(1\/2\)/.test(document.getElementById('original-msg').textContent), null, {timeout: 15000});
+  assert(await frame.$eval('#original-msg', e => !!e.closest('[aria-live], [role=status], [role=alert]')), 'original-msg is announced to assistive technology');
+  await frame.waitForFunction(() => !document.getElementById('stage').hidden, null, {timeout: 20000});
+  const px = await painted(frame);
+  assert(px.dark > 200, JSON.stringify(px));
+  assert.equal(await frame.$eval('#canvas', e => e.getAttribute('aria-label')), '원문 PDF 1페이지');
+  const originals = await host(() => window.testHost.calls.originals.map(c => c.arguments));
+  assert.deepEqual(originals.map(a => a.offset), [0, ORIGINAL_CHUNK]);
+  assert(originals.every(a => a.pdfSha256 === bigSha && a.file.file_id === 'file-TEST'));
+  assert.equal(await frame.evaluate(() => window.openai.fileUrls), 2, 'a fresh host URL for every chunk');
+  // The same chunks, taken straight from the server tool, rebuild the exact file.
+  const chunks = [];
+  for (const offset of [0, ORIGINAL_CHUNK]) chunks.push(await readAttachedOriginal({file: bigFile, pdfSha256: bigSha, offset}, deps));
+  assert.deepEqual(chunks.map(c => [c.data.offset, c.data.length, c.data.total, c.data.done]), [[0, ORIGINAL_CHUNK, big.length, false], [ORIGINAL_CHUNK, big.length - ORIGINAL_CHUNK, big.length, true]]);
+  assert(Buffer.concat(chunks.map(c => Buffer.from(c.meta['sundark/originalChunk'], 'base64'))).equals(big));
+  // No outbound request to the file URL, no CSP violation, and the URL is nowhere on screen or in state.
+  assert(!requests.includes('/file.pdf'));
+  assert.deepEqual(await frame.evaluate(() => window.__csp), []);
+  // The rendered DOM, without <script> elements: their source is code, not page content (the
+  // fixture stub holds the URL it hands out, and KaTeX's lexer has `this._token=null`).
+  const leaks = await frame.evaluate(() => {
+    const dom = document.documentElement.cloneNode(true);
+    dom.querySelectorAll('script').forEach(s => s.remove());
+    return [dom.outerHTML, ...(window.__states || [])].filter(x => /file\.pdf|token=|short-lived/.test(x)).length;
+  });
+  assert.equal(leaks, 0, 'the file URL is in no DOM and no widget state');
+  // A later render of the same bytes keeps the assembled PDF: no second download.
+  await host(o => window.testHost.result(o), {...bigRead, translations: []});
+  await page.waitForTimeout(500);
+  assert.equal((await host(() => window.testHost.calls.originals)).length, 2);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('inconsistent, tampered or incomplete chunks stop the original view', async () => {
+  // Hash of the whole file differs from the one read_attached_pdf returned: the REAL server
+  // refuses with source_changed and sends no bytes.
+  const changed = await originalFails({}, {...read1, attachment: {...read1.attachment, pdfSha256: 'a'.repeat(64)}}, /source_changed|달라요|바뀌/);
+  assert.equal((await changed.host(() => window.testHost.calls.originals)).length, 1, 'no retry loop');
+  await changed.page.close();
+  // A chunk claiming another file's hash, a total that changes between chunks, or an offset
+  // that does not follow the previous chunk.
+  for (const fault of ['sha', 'total', 'offset']) {
+    const v = await originalFails({source: fault === 'sha' ? 'file.pdf' : 'big.pdf', fault}, fault === 'sha' ? read1 : bigRead, /조각|맞지 않아요/);
+    await v.page.close();
+  }
+  // Every chunk lines up but the bytes are altered: the reassembled hash is refused.
+  await (await originalFails({source: 'big.pdf', fault: 'bytes'}, bigRead, /첨부 파일과 달라요/)).page.close();
+  // A host that drops _meta: a clear capability error, not a blank pane or a substitute view.
+  await (await originalFails({fault: 'meta'}, read1, /_meta/)).page.close();
+});
+
+// A failed load does not heal by asking again: the translation batches that follow (each one a
+// tool result) must not start another download of the same file and digest.
+test('a failed original load is not retried by later tool results of the same document', async () => {
+  for (const [original, data, pattern] of [[{fault: 'meta'}, read1, /_meta/],
+    [{}, {...read1, attachment: {...read1.attachment, pdfSha256: 'a'.repeat(64)}}, /source_changed|달라요|바뀌/]]) {
+    const v = await originalFails(original, data, pattern);
+    const failed = await text(v.frame, '#original-msg');
+    for (const n of [1, 2, ids.length]) {
+      const r = await render(n);
+      await v.host(o => window.testHost.result(o), data === read1 ? r : {...r, attachment: data.attachment});
+      await v.frame.waitForFunction(n => [...document.querySelectorAll('#segments li[role=option] .tr')].filter(e => e.textContent.startsWith('번역된')).length === n, n);
+    }
+    await v.page.waitForTimeout(500);
+    assert.equal((await v.host(() => window.testHost.calls.originals)).length, 1, 'one original call, no retry per result');
+    assert.equal(await v.frame.evaluate(() => window.openai.fileUrls), 1, 'no further file URL minted');
+    assert.equal(await text(v.frame, '#original-msg'), failed, 'the error stays; no loading churn');
+    assert.deepEqual(v.errors, []);
+    await v.page.close();
+  }
+});
+
+// Cancellation: once the document changes, no further chunk of the old file is requested,
+// whether the change lands while the host mints a URL or while a chunk is on its way.
+test('switching files stops the old load: no call after a URL wait, no chunk after a chunk wait', async () => {
+  const other = {...read1, attachment: {...read1.attachment, fileId: 'file-OTHER', fileName: 'other.pdf', pdfSha256: 'c'.repeat(64)}};
+  const urlWait = await open('openai=1&urldelay=1000');
+  await urlWait.host(o => window.testHost.result(o), read1);
+  await urlWait.page.waitForTimeout(200);
+  await urlWait.host(o => window.testHost.result(o), other);
+  await urlWait.page.waitForTimeout(1800);
+  assert.equal((await urlWait.host(() => window.testHost.calls.originals)).length, 0, 'the URL minted for the old file was never used');
+  assert(await urlWait.frame.$eval('#stage', e => e.hidden));
+  assert.deepEqual(urlWait.errors, []);
+  await urlWait.page.close();
+
+  const chunkWait = await open('openai=1', undefined, {source: 'big.pdf', delay: 1000});
+  await chunkWait.host(o => window.testHost.result(o), bigRead);
+  await chunkWait.page.waitForFunction(() => window.testHost.calls.originals.length === 1);
+  await chunkWait.host(o => window.testHost.result(o), other);
+  await chunkWait.page.waitForTimeout(2800);
+  assert.equal((await chunkWait.host(() => window.testHost.calls.originals)).length, 1, 'no second chunk of the old file');
+  assert(await chunkWait.frame.$eval('#stage', e => e.hidden));
+  assert.equal(await chunkWait.frame.$eval('#title', e => e.textContent), 'other.pdf');
+  assert.deepEqual(chunkWait.errors, []);
+  await chunkWait.page.close();
+});
+
+// A host that answers with tiny, self-consistent chunks must not drive an unbounded loop: the
+// view caps its calls (a 20 MiB file is at most ten 2 MiB chunks) and says it stopped.
+test('a load is bounded in calls even when every chunk is consistent', async () => {
+  const v = await open('openai=1', undefined, {fault: 'tiny'});
+  await v.host(o => window.testHost.result(o), bigRead);
+  await v.frame.waitForFunction(() => document.getElementById('original-msg').classList.contains('error'), null, {timeout: 20000});
+  const n = (await v.host(() => window.testHost.calls.originals)).length;
+  assert(n <= Math.ceil((20 * 1024 * 1024) / ORIGINAL_CHUNK) + 1, `bounded: ${n} calls`);
+  assert(await v.frame.$eval('#stage', e => e.hidden));
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+// ChatGPT can hand the view its result as window.openai.toolOutput before the MCP Apps
+// handshake answers. With server tools on the SDK bridge and no window.openai.callTool, the
+// original must wait for the handshake, then load once, not be recorded as unsupported.
+test('a result present before the host connects loads the original once the handshake settles', async () => {
+  const {page, frame, host, errors} = await open('openai=1&output=1&initdelay=800');
+  await frame.waitForSelector('#segments li[role=option]');
+  assert.equal(await frame.evaluate(() => typeof window.openai.callTool), 'undefined', 'no legacy tool bridge');
+  await frame.waitForFunction(() => !document.getElementById('stage').hidden, null, {timeout: 15000});
+  const p = await painted(frame);
+  assert(p.visible && p.w > 0 && p.dark > 50, JSON.stringify(p));
+  assert(!(await frame.$eval('#original-msg', e => e.classList.contains('error'))));
+  // Later results of the same document neither reload nor fail it.
+  await host(o => window.testHost.result(o), await render(1));
+  await page.waitForTimeout(300);
+  assert.equal((await host(() => window.testHost.calls.originals)).length, 1, 'the original loads once');
+  assert.equal(await frame.evaluate(() => window.openai.fileUrls), 1);
+  assert.deepEqual(await frame.evaluate(() => window.__csp), []);
+  assert(!requests.includes('/file.pdf'), 'the file URL is never fetched by the view');
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('host gates fail visibly: missing file URL or tool bridge', async () => {
   const bare = await open('');
   await bare.host(o => window.testHost.result(o), read1);
   await bare.frame.waitForFunction(() => document.getElementById('original-msg').classList.contains('error'));
-  assert.match(await text(bare.frame, '#original-msg'), /다운로드 링크/);
+  assert.match(await text(bare.frame, '#original-msg'), /원문 PDF/);
+  assert(await bare.frame.$eval('#stage', e => e.hidden), 'no fake original view');
+  assert.equal((await bare.host(() => window.testHost.calls.originals)).length, 0, 'no call without a file URL to pass');
   // A persistent payload is refused, and the first error stays on screen.
   await bare.host(o => window.testHost.result(o), {...read1, persistent: true});
   await bare.host(o => window.testHost.result(o), 'not an object');
@@ -594,14 +796,15 @@ test('another attachment replaces the original view; a late download is never ad
   assert(await frame.$eval('#stage', e => e.hidden), 'navigation cannot bring the old PDF back');
   await page.close();
 
-  // Slow download of file A; the attachment changes before it arrives.
-  const slow = await open('openai=1&delay=1200');
+  // Slow chunks of file A; the attachment changes before they arrive.
+  const slow = await open('openai=1', undefined, {delay: 1200});
   await slow.host(o => window.testHost.result(o), read1);
   await slow.page.waitForTimeout(200);
   await slow.host(o => window.testHost.result(o), other);
   await slow.page.waitForTimeout(2500);
   assert(await slow.frame.$eval('#stage', e => e.hidden), 'the late PDF of the old attachment is not adopted');
   assert.equal(await slow.frame.$eval('#title', e => e.textContent), 'other.pdf');
+  assert.equal(await slow.frame.$eval('#canvas', c => c.width), 0, 'nothing of file A was drawn');
   assert.deepEqual(slow.errors, []);
   assert.deepEqual(errors, []);
   await slow.page.close();
@@ -654,14 +857,14 @@ test('openai:set_globals delivers only a changed toolOutput, never a stale one, 
 });
 
 test('teardown clears the document and late work does not bring it back', async () => {
-  const {page, frame, host, errors} = await open('openai=1&delay=1200');
+  const {page, frame, host, errors} = await open('openai=1', undefined, {delay: 1200});
   await host(o => window.testHost.result(o), read1);
   await frame.waitForSelector('#segments li[role=option]');
   await host(() => window.testHost.teardown());
   const cleared = await frame.evaluate(() => ({options: document.querySelectorAll('#segments li').length, layout: document.getElementById('layout').hidden,
     stage: document.getElementById('stage').hidden, w: document.getElementById('canvas').width}));
   assert.deepEqual(cleared, {options: 0, layout: true, stage: true, w: 0});
-  // The download started before teardown finishes now; nothing is resurrected.
+  // The chunk requested before teardown arrives now; nothing is resurrected.
   await page.waitForTimeout(2500);
   const after = await frame.evaluate(() => ({options: document.querySelectorAll('#segments li').length, stage: document.getElementById('stage').hidden,
     text: document.body.innerText.includes('SYNTHETIC')}));

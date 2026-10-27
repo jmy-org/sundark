@@ -38,18 +38,36 @@ straight to `read_attached_pdf` (page 1, translation), without asking what to do
 `_meta["openai/ui"].entrypoints=[{type:"file",extensions:[".pdf"]}]`): ChatGPT injects
 `file:{name,resourceUri}`, the reader view reads that resource through the host, and the server
 downloads nothing and does not echo the resource URI.
+`read_attachment_original` is app-only (`_meta.ui.visibility=["app"]`, `openai/fileParams=["file"]`,
+no template): the reader view calls it through the host bridge to show the original PDF beside its
+translation. Its arguments are `{file, pdfSha256, offset}`; `pdfSha256` is the
+`attachment.pdfSha256` from `read_attached_pdf` and `offset` a multiple of 2 MiB. Each call downloads
+the whole file under the same gate, refuses it unless it is a PDF whose SHA-256 equals `pdfSha256`
+(`source_changed`, no bytes), and returns one 2 MiB slice, base64, only in the result
+`_meta["sundark/originalChunk"]`. The host gives `_meta` to the view and hides it from the model.
+`structuredContent` and the model text are `{fileId,pdfSha256,offset,length,total,done}` and never
+carry bytes. The view gets a fresh host file URL for every call, hands it to the server and keeps
+nothing. It checks that the chunks line up, hashes the assembled file again and only then renders
+it. It also has a per-call and a whole-load deadline, a call cap, and cancellation through the
+MCP Apps request signal. A cancelled call may still run on the server up to its own 20 s, 20 MiB
+bound. A failed load is not retried for the same file and digest: later tool results of that
+document (each translation batch) leave the error in place and start no new download. There is no
+retry control; a different attachment or a new reader view starts a fresh load. The digest proves consistency with the translated bytes, not authorization or where the
+bytes came from. App-only visibility is enforced by the host; the route authenticates the user,
+not the caller. Each chunk downloads the file again, because nothing is stored or cached: a 20 MiB
+PDF takes 10 calls.
 
 - Each call downloads the attachment into that request's memory under the same policy as the import
-  below (https, exact configured hosts, no redirects/credentials/IPs/ports, 20 s, 20 MiB), extracts
+  below (https, one label under `oaiusercontent.com` or an exact extra host, no redirects/credentials/IPs/ports, 20 s, 20 MiB), extracts
   only the requested pages (at most 8, default page 1, 15 s budget) with the same pdf.js rules, and
   drops the bytes. Nothing is kept between calls and there is no per-user cache in Worker globals.
 - Output: `{mode:"ephemeral",persistent:false,attachment:{fileId,fileName,pdfSha256,numPages},page,
   sourceHash,pages:[{page,width,height,segments,sourceHash}],translations,nextPages,needsOcrPages,
   failedPages,deferredPages,attemptedPages,unreadPages,complete,reportedComplete,progressBasis,pageLimit,extractablePages,
   translation:{language,instructions,batches:[{page,sourceHash,language,segmentIds}]},storageNotice}` as both model
-  text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader-v2.html`
+  text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader-v4.html`
   (`_meta.ui.resourceUri` plus the `openai/outputTemplate` alias; the earlier
-  `ui://sundark/attachment-reader.html` and `ui://sundark/attachment-reader-v3.html`, and the saved reader's `ui://sundark/reader-compat-v2.html`
+  `ui://sundark/attachment-reader.html`, `-v2.html` and `-v3.html`, and the saved reader's `ui://sundark/reader-compat-v2.html`
   stay readable with the same body for existing chats, but are no longer listed), so the first requested page's source
   shows before any translation. The download URL is never echoed, stored or logged.
 - `sourceHash` is per page: sha256 over the original file's sha256 and that page's exact geometry and
@@ -89,14 +107,16 @@ downloads nothing and does not echo the resource URI.
 - `SUNDARK_MCP_DIAGNOSTICS=1` (default off; enable only for a controlled probe, then remove) writes
   one Workers log line per `/mcp` request, `{"event":"sundark_mcp_observation",...}`: `method`
   (known MCP methods, else `other`), `tool` (`read_attached`, `render_attached`, `prepare`, `open`,
-  `saved_render`, `other`), `resource` (`attachment`, `saved`, `other`), date-formatted
+  `original`, `saved_render`, `other`), `resource` (`attachment`, `saved`, `other`), date-formatted
   `requestedVersion`/`protocolVersion`, `uiCapability` (`mcp_app`, `other`, `absent`, from the
   client's `io.modelcontextprotocol/ui` extension), `outcome` (`ok`, `error`, `unsupported`),
   `status`, an enum `reason` and the resource's `bytes`. HTTP is 200 even for an RPC error, so this
   shows whether `resources/read` reaches the Site. Params, arguments, URIs, file ids, headers,
   identity, paper text and error messages are never logged; responses are unchanged.
-- The reader resource's CSP `connectDomains` (and `openai/widgetCSP`) list exactly the hosts the
-  server download gate allows; nothing broader.
+- The reader resource's CSP is empty: `connectDomains` and `resourceDomains` (and `openai/widgetCSP`)
+  are `[]` for the current URI and every alias. The view makes no network request of its own: the
+  original PDF arrives through `read_attachment_original`. The empty declaration is what Sundark
+  controls; enforcement is the host's.
 - The UI tools (the four attachment reader tools and `render_paper_reader`) declare `outputSchema`
   `{type:"object",additionalProperties:true}`: their `structuredContent` is always an object; the schema adds no shape.
 - ChatGPT's own file retention is outside Sundark. Results live only in the conversation.
@@ -108,9 +128,15 @@ Only when the user explicitly asks to save or keep a PDF in their library. `impo
 saves it without any Site visit:
 
 1. Download: https, no redirects, no forwarded cookies or auth, 20 s, 20 MiB checked by header and
-   while streaming, `%PDF-` signature, and the file must parse in pdf.js. Only exact hosts are
-   allowed: `SUNDARK_FILE_HOSTS` (comma list) or the candidate default `files.oaiusercontent.com`.
-   That host is not an official guarantee; the live ChatGPT attachment gate decides. IP literals,
+   while streaming, `%PDF-` signature, and the file must parse in pdf.js. Allowed hosts: exactly one
+   DNS label under `oaiusercontent.com` (ChatGPT serves files from per-region hosts such as
+   `files.`, `sdmntprwestus2.` and `sdmntprindiasocentral.`), or an exact extra host in
+   `SUNDARK_FILE_HOSTS` (comma list, empty by default). That rule proves only that the host is in
+   OpenAI's Public Suffix List namespace, where every label is a separate site and other labels are
+   other tenants (app sandbox origins among them). It is **not** a provenance guarantee: it does not
+   prove that the URL is a ChatGPT file or this user's file, and it does not check the resolved
+   address. A model or prompt injection could point a call at another tenant's PDF. Those bytes are
+   untrusted, like any attachment, and go only to the caller's own conversation. IP literals,
    credentials in the URL, wildcards and non-default ports are refused. The URL and its query are
    never logged or stored.
 2. Storage: the exact original bytes go to R2 (sha256 in D1 and R2 metadata), then one conditional

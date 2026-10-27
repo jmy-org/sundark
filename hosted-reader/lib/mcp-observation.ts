@@ -5,7 +5,7 @@ import {env} from 'cloudflare:workers';
  * enum, a date-formatted version or a byte count: never params, arguments, URIs, file ids, headers,
  * identity, paper text or error messages. It never throws and never changes the response. */
 const METHODS=new Set(['initialize','server/discover','ping','notifications/initialized','tools/list','tools/call','resources/list','resources/read','resources/templates/list','prompts/list']);
-const TOOLS:Record<string,string>={read_attached_pdf:'read_attached',render_attached_reader:'render_attached',prepare_attachment_task:'prepare',open_attachment_reader:'open',open_pdf_file:'open',render_paper_reader:'saved_render'};
+const TOOLS:Record<string,string>={read_attached_pdf:'read_attached',render_attached_reader:'render_attached',prepare_attachment_task:'prepare',open_attachment_reader:'open',open_pdf_file:'open',read_attachment_original:'original',render_paper_reader:'saved_render'};
 const REASONS=new Set(['missing','malformed','unsupported_host','unsafe_url','expired','download','size','not_pdf','encrypted','invalid_pages','invalid_arguments','invalid_translation','invalid_analysis','source_changed','extract_failed']);
 const STATUS:Record<number,string>={400:'invalid',401:'auth',403:'origin',404:'not_found',413:'too_large',415:'content_type',503:'unavailable'};
 const UI='io.modelcontextprotocol/ui',APP_MIME='text/html;profile=mcp-app';
