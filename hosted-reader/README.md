@@ -1,5 +1,17 @@
 # Sundark Research Library
-Private owner-only ChatGPT Site with per-user D1 metadata and R2 PDF storage.
+Public ChatGPT Site: anyone can open it, but every library is private to the signed-in ChatGPT
+account, with per-user D1 metadata and R2 PDF storage.
+
+- Sign in with ChatGPT (Sites-managed) is required for the library page, `/original`, every
+  `/api/papers` route and every MCP tool call. Anonymous visitors are redirected to
+  `/signin-with-chatgpt`; anonymous API and tool calls fail with 401 before any D1/R2 access.
+- Every record is keyed to the Site-scoped `oai-authenticated-user-id`. Accounts cannot see,
+  change or list each other's papers, files, figures, text or results, and nothing is shared
+  between accounts. Limits below are per account; there is no global cap.
+- MCP discovery (`tools/list`, `resources/*`) carries only tool metadata and the reader view,
+  never library data. Rendering of that view inside ChatGPT is not verified.
+- Local tests cover these gates (`node --test tests/public-auth.test.mjs`). That the hosted platform
+  drops forged identity headers on public requests is a hosted check, not covered locally.
 
 - ChatGPT-managed identity, no application secrets or external AI API.
 - Paper metadata, collections/tags, notes and reading page/zoom persist in D1.
@@ -10,7 +22,7 @@ Private owner-only ChatGPT Site with per-user D1 metadata and R2 PDF storage.
 - Extracted/OCR text is editable and persisted for up to 200 pages per PDF version, with a 50 MiB per-user extracted-text cap.
 - This is not DocLayout parity: multi-column order, tables, equations and non-English text require review.
 - JSON import/export excludes PDF bytes; BibTeX export is metadata only.
-- Private Site MCP: search_library, read_paper_notes and read_paper_page, per-user read-only. Page tool reads saved extraction/OCR; it does not generate OCR or AI itself. `read_attached_pdf`, `prepare_attachment_task` and `render_attached_reader` read a ChatGPT-attached PDF without storing anything (the default); `import_paper_pdf` and `extract_paper_pages` save it and its text layer only on an explicit request (below).
+- Site MCP (signed-in, per account): search_library, read_paper_notes and read_paper_page, per-user read-only. Page tool reads saved extraction/OCR; it does not generate OCR or AI itself. `read_attached_pdf`, `prepare_attachment_task` and `render_attached_reader` read a ChatGPT-attached PDF without storing anything (the default); `import_paper_pdf` and `extract_paper_pages` save it and its text layer only on an explicit request (below).
 - Core AI translation, summary, anatomy, Q&A and equation vision are not complete: inference-runtime authorization is pending. See CORE_PARITY.md. No fake model output is generated.
 - No Zotero synchronization, citation-word-processor plugin or automatic metadata enrichment.
 
@@ -58,7 +70,7 @@ not the caller. Each chunk downloads the file again, because nothing is stored o
 PDF takes 10 calls.
 
 - Each call downloads the attachment into that request's memory under the same policy as the import
-  below (https, one label under `oaiusercontent.com` or an exact extra host, no redirects/credentials/IPs/ports, 20 s, 20 MiB), extracts
+  below (https, one label under `oaiusercontent.com`, an `oaisdmntpr<region>.blob.core.windows.net` account or an exact extra host, no redirects/credentials/IPs/ports, 20 s, 20 MiB), extracts
   only the requested pages (at most 8, default page 1, 15 s budget) with the same pdf.js rules, and
   drops the bytes. Nothing is kept between calls and there is no per-user cache in Worker globals.
 - Output: `{mode:"ephemeral",persistent:false,attachment:{fileId,fileName,pdfSha256,numPages},page,
@@ -102,7 +114,8 @@ PDF takes 10 calls.
   to reattach. `expired` (401/403/404/410) asks for a fresh file reference to the same attachment.
   An `unsupported_host` refusal also writes one error-level Workers log line,
   `{"event":"sundark_attachment_policy","reason":"unsupported_host","host":"<hostname>"}`, so the
-  Site owner can read the exact refused host before adding it to `SUNDARK_FILE_HOSTS`. Only the
+  Site owner can read the exact refused host and confirm it is a genuine ChatGPT file host before
+  adding it to `SUNDARK_FILE_HOSTS`. Only the
   validated hostname is logged; other errors log nothing.
 - `SUNDARK_MCP_DIAGNOSTICS=1` (default off; enable only for a controlled probe, then remove) writes
   one Workers log line per `/mcp` request, `{"event":"sundark_mcp_observation",...}`: `method`
@@ -130,12 +143,19 @@ saves it without any Site visit:
 1. Download: https, no redirects, no forwarded cookies or auth, 20 s, 20 MiB checked by header and
    while streaming, `%PDF-` signature, and the file must parse in pdf.js. Allowed hosts: exactly one
    DNS label under `oaiusercontent.com` (ChatGPT serves files from per-region hosts such as
-   `files.`, `sdmntprwestus2.` and `sdmntprindiasocentral.`), or an exact extra host in
-   `SUNDARK_FILE_HOSTS` (comma list, empty by default). That rule proves only that the host is in
-   OpenAI's Public Suffix List namespace, where every label is a separate site and other labels are
-   other tenants (app sandbox origins among them). It is **not** a provenance guarantee: it does not
-   prove that the URL is a ChatGPT file or this user's file, and it does not check the resolved
-   address. A model or prompt injection could point a call at another tenant's PDF. Those bytes are
+   `files.`, `sdmntprwestus2.` and `sdmntprindiasocentral.`), an Azure Blob account
+   `oaisdmntpr<suffix>.blob.core.windows.net` (a whole Azure account name: lowercase letters and
+   digits, 24 characters at most; ChatGPT has served attachments from `oaisdmntprwestus2`,
+   `oaisdmntprindiasocentral` and `oaisdmntprkoreacentral`), or an exact extra host in
+   `SUNDARK_FILE_HOSTS` (comma list, empty by default). The `oaiusercontent.com` rule proves only
+   that the host is in OpenAI's Public Suffix List namespace, where every label is a separate site
+   and other labels are other tenants (app sandbox origins among them). The Azure rule is observed
+   compatibility, not OpenAI ownership: OpenAI does not document these hosts, and any Azure customer
+   can register an unclaimed name with that prefix. Its DNS is Microsoft's, so the URL author cannot
+   point it at an address of their choosing; nested names, `privatelink.`, other Azure services,
+   other names under `windows.net` and look-alike suffixes are refused. Neither rule is a
+   provenance guarantee: they do not prove that the URL is a ChatGPT file or this user's file, and
+   they do not check the resolved address. A model or prompt injection could point a call at another tenant's PDF. Those bytes are
    untrusted, like any attachment, and go only to the caller's own conversation. IP literals,
    credentials in the URL, wildcards and non-default ports are refused. The URL and its query are
    never logged or stored.
@@ -157,12 +177,12 @@ saves it without any Site visit:
 4. ChatGPT then runs `prepare_paper_task` -> `save_paper_analysis` -> `render_paper_reader` as above.
 
 `import_paper_text` saves explicitly provided text as a paper, not a PDF. OCR of scanned pages
-runs only in the private Site reader.
+runs only in the signed-in Site reader.
 
 Local test against workerd (synthetic PDFs only; the fixture origin is honoured only in dev builds):
 `SUNDARK_DEV_FILE_ORIGIN=http://127.0.0.1:5199 CLOUDFLARE_INCLUDE_PROCESS_ENV=true npm run dev -- --port 5175 --strictPort`,
 apply `drizzle/` to `.wrangler/state` (`wrangler d1 migrations apply DB --local`), then
-`python3 -I tests/local-pdf-import.py <dev-log>` and `node --test tests/pdf-import.test.mjs tests/pdf-extract.test.mjs tests/attachment.test.mjs`. The attachment reader has its own workerd run, which starts and stops its own server on a free port:
+`python3 -I tests/local-pdf-import.py <dev-log>` and `node --test tests/pdf-import.test.mjs tests/pdf-extract.test.mjs tests/attachment.test.mjs tests/public-auth.test.mjs`. The attachment reader has its own workerd run, which starts and stops its own server on a free port:
 `python3 -I tests/local-attachment.py dev` (D1/R2 counts unchanged, source binding, finite loops,
 resource metadata) and, after `npm run build`, `python3 -I tests/local-attachment.py prod` (the
 production bundle ignores `SUNDARK_DEV_FILE_ORIGIN`). The reader view itself is tested in real
@@ -175,7 +195,7 @@ under Node 26, so run the `node --test` suites with Node 24. Original DocLayout,
 ## Local Sundark companion (optional)
 
 The paper reader has a collapsed "로컬 Sundark로 분석하기" panel. It sends this paper's PDF from the
-owner's browser to Sundark running on the owner's own computer, which does layout, summary,
+signed-in user's browser to Sundark running on that user's own computer, which does layout, summary,
 Research Anatomy and page translation with the AI it is set up with (Sign in with ChatGPT,
 Claude Code or Hermes). Start it with
 `uv run python -m app.mcp_server --http --site-origin <this Site's exact origin>` in the Sundark
@@ -186,7 +206,7 @@ checkout and paste the token it prints.
   layout, summary, anatomy and page translation for PDFs uploaded in that run.
 - The token stays in the tab's memory: never in storage, cookies, URLs, D1 or the Site server.
   Disconnecting, switching papers or closing the page forgets it. The ChatGPT sign-in never leaves the
-  owner's computer.
+  user's computer.
 - Results are shown in the panel only; nothing is written to D1 or R2, and saved plugin results
   are unchanged. Its sentences come from the local layout, so they can differ from the
   extracted text above.

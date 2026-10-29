@@ -16,7 +16,20 @@ export const MAX_PDF=20*1024*1024;
 // OpenAI's DNS for its namespace. pdfSha256 binds the original pane to the bytes that produced the
 // translation, not to where they came from.
 const CHATGPT_FILE_NAMESPACE=/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.oaiusercontent\.com$/;
-// Exact extra hosts outside that namespace; SUNDARK_FILE_HOSTS replaces this list.
+// ChatGPT also hands out SAS URLs straight on Azure Blob storage accounts named oaisdmntpr<region>
+// (westus2, indiasocentral, koreacentral, ... observed in production, new regions keep appearing).
+// Azure account names are 3-24 lowercase letters and digits, globally unique, served only at
+// <account>.blob.core.windows.net by Microsoft's DNS, so this is a bounded family of whole
+// account names, not a wildcard. It is observed compatibility, not ownership: OpenAI does not
+// document these hosts, and any Azure customer can register an unclaimed name with this prefix
+// and serve its own bytes. This expands permitted destinations but grants those bytes no trust:
+// the request carries only the caller-provided URL, and the name resolves through Microsoft's DNS,
+// not DNS that the URL's author runs. Other Azure names (*.windows.net, z<N>.blob.storage.azure.net,
+// custom domains, the internal CNAME targets) stay refused. This rule does not inspect resolved
+// IP addresses or establish private-network unreachability.
+const CHATGPT_AZURE_FILE_ACCOUNT=/^oaisdmntpr[a-z0-9]{1,14}\.blob\.core\.windows\.net$/;
+const isChatGptFileHost=(host:string)=>CHATGPT_FILE_NAMESPACE.test(host)||CHATGPT_AZURE_FILE_ACCOUNT.test(host);
+// Exact extra hosts outside those families; SUNDARK_FILE_HOSTS replaces this list.
 export const DEFAULT_FILE_HOSTS:string[]=[];
 const HOST=/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 export function fileHosts(value?:string){if(value===undefined)return DEFAULT_FILE_HOSTS;return value.split(',').map(h=>h.trim().toLowerCase()).filter(h=>HOST.test(h))}
@@ -25,7 +38,7 @@ const missing=()=>new PdfFileError(400,'The attachment reference has no download
 const malformed=()=>new PdfFileError(400,'The attachment download URL is malformed. Call again with a fresh file reference to the attached PDF.','malformed');
 const unsafe=()=>new PdfFileError(400,'The attachment download URL is not a plain https file URL (credentials, IP addresses and custom ports are refused). Nothing was downloaded.','unsafe_url');
 // A configuration error: reattaching the same file cannot fix it, so do not ask the user to.
-const unsupported=(host:string)=>new PdfFileError(400,`The attachment file host ${host} is outside the ChatGPT file namespace (one label under oaiusercontent.com) and not in this Sundark deployment's exact extra file hosts (SUNDARK_FILE_HOSTS). Reattaching will not help; the Site owner must list this exact host if it is a genuine ChatGPT file host. Nothing was downloaded.`,'unsupported_host',host);
+const unsupported=(host:string)=>new PdfFileError(400,`The attachment file host ${host} is outside the ChatGPT file host families (one label under oaiusercontent.com, or an Azure storage account oaisdmntpr<region>.blob.core.windows.net) and not in this Sundark deployment's exact extra file hosts (SUNDARK_FILE_HOSTS). Reattaching will not help; the Site owner may list this exact host only after confirming it is a genuine ChatGPT file host. Nothing was downloaded.`,'unsupported_host',host);
 export function checkFileUrl(raw:unknown,policy:FilePolicy){
  if(typeof raw!=='string'||!raw)throw missing();
  if(raw.length>4096)throw malformed();
@@ -34,7 +47,7 @@ export function checkFileUrl(raw:unknown,policy:FilePolicy){
  // Local fixture server, only when the dev build supplies its exact loopback origin.
  if(policy.devOrigin&&/^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(policy.devOrigin)&&url.origin===policy.devOrigin)return url;
  if(url.protocol!=='https:'||url.port!==''||!HOST.test(url.hostname))throw unsafe();
- if(!CHATGPT_FILE_NAMESPACE.test(url.hostname)&&!policy.hosts.includes(url.hostname))throw unsupported(url.hostname);
+ if(!isChatGptFileHost(url.hostname)&&!policy.hosts.includes(url.hostname))throw unsupported(url.hostname);
  return url;
 }
 export function isPdf(bytes:Uint8Array){return bytes.length>=8&&new TextDecoder().decode(bytes.slice(0,5))==='%PDF-'}

@@ -16,7 +16,7 @@ Reference: jmy-org/sundark main, inspected 2026-10-22. This Site is not yet a fa
 | Paper-context Q&A and history | /api/chat and paper identity | ChatGPT plugin generation/persistence implemented; live model test pending |
 | Review export with cited figures | /api/review/{doc_id}, Markdown + ZIP PNGs | Pending core model/layout runtime |
 | Zotero integration | local Zotero read-only API | User asked Zotero-like organization, not account integration; no automatic import |
-| Collections, tags, PDF storage, notes | supporting library flow | Implemented with owner-private D1/R2 |
+| Collections, tags, PDF storage, notes | supporting library flow | Implemented with per-account D1/R2 scoped to the signed-in ChatGPT user; anonymous and cross-account access blocked in local tests (`tests/public-auth.test.mjs`); hosted public-audience checks pending |
 
 ## Deployment constraint
 

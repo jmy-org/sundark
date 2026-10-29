@@ -1,6 +1,6 @@
 # Hosted reader (ChatGPT Site)
 
-`hosted-reader/` holds the source of the hosted Sundark reader: a private ChatGPT Site
+`hosted-reader/` holds the source of the hosted Sundark reader: a public ChatGPT Site with private per-account libraries
 (vinext/Next.js on Cloudflare Workers) that reads a PDF in ChatGPT and in the browser. It is
 a separate TypeScript project. It shares no code or runtime with the local Python reader in
 `app/` and `web/`; `hosted-reader/public/sundark-original/` adapts this repository's `web/`
@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `15a3ed2397f8dc975634df3cf770af1345b6fbac` ("Preserve active translation language during page reads"; in-band delivery in `1be30a6`, reader added in `7c2b570`) |
+| Exported Site commit | `aa0d2770912b94d76b17a8718a63eb0844ffae2a` ("Support regional attachment hosts with per-account authentication"; in-band delivery in `1be30a6`) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 
@@ -232,3 +232,35 @@ reader state/browser suite passes 46/46. Standard `read_attached_pdf` also repro
 the v4 widget lookup HTTP 404 in native Chrome at 09:08:46 UTC after a synthetic PDF
 upload; thus the observed failure is not confined to the launcher. Actual original
 canvas, translation, page navigation, export/restore and reopen remain unverified.
+
+### Public audience and account authentication (2026-10-28)
+
+The existing Site is public (native access revision 2). Hosting audience and account
+authorization are separate: anonymous `/` and `/original` redirect to the official
+Sites Sign in with ChatGPT route, while individual API routes and MCP tool calls
+require a verified identity. Existing authenticated browser sessions open the library
+without a new login prompt. No custom OAuth, session stack or new secret was added.
+
+Hosted anonymous and forged synthetic identity-header probes returned 307 for the
+protected pages and 401 for `/api/papers` and MCP tool calls. Local regressions cover
+every exported API handler, every MCP tool and two synthetic accounts with separate
+papers, PDF bytes, figures and analyses. They assert refusal before D1/R2 access and
+unchanged cross-account state. The full local integration harness passes 115 checks;
+its stale saved-reader URI/MIME assertion was corrected to the maintained resource.
+
+A public native Chrome run opened the library through the existing session, but the
+attachment reader still failed to open. A synthetic PDF read was refused by the server
+for `oaisdmntprwestus2.blob.core.windows.net`, confirmed by a host-only policy log.
+The server policy now also accepts the bounded standard Azure Blob account-name
+family `oaisdmntpr` plus 1-14 lowercase alphanumeric characters at the exact
+`.blob.core.windows.net` suffix. This is observed compatibility, not a reserved prefix,
+OpenAI ownership or a file-authorization guarantee. Other Azure customers may own a
+matching account; permitted destinations expand, while the content stays untrusted.
+The validator does not inspect resolved IP addresses. Credentials are not forwarded,
+redirects remain refused, downloads stay bounded, and the widget CSP stays empty.
+
+Regional exact environment entries are redundant under the two reviewed families and
+were removed (environment revision 8, applied on deployment). Local tests cover
+read/render across the two families, future account labels, malformed/lookalike
+endpoints and redirect refusal. Actual post-repair ChatGPT PDF/reader acceptance is
+still a separate gate; public audience alone did not establish reader success.

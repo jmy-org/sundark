@@ -303,7 +303,7 @@ test('only an unsupported host logs a diagnostic, with the validated hostname an
   const saved = {};
   for (const level of ['log', 'info', 'warn', 'error', 'debug']) { saved[level] = console[level]; console[level] = (...args) => logged.push({level, args}); }
   try {
-    const host = 'oaisdmntprindiasocentral.blob.core.windows.net';
+    const host = 'notchatgptfiles.blob.core.windows.net';
     await fails(() => readAttached({file: {download_url: `https://${host}/file-SYNTHETIC/x.pdf?se=2026&sig=${SECRET}&skoid=TOKEN`, file_id: 'file-SYNTHETIC-ID', file_name: 'private-name.pdf'}}, strict), 'unsupported_host');
     assert.equal(logged.length, 1);
     assert.equal(logged[0].level, 'error');
@@ -385,6 +385,40 @@ test('regional hosts: a never-seen single label in the namespace reads and rende
   const shown = await noStorage(() => renderAttached({file: regionalFile(INDIA), page: 1, sourceHash: read.sourceHash}, d));
   assert.equal(shown.sourceHash, read.sourceHash);
   assert.deepEqual(fetched.map(f => f.host), ['zz9q.oaiusercontent.com', INDIA]);
+});
+
+// ChatGPT's Azure file accounts, from the production refusal of oaisdmntprwestus2 after India and
+// Korea had been listed one at a time. The family rule takes them with no SUNDARK_FILE_HOSTS.
+const AZURE_WESTUS2 = 'oaisdmntprwestus2.blob.core.windows.net';
+test('Azure file accounts: read on oaiusercontent then render on Azure westus2, same PDF, nothing stored', async () => {
+  const {fetched, deps: d} = regional();
+  const read = await noStorage(() => readAttached({file: regionalFile(WESTUS2)}, d));
+  const shown = await noStorage(() => renderAttached({file: regionalFile(AZURE_WESTUS2), page: 1, sourceHash: read.sourceHash}, d));
+  clean(shown);
+  assert.equal(JSON.stringify(shown).includes('windows.net'), false, 'no file host in output');
+  assert.equal(shown.sourceHash, read.sourceHash, 'same bytes from either host give the same source');
+  assert.equal(shown.attachment.pdfSha256, read.attachment.pdfSha256);
+  assert.deepEqual(fetched, [{host: WESTUS2, redirect: 'manual'}, {host: AZURE_WESTUS2, redirect: 'manual'}]);
+});
+
+test('Azure file accounts: a never-seen region account reads; look-alike names are refused before any fetch', async () => {
+  const {fetched, deps: d} = regional();
+  const read = await noStorage(() => readAttached({file: regionalFile('oaisdmntprswedencentral.blob.core.windows.net')}, d));
+  assert.equal(read.attachment.pdfSha256, sha(twoPagePdf()));
+  for (const host of ['oaisdmntpr.blob.core.windows.net', `oaisdmntpr${'a'.repeat(15)}.blob.core.windows.net`, `x.${AZURE_WESTUS2}`, `${AZURE_WESTUS2}.evil.example`,
+    'oaisdmntprwestus2-eat02prdstrz08a.blob.core.windows.net', 'oaisdmntprwestus2.privatelink.blob.core.windows.net', 'oaisdmntprwestus2.z12.blob.storage.azure.net',
+    'oaisdmntprwestus2.web.core.windows.net', 'evil.blob.core.windows.net'])
+    await fails(() => readAttached({file: {download_url: `https://${host}/f?sig=${SECRET}`, file_id: 'f'}}, d), 'unsupported_host', e => {
+      assert.equal(e.host, host); assert(!e.message.includes(SECRET)); assert.match(e.message, /oaisdmntpr/); return true; });
+  await fails(() => readAttached({file: {download_url: `https://${AZURE_WESTUS2}:8443/f`, file_id: 'f'}}, d), 'unsafe_url');
+  await fails(() => readAttached({file: {download_url: `http://${AZURE_WESTUS2}/f`, file_id: 'f'}}, d), 'unsafe_url');
+  assert.deepEqual(fetched.map(f => f.host), ['oaisdmntprswedencentral.blob.core.windows.net'], 'nothing downloaded for a refused name');
+});
+
+test('Azure file accounts: a redirect is not followed, even to another family account', async () => {
+  const {fetched, deps: d} = regional(() => new Response(null, {status: 307, headers: {Location: `https://oaisdmntprkoreacentral.blob.core.windows.net/f?sig=${SECRET}`}}));
+  await fails(() => readAttached({file: regionalFile(AZURE_WESTUS2)}, d), 'download');
+  assert.deepEqual(fetched, [{host: AZURE_WESTUS2, redirect: 'manual'}]);
 });
 
 // --- read_attachment_original ---------------------------------------------------------------
