@@ -102,8 +102,8 @@ r=mcp('read_paper_analysis',{'id':tid});check('analysis pagination first page',l
 r=mcp('read_paper_analysis',{'id':tid,'cursor':r['nextCursor']});check('analysis pagination older artifacts',len(r['artifacts'])==5 and r['nextCursor'] is None)
 print(json.dumps({'total_passed':len(checks),'latest_checks':checks[-5:]},indent=2))
 r=mcp('render_paper_reader',{'id':tid,'page':1});check('embedded reader payload contains saved translation',len(r['segments'])==2 and any(a['kind']=='translation' for a in r['artifacts']))
-s,b,h=call('/mcp','POST',{'jsonrpc':'2.0','id':100,'method':'resources/read','params':{'uri':'ui://sundark/reader-v1.html'}})
-resource=json.loads(b)['result']['contents'][0];check('optional UI resource served',resource['mimeType']=='text/html;profile=mcp-app' and 'ui/initialize' in resource['text'])
+s,b,h=call('/mcp','POST',{'jsonrpc':'2.0','id':100,'method':'resources/read','params':{'uri':'ui://sundark/reader-compat-v3.html'}})
+resource=json.loads(b)['result']['contents'][0];check('optional UI resource served',resource['mimeType']=='text/html+skybridge' and 'ui/initialize' in resource['text'])
 check('resource contains no private fixture text','Plants use light' not in resource['text'])
 print(json.dumps({'total_passed':len(checks),'ui_host_rendering_verified':False},indent=2))
 # User-selected image crop storage and bounded review export.

@@ -91,11 +91,43 @@ test('namespace rule: WHATWG normalization is what the gate sees', () => {
 });
 
 test('an exact extra host passes only when it is listed', () => {
-  const extra = 'oaisdmntprwestus2.blob.core.windows.net';
+  const extra = 'sundarkfiles.blob.core.windows.net';
   rejects(`https://${extra}/f`, none);
   assert.equal(checkFileUrl(`https://${extra}/f`, {hosts: fileHosts(extra)}).hostname, extra);
   rejects(`https://x.${extra}/f`, {hosts: fileHosts(extra)});
   rejects('https://other.blob.core.windows.net/f', {hosts: fileHosts(extra)});
+});
+
+// ChatGPT's Azure file accounts: oaisdmntpr<suffix>.blob.core.windows.net, a whole Azure account
+// name (3-24 lowercase letters and digits). Observed compatibility, not proof of OpenAI ownership.
+test('Azure file account family: observed and future region accounts, no extra host listed', () => {
+  for (const account of ['oaisdmntprwestus2', 'oaisdmntprindiasocentral', 'oaisdmntprkoreacentral', 'oaisdmntprbrazilsouth', 'oaisdmntpre', `oaisdmntpr${'9'.repeat(14)}`])
+    assert.equal(checkFileUrl(`https://${account}.blob.core.windows.net/files/SYNTHETIC/raw?se=2026&sig=x`, none).hostname, `${account}.blob.core.windows.net`);
+  assert.equal(checkFileUrl('https://OaiSdmntprWestUS2.Blob.Core.Windows.Net:443/f', none).hostname, 'oaisdmntprwestus2.blob.core.windows.net');
+  const refused = ['oaisdmntpr.blob.core.windows.net', `oaisdmntpr${'9'.repeat(15)}.blob.core.windows.net`, 'oaisdmntpr-westus2.blob.core.windows.net',
+    'oaisdmntpr_westus2.blob.core.windows.net', 'oaisdmntprwestus2-eat02prdstrz08a.blob.core.windows.net', 'x.oaisdmntprwestus2.blob.core.windows.net',
+    'oaisdmntprwestus2.privatelink.blob.core.windows.net', 'oaisdmntprwestus2.blob.core.windows.net.evil.example', 'oaisdmntprwestus2.blob.core.windows.net.',
+    'oaisdmntprwestus2.web.core.windows.net', 'oaisdmntprwestus2.file.core.windows.net', 'oaisdmntprwestus2.z12.blob.storage.azure.net',
+    'oaisdmntprwestus2.blob.core.windows.com', 'oaisdmntprwestus2.blob.core.chinacloudapi.cn', 'xoaisdmntprwestus2.blob.core.windows.net',
+    'sdmntprwestus2.blob.core.windows.net', 'evil.blob.core.windows.net', 'blob.core.windows.net', 'oaisdmntprwestus2.windows.net', 'oaisdmntprwestus2.oaiusercontent.com.evil.example'];
+  for (const host of refused)
+    assert.throws(() => checkFileUrl(`https://${host}/f`, none), e => e instanceof PdfFileError && ['unsupported_host', 'unsafe_url'].includes(e.reason), host);
+  assert.throws(() => checkFileUrl('https://evil.blob.core.windows.net/f', none), e => e.reason === 'unsupported_host' && e.host === 'evil.blob.core.windows.net' && /oaisdmntpr/.test(e.message));
+  rejects('https://a%2Eoaisdmntprwestus2.blob.core.windows.net/f', none);
+  for (const raw of ['http://oaisdmntprwestus2.blob.core.windows.net/f', 'https://u:p@oaisdmntprwestus2.blob.core.windows.net/f',
+    'https://oaisdmntprwestus2.blob.core.windows.net:8443/f', 'ftp://oaisdmntprwestus2.blob.core.windows.net/f', 'https://evil.example\\@oaisdmntprwestus2.blob.core.windows.net/f'])
+    rejects(raw, none);
+});
+
+test('an Azure family download does not follow a redirect, even within the family', async () => {
+  const calls = [];
+  const fetcher = async (href, init) => {
+    calls.push({href, redirect: init.redirect});
+    return new Response(null, {status: 302, headers: {Location: 'https://oaisdmntprindiasocentral.blob.core.windows.net/files/SYNTHETIC/raw?sig=SECRET-TOKEN'}});
+  };
+  const url = checkFileUrl('https://oaisdmntprwestus2.blob.core.windows.net/files/SYNTHETIC/raw?sig=SECRET-TOKEN', none);
+  await assert.rejects(downloadPdf(url, {fetcher}), e => e instanceof PdfFileError && e.status === 502 && !e.message.includes('SECRET') && !e.message.includes('windows.net'));
+  assert.deepEqual(calls, [{href: url.href, redirect: 'manual'}]);
 });
 
 test('PDF signature and stored name', () => {
