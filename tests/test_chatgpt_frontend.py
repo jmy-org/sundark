@@ -33,6 +33,7 @@ async function run(values, edited, modelResponses) {
   const context = {
     S: { aiConfig: { default_models: { chatgpt: { translate: "old-default" } } } },
     chatGPT: { busy: false, generation: 0, initialModels: true },
+    readerTransport: { mode: "http" },
     $: (id) => elements[id],
     setChatGPTBusy() {}, hide() {}, renderChatGPTStatus() {}, chatGPTError(err) { throw err; },
     getChatGPTJSON: async (path) => path.endsWith("/status")

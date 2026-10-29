@@ -6,6 +6,7 @@
   <title>Sundark</title>
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.17/dist/purify.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css" />
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js"></script>
@@ -17,7 +18,7 @@
     <div class="brand">📄 Sundark</div>
     <label class="upload-btn">
       Upload
-      <input id="file" type="file" accept="application/pdf" hidden />
+      <input id="file" type="file" accept="application/pdf" />
     </label>
     <div id="title" class="doc-title">No paper loaded</div>
 
@@ -28,6 +29,7 @@
   </header>
 
   <div id="ai-banner" class="ai-banner hidden" role="alert"></div>
+  <div id="review-error" class="ai-banner hidden" role="alert"></div>
 
   <dialog id="settings" class="settings">
     <form method="dialog" id="settings-form">
@@ -60,9 +62,16 @@
     </form>
   </dialog>
 
-  <main class="workspace">
+  <!-- Narrow screens show one pane at a time -->
+  <nav id="panes" class="panes" aria-label="Workspace panes">
+    <button type="button" data-pane="library" aria-controls="library" aria-pressed="true">Library</button>
+    <button type="button" data-pane="source" aria-controls="pdfcol" aria-pressed="false">PDF</button>
+    <button type="button" data-pane="ai" aria-controls="aipanel" aria-pressed="false">AI</button>
+  </nav>
+
+  <main class="workspace" data-pane="library">
     <!-- Library -->
-    <aside class="library">
+    <aside id="library" class="library">
       <div class="lib-head"><span>Library</span><button id="refresh" title="Reload the list">⟳</button></div>
       <div class="lib-src" role="tablist">
         <button id="src-folder" type="button" class="active">Folder</button>
@@ -91,35 +100,47 @@
 
     <!-- Right: AI panel -->
     <aside id="aipanel" class="aipanel hidden">
-      <div class="tabs">
-        <button class="tab active" data-tab="translation">Translation</button>
-        <button class="tab" data-tab="anatomy">Anatomy</button>
-        <button class="tab" data-tab="summary">Summary</button>
-        <button class="tab" data-tab="chat">Chat</button>
+      <div class="tabs" role="group" aria-label="AI views">
+        <button type="button" class="tab active" id="tabbtn-translation" data-tab="translation" aria-controls="tab-translation" aria-pressed="true">Translation</button>
+        <button type="button" class="tab" id="tabbtn-anatomy" data-tab="anatomy" aria-controls="tab-anatomy" aria-pressed="false">Anatomy</button>
+        <button type="button" class="tab" id="tabbtn-summary" data-tab="summary" aria-controls="tab-summary" aria-pressed="false">Summary</button>
+        <button type="button" class="tab" id="tabbtn-chat" data-tab="chat" aria-controls="tab-chat" aria-pressed="false">Chat</button>
       </div>
       <div class="tab-body">
-        <div class="tabpane active" id="tab-translation">
+        <div class="tabpane active" id="tab-translation" role="region" aria-labelledby="tabbtn-translation">
           <div class="tr-toolbar">
             <button id="tr-smaller" class="btn-ghost" title="Smaller text">A−</button>
             <button id="tr-bigger" class="btn-ghost" title="Larger text">A+</button>
             <button id="retranslate" class="btn-ghost" title="Translate again, ignoring the cache">⟳ 다시 번역</button>
           </div>
+          <!-- Keyboard route to a sentence's source: the sentences stay plain text (see app.js) -->
+          <div class="trnav" role="group" aria-labelledby="trnav-label">
+            <div class="trnav-bar">
+              <span id="trnav-label" class="trnav-label">Sentence</span>
+              <span id="trnav-pos" class="trnav-pos">None selected</span>
+              <button id="trnav-prev" type="button" class="btn-ghost" aria-label="Previous sentence" disabled>Previous</button>
+              <button id="trnav-next" type="button" class="btn-ghost" aria-label="Next sentence" disabled>Next</button>
+              <button id="trnav-pin" type="button" class="btn-ghost" aria-pressed="false" disabled>Pin source</button>
+            </div>
+            <div id="trnav-preview" class="trnav-preview"></div>
+            <span id="trnav-status" class="sr-only" role="status"></span>
+          </div>
           <div id="trlist" class="trlist"></div>
         </div>
-        <div class="tabpane" id="tab-anatomy">
+        <div class="tabpane" id="tab-anatomy" role="region" aria-labelledby="tabbtn-anatomy">
           <div class="tr-toolbar">
             <button id="re-anatomy" class="btn-ghost" title="Analyze again, ignoring the cache">⟳ 다시 분석</button>
           </div>
           <div id="anatomy"><p class="hint" style="padding:6px">Open this tab to analyze the paper's structure (grounded in the source).</p></div>
         </div>
-        <div class="tabpane" id="tab-summary">
+        <div class="tabpane" id="tab-summary" role="region" aria-labelledby="tabbtn-summary">
           <div class="tr-toolbar">
             <button id="gen-summary" class="btn-ghost">↻ 다시 요약</button>
             <button id="export-review" class="btn-ghost" disabled title="요약과 구조분석(Anatomy)을 먼저 생성하면 활성화됩니다">📦 리뷰 zip</button>
           </div>
           <div id="summary" class="markdown"></div>
         </div>
-        <div class="tabpane" id="tab-chat">
+        <div class="tabpane" id="tab-chat" role="region" aria-labelledby="tabbtn-chat">
           <div id="chatlog" class="chatlog"></div>
           <div id="chatcite" class="chatcite hidden">
             <span id="chatcite-text"></span>
@@ -156,6 +177,7 @@
     </div>
   </div>
 
+  <script src="/transport.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

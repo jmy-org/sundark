@@ -21,7 +21,7 @@ class OutputLanguageTests(unittest.TestCase):
             patch.object(store, "CACHE", root / "cache"),
             patch.object(store, "CHATS", root / "chats"),
             patch(
-                "app.main._require_doc",
+                "app.service._require_doc",
                 return_value={"pages": ["Source text"], "meta": {"title": "Paper"}},
             ),
         ]
@@ -116,7 +116,7 @@ class OutputLanguageTests(unittest.TestCase):
                 if override is not None:
                     body["target_lang"] = override
                 with (
-                    patch("app.main._get_brief", new=AsyncMock(return_value="")),
+                    patch("app.service._get_brief", new=AsyncMock(return_value="")),
                     patch("app.main.ai.translate_stream", new=stream),
                     patch(
                         "app.main.ai.untranslated", side_effect=[True, False]
@@ -266,14 +266,14 @@ class OutputLanguageTests(unittest.TestCase):
             patch("app.main.ai.summarize", side_effect=summarize),
             patch("app.main.ai.anatomy", new=AsyncMock(return_value={})) as anatomy,
             patch(
-                "app.main._get_brief", new=AsyncMock(return_value="glossary")
+                "app.service._get_brief", new=AsyncMock(return_value="glossary")
             ) as brief,
             patch(
                 "app.main.ai.review", new=AsyncMock(return_value={"body": "note"})
             ) as review,
-            patch("app.main.store.pdf_path", return_value=pdf),
+            patch("app.service.store.pdf_path", return_value=pdf),
             patch(
-                "app.main.pdf_utils.figure_catalog",
+                "app.service.pdf_utils.figure_catalog",
                 return_value={"figures": [], "has_math": False},
             ),
         ):

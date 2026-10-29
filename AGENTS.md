@@ -19,7 +19,7 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   (`app/paper_id.py`: `doi:`, `arxiv:`, `zotero:`, or `file:<doc_id>`) keys Chat History and
   the translation glossary. `app/biblio.py` fetches the Bibliographic Record and rejects a
   DOI whose record title is not on the first page (a cited work's DOI). Zotero integration
-  calls `main._ingest(data, {"key": ..., "doi": ...})`; Zotero's DOI wins. A record title is
+  calls `service._ingest(data, {"key": ..., "doi": ...})`; Zotero's DOI wins. A record title is
   shown through `biblio.plain_title` (arXiv titles carry TeX, "$\alpha_1$-Net", CrossRef
   titles HTML tags). Before a paper is opened, the library title is `pdf_utils.title_of`:
   page 0's largest lines, a line sized by the size most of its characters use (a larger
@@ -51,13 +51,26 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   loaded at startup; if it can't load, startup FAILS with a clear message (see
   `app/main.py`) instead of serving a degraded parser. The text and word coordinates
   still come from PyMuPDF, so **highlighting is unchanged** — the model only says
-  WHAT each area is, never replaces the text layer. Install gotcha: torch and
+  WHAT each area is, never replaces the text layer. Inference runs one at a time
+  across every thread and process sharing `data/` (a file lock around `predict` in
+  `detect_page`), so page layout and the review's figure catalog never overlap; a lock
+  failure fails the page instead of caching a layout without regions. Install gotcha: torch and
   torchvision must come from the SAME index (mixing a CPU torch with a default
   torchvision fails at import with `torchvision::nms does not exist`).
 - **`app/main.py`** is FastAPI: upload/library, `/api/layout`, streaming
-  translation, summarize, anatomy, chat. **`web/`** is plain JS + pdf.js + KaTeX,
+  translation, summarize, anatomy, chat. These routes delegate document and task
+  use cases to **`app/service.py`**, which is independent of HTTP response types.
+  **`web/`** is plain JS + pdf.js + KaTeX,
   no build step. Highlighting maps server word coordinates (PDF points) to the
   viewport, so highlights are sentence-accurate.
+- **`app/mcp_server.py`** is a thin MCP adapter over the same application service.
+  Its MCP Apps resource embeds `web/`; `web/transport.js` changes transport, not
+  parsing, prompts or storage rules. Keep subscription account management local.
+  Temporary upload/download transfers are bounded and are not database records.
+  `--site-origin` (opt-in) serves the deployed Site from the owner's browser: one exact
+  https origin, the bearer on every request (also without an Origin), `SITE_TOOLS` only,
+  each scoped to PDFs uploaded through that companion, none copied into `papers/`. Never
+  widen it with `*`, more tools, or CORS on `app/main.py`.
 - **`app/store.py`** persists uploads + cached AI results under `data/`.
 - **`hosted-reader/`** is the hosted ChatGPT Site's source, a byte-exact `git archive` export
   of a Site commit (`docs/hosted-reader.md`). Never edit it here: change the Site, then
@@ -129,8 +142,10 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   renumbered line would otherwise shift every later segment), and the server numbers results by
   arrival (`{"i": len(collected)}`). A drifted stream therefore errors instead of being shown or
   cached. A failed batch falls back to the source text for its range so it cannot stall the
-  frontier. Every AI call is bounded by a per-backend semaphore in `app/ai.py`
-  sized by the same concurrency setting, which also covers summary/anatomy. A rate limit
+  frontier. Every AI call is bounded per backend in `app/ai.py` by the same concurrency
+  setting, which also covers summary/anatomy and the Settings model check, across every process that shares the settings
+  file (the reader and MCP servers): an in-process semaphore, then file-lock slots in `.locks`
+  next to the settings file. Never start an AI call while holding a slot. A rate limit
   (`RateLimitError`, HTTP 429, or a stream line with `rate_limited`) stops the remaining
   batches and leaves source text; the user lowers concurrency in Settings if it repeats. The server stays generic (it
   translates whatever segment list it is given and caches by a signature of those segments,
@@ -186,7 +201,7 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   `formula` box; consecutive such lines (one box spans the whole equation) group into
   one segment, which gives a whole-equation crop.
 - Results are cached per paper/model under `data/`, so reopening is instant. The
-  layout cache key carries `_LAYOUT_VERSION` (in `main.py`) — bump it when `layout()`
+  layout cache key carries `_LAYOUT_VERSION` (in `service.py`) — bump it when `layout()`
   changes what it emits, and old cached pages are bypassed instead of silently
   reused. Translation caches on a signature of the exact segments, so it follows a
   layout change automatically. Wipe `data/` only when you want a clean rebuild.
