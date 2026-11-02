@@ -206,3 +206,93 @@ test('analysis keeps its source pages and whether it covers the shown page', () 
   assert.deepEqual(d.analysis.map(a => [a.sourcePages, a.coversShownPage, a.language]), [[[2, 3], false, 'English']]);
   assert.match(S.exportMarkdown(d), /## 요약 \(source pages 2, 3\)/);
 });
+
+test('restore merge preserves live identity and read state without overwriting live translations', () => {
+  const live = doc(output({translations: [{id: 'p1-t2-s0', text: 'live'}], attemptedPages: [1], nextPages: [2], unreadPages: [3]}));
+  const saved = doc(output({translations: [{id: 'p1-t2-s0', text: 'old'}, {id: 'p1-t2-s1', text: 'restored'}]}), output({pages: [{page: 2, width: 612, height: 792, segments: [seg(2, 0)]}]}));
+  const merged = S.mergeRestored(live, S.restoreJson(S.exportJson(saved)));
+  assert.equal(merged.attachment.fileId, 'file-1');
+  assert.equal(merged.pages.get(1), live.pages.get(1));
+  assert.deepEqual(merged.nextPages, [2]);
+  assert.deepEqual(merged.unreadPages, [3]);
+  assert.deepEqual(merged.attemptedPages, [1]);
+  assert.equal(merged.translations.get('p1-t2-s0'), 'live');
+  assert.equal(merged.translations.get('p1-t2-s1'), 'restored');
+  assert.equal(merged.pages.get(2).restored, true);
+  assert(!live.pages.has(2), 'live input stays unchanged');
+  const shaOnly = S.merge(live, S.parseOutput(output({attachment: {fileId: '', fileName: '', pdfSha256: sha, numPages: 0}})));
+  assert.equal(shaOnly.attachment.fileId, 'file-1');
+});
+
+test('restore merge requires exact source equivalence even with matching imported hashes', () => {
+  const source = {...output().pages[0], sourceHash: 'known'};
+  const live = doc(output({pages: [source]}));
+  const original = JSON.parse(S.exportJson(doc(output({pages: [source], translations: [{id: 'p1-t2-s0', text: 'restored'}]}))));
+  assert.equal(original.pages[0].sourceHash, 'known');
+  for (const corrupt of [x => x.pages[0].sourceHash = 'other', x => x.pages[0].segments[0].text = 'changed', x => x.pages[0].segments[0].bbox[0] = 0.2]) {
+    const raw = structuredClone(original); corrupt(raw);
+    assert.equal(S.mergeRestored(live, S.restoreJson(JSON.stringify(raw))).translations.size, 0);
+  }
+  delete original.pages[0].sourceHash;
+  assert.equal(S.mergeRestored(live, S.restoreJson(JSON.stringify(original))).translations.get('p1-t2-s0'), 'restored', 'legacy v1 exact source still works');
+  assert.throws(() => S.mergeRestored(live, S.restoreJson(S.exportJson(doc(output({attachment: {fileId: 'other', pdfSha256: other, numPages: 3}}))))), /다른/);
+  const moved = structuredClone(original); moved.pages[0].page = 2;
+  assert.throws(() => S.mergeRestored(live, S.restoreJson(JSON.stringify(moved))), /중복/);
+  const outside = structuredClone(original); outside.pages = [{page: 4, width: 612, height: 792, segments: [seg(4, 0)]}]; outside.translations = [];
+  assert.throws(() => S.mergeRestored(live, S.restoreJson(JSON.stringify(outside))), /페이지 범위/);
+});
+
+test('restore rejects duplicate pages, cross-page source IDs and duplicate translation IDs', () => {
+  const raw = JSON.parse(S.exportJson(doc(output({translations: [{id: 'p1-t2-s0', text: 'one'}]}))));
+  const duplicatePage = structuredClone(raw); duplicatePage.pages.push(duplicatePage.pages[0]);
+  assert.throws(() => S.restoreJson(JSON.stringify(duplicatePage)), /중복/);
+  const duplicateId = structuredClone(raw); duplicateId.pages.push({...duplicateId.pages[0], page: 2});
+  assert.throws(() => S.restoreJson(JSON.stringify(duplicateId)), /중복/);
+  const duplicateTranslation = structuredClone(raw); duplicateTranslation.translations.push(duplicateTranslation.translations[0]);
+  assert.throws(() => S.restoreJson(JSON.stringify(duplicateTranslation)), /중복/);
+});
+
+test('fresh reads verify restored-only pages before retaining their translations', () => {
+  const saved = doc(output({pages: [{...output().pages[0], sourceHash: 'old'}], translations: [{id: 'p1-t2-s0', text: 'old translation'}]}));
+  const imported = S.restoreJson(S.exportJson(saved));
+  const changed = S.merge(imported, S.parseOutput(output({sourceHash: 'new', pages: [{...output().pages[0], sourceHash: 'new', segments: [seg(1, 0, 'Changed text.'), seg(1, 1), seg(1, 2)]}], attemptedPages: [1]})));
+  assert.equal(changed.translations.size, 0);
+  assert.equal(changed.restored, false);
+  const identical = S.merge(imported, S.parseOutput(output({sourceHash: 'old', pages: [{...output().pages[0], sourceHash: 'old'}], attemptedPages: [1]})));
+  assert.equal(identical.translations.get('p1-t2-s0'), 'old translation');
+  assert.equal(identical.restored, false);
+});
+
+test('imported-only pages never prove verified completion and future live ID collisions purge imports', () => {
+  const live = doc(read([1], {nextPages: [2]}));
+  const saved = doc(read([3]));
+  const merged = S.mergeRestored(live, S.restoreJson(S.exportJson(saved)));
+  const falseClaim = S.merge(merged, S.parseOutput(read([2], {attemptedPages: [1, 2, 3], complete: true, reportedComplete: true})));
+  assert.equal(falseClaim.complete, false, 'unverified imported page cannot satisfy a claimed complete result');
+  assert.equal(falseClaim.reportedComplete, false, 'unverified imported page is not caller-reported complete either');
+  const corrupted = doc(read([2], {pages: [page(2, [seg(3, 0)])], translations: [{id: 'p3-t2-s0', text: 'poisoned import'}]}));
+  const pending = S.mergeRestored(live, S.restoreJson(S.exportJson(corrupted)));
+  const genuine = S.merge(pending, S.parseOutput(read([3], {attemptedPages: [1, 3]})));
+  assert(!genuine.pages.has(2), 'conflicting imported page is discarded before genuine source is painted');
+  assert(!genuine.translations.has('p3-t2-s0'), 'imported translation never attaches to a future genuine source');
+  assert.equal(genuine.attachment.fileId, 'file-1');
+});
+
+test('snapshot analysis remains imported and conflicting source analysis is rejected', () => {
+  const live = doc(read([1]));
+  const saved = doc(read([1]));
+  saved.analysis = [{kind: 'summary', language: 'Korean', sourcePages: [1], title: '요약', text: 'snapshot analysis'}];
+  const restored = S.restoreJson(S.exportJson(saved));
+  assert.equal(restored.analysis[0].imported, true);
+  assert.equal(S.mergeRestored(live, restored).analysis[0].imported, true);
+  restored.pages.get(1).segments[0].text = 'corrupt source';
+  assert.equal(S.mergeRestored(live, restored).analysis.length, 0);
+});
+
+test('a no-language legacy snapshot restores alone but never adds translations to known-language live state', () => {
+  const saved = doc(output({translations: [{id: 'p1-t2-s0', text: 'unknown language'}]}));
+  const restored = S.restoreJson(S.exportJson(saved));
+  assert.equal(restored.translations.size, 1);
+  const live = doc(output({translation: {language: 'Korean', batches: []}}));
+  assert.equal(S.mergeRestored(live, restored).translations.size, 0);
+});

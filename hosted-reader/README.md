@@ -50,6 +50,18 @@ straight to `read_attached_pdf` (page 1, translation), without asking what to do
 `_meta["openai/ui"].entrypoints=[{type:"file",extensions:[".pdf"]}]`): ChatGPT injects
 `file:{name,resourceUri}`, the reader view reads that resource through the host, and the server
 downloads nothing and does not echo the resource URI.
+Display modes: the reader view declares `inline` and `fullscreen` in its MCP Apps
+`appCapabilities.availableDisplayModes`. Its resource contents (resources/read) carry
+`_meta["openai/ui"]={preferredDisplayMode:"inline",availableDisplayModes:["inline","fullscreen"]}`.
+`pip` is never declared or requested. Model-invoked cards prefer inline; the host chooses the actual
+mode. The extension specification opens entrypoints fullscreen; this has not been verified natively.
+A "전체 화면" button
+appears only when the host context lists the mode it would switch to. It sends one
+`ui/request-display-mode`, bounded to 15 s and never retried, and shows the mode the host returns,
+not the one it asked for. Fullscreen is not a sidebar. Widget state is scoped to each view; routing
+later model results into an active fullscreen view remains unverified. OpenAI's
+spec lists the thread and file entrypoints for the Work browser and Desktop, not classic chatgpt.com.
+Translating a PDF opened through the Desktop file entrypoint is unproven.
 `read_attachment_original` is app-only (`_meta.ui.visibility=["app"]`, `openai/fileParams=["file"]`,
 no template): the reader view calls it through the host bridge to show the original PDF beside its
 translation. Its arguments are `{file, pdfSha256, offset}`; `pdfSha256` is the
@@ -77,9 +89,9 @@ PDF takes 10 calls.
   sourceHash,pages:[{page,width,height,segments,sourceHash}],translations,nextPages,needsOcrPages,
   failedPages,deferredPages,attemptedPages,unreadPages,complete,reportedComplete,progressBasis,pageLimit,extractablePages,
   translation:{language,instructions,batches:[{page,sourceHash,language,segmentIds}]},storageNotice}` as both model
-  text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader-v4.html`
+  text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader-v5.html`
   (`_meta.ui.resourceUri` plus the `openai/outputTemplate` alias; the earlier
-  `ui://sundark/attachment-reader.html`, `-v2.html` and `-v3.html`, and the saved reader's `ui://sundark/reader-compat-v2.html`
+  `ui://sundark/attachment-reader.html`, `-v2.html`, `-v3.html` and `-v4.html`, and the saved reader's `ui://sundark/reader-compat-v2.html`
   stay readable with the same body for existing chats, but are no longer listed), so the first requested page's source
   shows before any translation. The download URL is never echoed, stored or logged.
 - `sourceHash` is per page: sha256 over the original file's sha256 and that page's exact geometry and

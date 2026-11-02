@@ -9,6 +9,7 @@ button,select,textarea,input{font:inherit;color:inherit}
 button{border:1px solid var(--line);background:transparent;border-radius:8px;padding:6px 10px;min-height:32px;cursor:pointer}
 button:hover:not(:disabled){border-color:var(--accent)}button:disabled{opacity:.5;cursor:not-allowed}
 button.primary{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+button[aria-pressed=true]{background:var(--accent-soft);border-color:var(--accent);font-weight:600}#display-mode{flex:none}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .muted{color:var(--muted)}.error{color:var(--danger)}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 header{display:flex;gap:12px;align-items:start;justify-content:space-between;margin-bottom:10px}
@@ -49,7 +50,7 @@ textarea{width:100%;min-height:64px;resize:vertical;border:1px solid var(--line)
 @media (max-width:480px){body{padding:10px}header{display:block}}
 @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
 </style></head><body>
-<header><div><h1 id="title">Sundark 첨부 PDF 리더</h1><p id="status" role="status" aria-live="polite">대화의 결과를 기다리고 있어요.</p><p id="notice" class="muted"></p></div></header>
+<header><div><h1 id="title">Sundark 첨부 PDF 리더</h1><p id="status" role="status" aria-live="polite" tabindex="-1">대화의 결과를 기다리고 있어요.</p><p id="notice" class="muted"></p></div><button id="display-mode" type="button" aria-pressed="false" hidden>전체 화면</button></header>
 <p id="error" class="error" role="alert" hidden></p>
 <section id="onboarding" aria-labelledby="onboarding-title">
 <h2 id="onboarding-title">처음 사용하기</h2>
@@ -87,6 +88,7 @@ textarea{width:100%;min-height:64px;resize:vertical;border:1px solid var(--line)
 <section aria-labelledby="export-title"><h2 id="export-title">내보내기</h2>
 <p class="muted">이 화면의 결과는 이 대화의 메모리에만 있어요. 직접 내보내지 않으면 창을 닫은 뒤 다시 보장되지 않아요.</p>
 <div class="row"><button id="export-md" type="button">Markdown</button><button id="export-json" type="button">JSON</button><button id="copy-md" type="button">Markdown 복사</button></div>
+<p id="export-hint" class="muted" hidden>이 호스트에서는 파일로 내보낼 수 없어요. “Markdown 복사”를 써 주세요.</p>
 <label class="muted">내보낸 JSON 다시 열기 <input id="restore" type="file" accept="application/json,.json"></label>
 <p id="export-msg" class="muted" role="status"></p></section>
 <section aria-labelledby="save-title"><h2 id="save-title">영구 저장(선택)</h2>

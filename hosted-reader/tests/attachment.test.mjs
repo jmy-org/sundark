@@ -620,12 +620,14 @@ async function rpc(method, params, headers = signedIn) {
     return body.result ?? {error: body.error};
   } finally { globalThis.__requestHeaders = undefined; }
 }
-const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
+const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v5.html';
 const SAVED_URI = 'ui://sundark/reader-compat-v3.html';
 // URIs earlier tool results named; hosts that cached them must still read the current body.
 const OLD_ATTACHMENT_URI = 'ui://sundark/attachment-reader.html', OLD_SAVED_URI = 'ui://sundark/reader-compat-v2.html';
 // The failed widget-domain experiment's URI, and v2, whose CSP let the widget fetch the file itself.
 const FAILED_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v3.html', V2_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v2.html';
+// v4, the empty-CSP body before the reader's request feedback changed.
+const V4_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
 const LEGACY = ['prepare_paper_task', 'list_paper_figures', 'read_paper_figure', 'render_paper_reader', 'search_library', 'list_paper_sources', 'read_paper_source',
   'read_paper_page', 'read_paper_notes', 'read_paper_analysis', 'save_paper_analysis', 'import_paper_pdf', 'extract_paper_pages', 'import_paper_text'];
 
@@ -674,6 +676,10 @@ test('route: new tools are read-only, file-param and reader-template tools', asy
   // No widget egress at all: the original PDF comes in-band, even with SUNDARK_FILE_HOSTS set.
   assert.deepEqual(read.contents[0]._meta.ui.csp, {connectDomains: [], resourceDomains: []});
   assert.deepEqual(read.contents[0]._meta['openai/widgetCSP'], {connect_domains: [], resource_domains: []});
+  // Display modes go on the resource contents, where OpenAI documents them: inline first, so
+  // each model turn's card stays in the conversation, with fullscreen on request. Never pip.
+  assert.deepEqual(read.contents[0]._meta['openai/ui'], {preferredDisplayMode: 'inline', availableDisplayModes: ['inline', 'fullscreen']});
+  assert.equal(resources.find(r => r.uri === ATTACHMENT_URI)._meta, undefined, 'resources/list entry unchanged');
   // The restored reader keeps the host's default widget origin.
   assert.equal(read.contents[0]._meta.ui.domain, undefined);
   assert.equal(read.contents[0]._meta['openai/widgetDomain'], undefined);
@@ -684,8 +690,8 @@ test('route: old reader URIs read the current body but only the new URIs are adv
   assert.deepEqual(resources.map(r => r.uri).sort(), [ATTACHMENT_URI, SAVED_URI].sort());
   const {tools} = await noStorage(() => rpc('tools/list'));
   const named = JSON.stringify(tools);
-  assert(![OLD_ATTACHMENT_URI, FAILED_ATTACHMENT_URI, V2_ATTACHMENT_URI, OLD_SAVED_URI].some(u => named.includes(u)), 'tool metadata names only the new URIs');
-  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [ATTACHMENT_URI, FAILED_ATTACHMENT_URI], [ATTACHMENT_URI, V2_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI]]) {
+  assert(![OLD_ATTACHMENT_URI, FAILED_ATTACHMENT_URI, V2_ATTACHMENT_URI, V4_ATTACHMENT_URI, OLD_SAVED_URI].some(u => named.includes(u)), 'tool metadata names only the new URIs');
+  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [ATTACHMENT_URI, FAILED_ATTACHMENT_URI], [ATTACHMENT_URI, V2_ATTACHMENT_URI], [ATTACHMENT_URI, V4_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI]]) {
     const now = (await rpc('resources/read', {uri: current})).contents[0];
     const alias = (await rpc('resources/read', {uri: old})).contents[0];
     assert.equal(alias.uri, old, 'echoes the URI the host asked for');

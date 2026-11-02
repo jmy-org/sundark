@@ -26,6 +26,7 @@ const {readAttached, readAttachedOriginal, ORIGINAL_CHUNK, renderAttached, prepa
 const {attachmentReaderHtml, attachmentReaderUri, attachmentReaderAliases} = await import('../lib/attachment-reader.ts');
 
 const pdf = twoPagePdf();
+const threePdf = manyPagePdf(3);
 const pdfSha = createHash('sha256').update(pdf).digest('hex');
 // Over one 2 MiB chunk: the same two pages with comment padding after %%EOF (pdf.js finds
 // startxref by scanning back), so the original arrives in two chunks.
@@ -39,6 +40,13 @@ execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days
   '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', join(certDir, 'key.pem'), '-out', join(certDir, 'cert.pem')], {stdio: 'ignore'});
 const tls = {key: readFileSync(join(certDir, 'key.pem')), cert: readFileSync(join(certDir, 'cert.pem'))};
 rmSync(certDir, {recursive: true, force: true});
+// ChatGPT's own follow-up helper, present only with followup=<mode>: 'ok' answers at once,
+// 'hang' never answers, 'deny' takes the request and then rejects with host text the view must
+// not show (the helper has no refusal signal, so this is a lost answer), 'manual' waits
+// for window.__settle. Every call is kept in window.__followUps.
+const followUp = mode => !mode ? '' : `,sendFollowUpMessage(a){(window.__followUps||=[]).push(a);const m=${JSON.stringify(mode)};` +
+  `if(m==='hang')return new Promise(()=>{});if(m==='deny')return Promise.reject(new Error('denied https://example.invalid/secret'));` +
+  `if(m==='manual')return new Promise(r=>(window.__settle||=[]).push(r));return Promise.resolve()}`;
 const server = https.createServer(tls, async (req, res) => {
   const url = new URL(req.url, origin);
   requests.push(url.pathname);
@@ -58,11 +66,16 @@ const server = https.createServer(tls, async (req, res) => {
     return res.end('<!doctype html><meta charset="utf-8"><title>pdf</title><canvas id="c"></canvas><div id="t"></div><script src="/pdf-harness.js"></script>');
   }
   if (url.pathname === '/pdf-harness.js') { res.writeHead(200, {'Content-Type': 'text/javascript'}); return res.end(pdfJs); }
+  if (url.pathname === '/host-harness.html') {
+    res.writeHead(200, {'Content-Type': 'text/html'});
+    return res.end('<!doctype html><meta charset="utf-8"><title>host bridge</title><script src="/host-harness.js"></script>');
+  }
+  if (url.pathname === '/host-harness.js') { res.writeHead(200, {'Content-Type': 'text/javascript'}); return res.end(hostBridgeJs); }
   if (url.pathname === '/widget.html') {
     const q = url.searchParams;
     const fileUrl = `${origin}/${FILE_URL}`;
     const stub = `<script>window.__csp=[];document.addEventListener('securitypolicyviolation',e=>window.__csp.push(e.violatedDirective+' '+e.blockedURI+' '+e.lineNumber+':'+e.columnNumber));` +
-      (q.get('openai') ? `window.__states=[];window.openai={widgetState:${q.get('state') || 'null'},setWidgetState(s){this.widgetState=s;window.__states.push(JSON.stringify(s));${q.get('globals') ? "dispatchEvent(new CustomEvent('openai:set_globals',{detail:{globals:{widgetState:s}}}))" : ''}},fileUrls:0,${q.get('output') ? `toolOutput:${JSON.stringify(read1).replace(/</g, '\\u003c')},` : ''}getFileDownloadUrl:async({fileId})=>{await new Promise(r=>setTimeout(r,${Number(q.get('urldelay')) || 0}));return fileId==='file-TEST'?(window.openai.fileUrls++,{downloadUrl:${JSON.stringify(fileUrl)}}):Promise.reject(new Error('unknown file'))}};` : '') +
+      (q.get('openai') ? `window.__states=[];window.openai={widgetState:${q.get('state') || 'null'},setWidgetState(s){this.widgetState=s;window.__states.push(JSON.stringify(s));${q.get('globals') ? "dispatchEvent(new CustomEvent('openai:set_globals',{detail:{globals:{widgetState:s}}}))" : ''}},fileUrls:0,${q.get('output') ? `toolOutput:${JSON.stringify(read1).replace(/</g, '\\u003c')},` : ''}getFileDownloadUrl:async({fileId})=>{await new Promise(r=>setTimeout(r,${Number(q.get('urldelay')) || 0}));return fileId==='file-TEST'?(window.openai.fileUrls++,{downloadUrl:${JSON.stringify(fileUrl)}}):Promise.reject(new Error('unknown file'))}${followUp(q.get('followup'))}};` : '') +
       '</script>';
     res.writeHead(200, {'Content-Type': 'text/html',
       // As strict as the resource's declared CSP (connectDomains []): inline code only, no network.
@@ -77,11 +90,50 @@ const origin = `https://127.0.0.1:${server.address().port}`;
 const pdfJs = (await build({stdin: {contents: "import {drawPage, openPdfBytes} from './client/attachment-reader/pdf.ts'; window.harness = {drawPage, openPdfBytes};",
   resolveDir: new URL('..', import.meta.url).pathname, loader: 'js'}, bundle: true, write: false, format: 'iife', platform: 'browser', logLevel: 'silent',
   external: ['module', 'fs', 'path', 'url', 'http', 'https', 'zlib', 'canvas']})).outputFiles[0].text;
+// The widget's own host.ts, bundled alone with the official AppBridge on the SDK's in-memory
+// transport, so a test can drop the connection after the host took a message. take(mode)
+// sends one message: 'ok' answers, 'deny' refuses the spec way (-32000 with host text), 'lost'
+// takes it and then the connection closes, 'garbled' takes it and answers with an unreadable result.
+const hostBridgeJs = (await build({stdin: {contents: `
+  import {Host, Unconfirmed} from './client/attachment-reader/host.ts';
+  import {AppBridge} from '@modelcontextprotocol/ext-apps/app-bridge';
+  import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
+  window.take = async mode => {
+    const [view, side] = InMemoryTransport.createLinkedPair();
+    const bridge = new AppBridge(null, {name: 'harness-host', version: '1.0.0'}, {message: {text: {}}});
+    const taken = [];
+    bridge.onmessage = async p => {
+      taken.push(p.content.map(c => c.text).join('\\n'));
+      if (mode === 'deny') throw Object.assign(new Error('Message sending denied https://example.invalid/secret'), {code: -32000});
+      if (mode === 'lost') { await bridge.close(); return new Promise(() => {}); }
+      if (mode === 'garbled') return {isError: 'https://example.invalid/secret'};
+      return {};
+    };
+    await bridge.connect(side);
+    const host = new Host();
+    await host.app.connect(view);
+    host.connected = true;
+    try { await host.message('prompt-' + mode); return {outcome: 'sent', taken}; }
+    catch (e) { return {outcome: e instanceof Unconfirmed ? 'unconfirmed' : 'refused', text: e.message, taken}; }
+  };
+  window.toolFailure = async ({method, transport, shape}) => {
+    const host = new Host(); let calls = 0;
+    const fail = async () => { calls++; throw shape === 'error'
+      ? new Error('HOST_PRIVATE https://example.invalid/?token=PRIVATE_TOKEN file-PRIVATE')
+      : {message: 'HOST_PRIVATE', url: 'https://example.invalid/?token=PRIVATE_TOKEN', fileId: 'file-PRIVATE'}; };
+    host.connected = true;
+    host.app.getHostCapabilities = () => transport === 'mcp' ? {serverTools: {}} : {};
+    host.app.callServerTool = fail;
+    window.openai = {callTool: fail};
+    try { await host[method]('read_attachment_original', {}); return {outcome: 'ok', calls}; }
+    catch (e) { return {outcome: 'failed', text: e.message, calls}; }
+    finally { delete window.openai; }
+  };`, resolveDir: new URL('..', import.meta.url).pathname, loader: 'js'}, bundle: true, write: false, format: 'iife', platform: 'browser', logLevel: 'silent'})).outputFiles[0].text;
 const hostJs = (await build({entryPoints: [new URL('./fixtures/attachment-host.mjs', import.meta.url).pathname], bundle: true, write: false, format: 'iife', platform: 'browser', logLevel: 'silent'})).outputFiles[0].text;
 
 // The server tools read the same bytes from a plain-http dev origin (the only kind their
 // download gate allows besides the real file host). /big.pdf is the two-chunk file.
-const backend = http.createServer((req, res) => { res.writeHead(200, {'Content-Type': 'application/pdf'}); res.end(req.url.startsWith('/big.pdf') ? big : pdf); });
+const backend = http.createServer((req, res) => { res.writeHead(200, {'Content-Type': 'application/pdf'}); res.end(req.url.startsWith('/three.pdf') ? threePdf : req.url.startsWith('/big.pdf') ? big : pdf); });
 await new Promise(r => backend.listen(0, '127.0.0.1', r));
 const backendOrigin = `http://127.0.0.1:${backend.address().port}`;
 const deps = {policy: {hosts: [], devOrigin: backendOrigin}};
@@ -130,8 +182,10 @@ let browser;
 before(async () => { browser = await chromium.launch(); });
 after(async () => { await browser?.close(); for (const s of [server, backend]) { s.closeAllConnections(); s.close(); } });
 
-async function open(query = 'openai=1', viewport = {width: 1320, height: 960}, original = {}) {
+async function open(query = 'openai=1', viewport = {width: 1320, height: 960}, original = {}, {clock = false} = {}) {
   const page = await browser.newPage({viewport, ignoreHTTPSErrors: true});
+  // A controllable clock (still ticking on its own) lets a test jump past a request bound.
+  if (clock) await page.clock.install();
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
   await page.exposeFunction('serveOriginal', originalServer(original));
@@ -150,8 +204,8 @@ const painted = frame => frame.$eval('#canvas', c => {
 
 test('exports the resource the backend registers', () => {
   // The CSP is part of the host's template cache key: the empty-CSP body gets a new URI.
-  assert.equal(attachmentReaderUri, 'ui://sundark/attachment-reader-v4.html');
-  for (const old of ['ui://sundark/attachment-reader.html', 'ui://sundark/attachment-reader-v2.html', 'ui://sundark/attachment-reader-v3.html'])
+  assert.equal(attachmentReaderUri, 'ui://sundark/attachment-reader-v5.html');
+  for (const old of ['ui://sundark/attachment-reader.html', 'ui://sundark/attachment-reader-v2.html', 'ui://sundark/attachment-reader-v3.html', 'ui://sundark/attachment-reader-v4.html'])
     assert(attachmentReaderAliases.includes(old), `${old} still served`);
   assert(attachmentReaderHtml.includes('read_attachment_original'));
   assert(attachmentReaderHtml.startsWith('<!doctype html>'));
@@ -381,6 +435,53 @@ async function originalFails(original, data, pattern) {
   assert.deepEqual(v.errors, []);
   return v;
 }
+
+test('file URL host rejections show a fixed stage without exposing host data or retrying', async () => {
+  for (const shape of ['object', 'error']) {
+    const v = await open('openai=1');
+    await v.frame.evaluate(shape => {
+      window.__urlFailures = 0;
+      window.openai.getFileDownloadUrl = async () => {
+        window.__urlFailures++;
+        throw shape === 'error' ? new Error('HOST_PRIVATE https://example.invalid/?token=PRIVATE_TOKEN file-PRIVATE')
+          : {message: 'HOST_PRIVATE', url: 'https://example.invalid/?token=PRIVATE_TOKEN', fileId: 'file-PRIVATE'};
+      };
+    }, shape);
+    await v.host(o => window.testHost.result(o), read1);
+    await v.frame.waitForFunction(() => document.getElementById('original-msg').classList.contains('error'));
+    const message = await text(v.frame, '#original-msg');
+    assert.match(message, /첨부 파일의 다운로드 주소를 받지 못했어요/);
+    assert(!/HOST_PRIVATE|PRIVATE_TOKEN|file-PRIVATE|https?:|\[object Object\]/.test(message));
+    assert.equal(await v.frame.evaluate(() => window.__urlFailures), 1);
+    assert.equal(await v.host(() => window.testHost.calls.originals.length), 0, 'no tool call after URL failure');
+    assert(await v.frame.$$eval('#segments li[role=option]', l => l.length) > 0, 'source sentences remain available');
+    await v.page.close();
+  }
+});
+
+test('both tool transports sanitize rejected Error and object values for full and content-only results', async () => {
+  const page = await browser.newPage({ignoreHTTPSErrors: true});
+  await page.goto(`${origin}/host-harness.html`);
+  for (const method of ['callTool', 'callToolResult']) for (const transport of ['mcp', 'openai']) for (const shape of ['object', 'error']) {
+    const result = await page.evaluate(args => window.toolFailure(args), {method, transport, shape});
+    assert.equal(result.outcome, 'failed');
+    assert.match(result.text, /Sundark 도구의 응답을 받지 못했어요/);
+    assert(!/HOST_PRIVATE|PRIVATE_TOKEN|file-PRIVATE|https?:|\[object Object\]/.test(result.text));
+    assert.equal(result.calls, 1, 'one attempted call, no retry or transport switch');
+  }
+  await page.close();
+});
+
+test('an unknown non-Error original-load failure has a fixed display backstop', async () => {
+  const v = await open('openai=1');
+  await v.frame.evaluate(() => { crypto.subtle.digest = async () => { throw {message: 'HOST_PRIVATE', url: 'https://example.invalid/?token=PRIVATE_TOKEN'}; }; });
+  await v.host(o => window.testHost.result(o), read1);
+  await v.frame.waitForFunction(() => document.getElementById('original-msg').classList.contains('error'));
+  const message = await text(v.frame, '#original-msg');
+  assert.match(message, /원문 PDF를 불러오는 중 알 수 없는 오류가 발생했어요/);
+  assert(!/HOST_PRIVATE|PRIVATE_TOKEN|https?:|\[object Object\]/.test(message));
+  await v.page.close();
+});
 
 test('the original arrives in chunks through the bridge and renders from the reassembled bytes', async () => {
   requests.length = 0;
@@ -716,7 +817,7 @@ test('a fully read document shows complete, and a render keeps it', async () => 
   const restoredView = await open('');
   await restoredView.frame.setInputFiles('#restore-start', {name: 'x.json', mimeType: 'application/json', buffer: Buffer.from(exported)});
   await restoredView.frame.waitForFunction(() => document.getElementById('read-state').textContent.length > 0);
-  assert.equal(await restoredView.frame.$eval('#read-state', e => e.dataset.complete), 'true');
+  assert.equal(await restoredView.frame.$eval('#read-state', e => e.dataset.complete), 'false');
   assert.match(await text(restoredView.frame, '#read-state'), /불러온 JSON 파일[\s\S]*Sundark가 확인한 것은 아니에요/);
   assert.doesNotMatch(await text(restoredView.frame, '#read-state'), /문서 전체의 원문을 읽었어요/);
   await restoredView.page.close();
@@ -914,4 +1015,506 @@ test('teardown clears the document and late work does not bring it back', async 
   assert.deepEqual(after, {options: 0, stage: true, text: false});
   assert.deepEqual(errors, []);
   await page.close();
+});
+
+// ---------------- requests to the host: one sender, bounded, always answered on screen ----------------
+const MESSAGE_CONTROLS = ['#translate-next', '#ask-summary', '#ask-anatomy', '#ask', '#ask-selected', '#save-yes'];
+const EXPORT_CONTROLS = ['#export-md', '#export-json', '#copy-md'];
+const controls = (frame, sels = MESSAGE_CONTROLS) => frame.evaluate(s => s.map(q => document.querySelector(q).disabled), sels);
+const all = (value, sels = MESSAGE_CONTROLS) => sels.map(() => value);
+const followUps = frame => frame.evaluate(() => window.__followUps || []);
+const other = {...read1, attachment: {...read1.attachment, fileId: 'file-OTHER', fileName: 'other.pdf', pdfSha256: 'c'.repeat(64)}};
+const SENDING = '대화에 요청을 보내는 중…', SENT = '대화에 요청을 보냈어요.';
+async function opened(query, options) {
+  const v = await open(query, undefined, {}, options);
+  await v.host(o => window.testHost.result(o), read1);
+  await v.frame.waitForSelector('#segments li[role=option]');
+  return v;
+}
+/** An earlier, unrelated failure on the card (a page read the tool does not answer). */
+async function loadError(v) {
+  await v.frame.click('#load-next');
+  await v.frame.waitForFunction(() => !document.getElementById('error').hidden);
+  return text(v.frame, '#error');
+}
+const settle = (v, kind, value) => v.host(([k, x]) => window.testHost.settle(k, x), [kind, value]);
+
+test("ChatGPT's own follow-up helper, when present, is the one sender: one call per click, never ui/message too", async () => {
+  const v = await opened('openai=1&followup=ok');
+  await v.frame.click('#translate-next');
+  await v.frame.waitForFunction(t => document.getElementById('status').textContent === t, SENT);
+  const sent = await followUps(v.frame);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].prompt, /read_attached_pdf/);
+  assert.equal(sent[0].scrollToBottom, true);
+  await v.page.waitForTimeout(200);
+  assert.deepEqual(await v.host(() => window.testHost.calls.messages), [], 'the advertised ui/message is not also used');
+  assert.deepEqual(await controls(v.frame), all(false));
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+  // The helper alone is enough to offer the controls.
+  const alone = await opened('openai=1&followup=ok&nomessage=1');
+  assert.deepEqual(await controls(alone.frame), all(false));
+  await alone.page.close();
+});
+
+test('without the helper the advertised ui/message is the sender; with neither, every message control is off', async () => {
+  const v = await opened('openai=1');
+  await v.frame.click('#ask-summary');
+  await v.frame.waitForFunction(t => document.getElementById('status').textContent === t, SENT);
+  assert.equal((await v.host(() => window.testHost.calls.messages)).length, 1);
+  assert.deepEqual(await followUps(v.frame), []);
+  await v.page.close();
+  const none = await opened('openai=1&nomessage=1');
+  assert.deepEqual(await controls(none.frame), all(true));
+  await none.page.close();
+});
+
+for (const [name, query, mode] of [['helper', 'openai=1&followup=hang', null], ['ui/message', 'openai=1', 'hang']]) {
+  test(`a ${name} request the host never answers: pending at once, unconfirmed after 15 s, never retried or switched`, async () => {
+    const v = await opened(query, {clock: true});
+    if (mode) await v.host(m => { window.testHost.replies.message = m; }, mode);
+    const earlier = await loadError(v);
+    await v.frame.click('#translate-next');
+    assert.equal(await text(v.frame, '#status'), SENDING, 'pending shows at once');
+    assert.deepEqual(await controls(v.frame), all(true), 'every message control is off while pending');
+    await v.page.clock.fastForward(14_000);
+    assert.equal(await text(v.frame, '#status'), SENDING, 'still pending before the bound');
+    await v.page.clock.fastForward(1_500);
+    await v.frame.waitForFunction(() => /전달됐는지 확인하지 못했어요/.test(document.getElementById('status').textContent));
+    const status = await text(v.frame, '#status');
+    assert.match(status, /대화에 새 메시지가 보이는지 확인/);
+    assert(!/https?:|read_attached_pdf|-320|ui\/message|sendFollowUp|timeout/i.test(status), status);
+    assert.equal(await text(v.frame, '#error'), earlier, 'an unconfirmed send is not reported as a failure');
+    assert.deepEqual(await controls(v.frame), all(false), 'the controls come back');
+    assert.equal(await v.frame.evaluate(() => document.activeElement?.id), 'translate-next', 'keyboard focus returns to the control');
+    await v.page.clock.fastForward(90_000);
+    await v.page.waitForTimeout(200);
+    const sent = [(await followUps(v.frame)).length, (await v.host(() => window.testHost.calls.messages)).length];
+    assert.deepEqual(sent, mode ? [0, 1] : [1, 0], 'one sender, once: no retry and no switch');
+    assert.deepEqual(v.errors, []);
+    await v.page.close();
+  });
+}
+
+test('a refused request shows its own error, even after an earlier load error, without host text', async () => {
+  for (const [query, mode] of [['openai=1', 'deny']]) {
+    const v = await opened(query);
+    if (mode) await v.host(m => { window.testHost.replies.message = m; }, mode);
+    const earlier = await loadError(v);
+    await v.frame.click('#ask-summary');
+    await v.frame.waitForFunction(e => document.getElementById('error').textContent !== e, earlier);
+    const error = await text(v.frame, '#error');
+    assert.match(error, /대화에 보내지 않았어요/, query);
+    assert(!/https?:|example\.invalid|denied|prepare_attachment_task/i.test(error), error);
+    assert.notEqual(await text(v.frame, '#status'), SENDING);
+    assert.deepEqual(await controls(v.frame), all(false));
+    if (mode) {
+      // The next request that goes through clears that error; the card's first error remains.
+      await v.host(() => { window.testHost.replies.message = undefined; });
+      await v.frame.click('#translate-next');
+      await v.frame.waitForFunction(t => document.getElementById('status').textContent === t, SENT);
+      assert.equal(await text(v.frame, '#error'), earlier);
+    }
+    assert.deepEqual(v.errors, []);
+    await v.page.close();
+  }
+});
+
+test('a request the host took but never acknowledged is unconfirmed, not refused: never retried or switched', async () => {
+  // The helper takes the request, then its answer is lost (it rejects with host text).
+  const v = await opened('openai=1&followup=deny');
+  const earlier = await loadError(v);
+  await v.frame.click('#translate-next');
+  await v.frame.waitForFunction(() => /전달됐는지 확인하지 못했어요/.test(document.getElementById('status').textContent));
+  const status = await text(v.frame, '#status');
+  assert.match(status, /보이지 않을 때만 다시 요청/);
+  assert(!/https?:|example\.invalid|denied|read_attached_pdf|보내지 않았어요/i.test(status), status);
+  assert.equal(await text(v.frame, '#error'), earlier, 'a lost answer is not reported as a failure');
+  assert.deepEqual(await controls(v.frame), all(false), 'the controls come back');
+  await v.page.waitForTimeout(300);
+  assert.equal((await followUps(v.frame)).length, 1, 'taken once, never retried');
+  assert.deepEqual(await v.host(() => window.testHost.calls.messages), [], 'never switched to ui/message');
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+  // ui/message on the real SDK: only the host's own refusal says not sent. A connection that drops
+  // after the host took the message (the SDK's own -32000) or an unreadable answer stays unknown.
+  const page = await browser.newPage({ignoreHTTPSErrors: true});
+  const errors = [];
+  page.on('pageerror', e => errors.push(String(e)));
+  await page.goto(`${origin}/host-harness.html`);
+  const take = mode => page.evaluate(m => window.take(m), mode);
+  assert.deepEqual(await take('ok'), {outcome: 'sent', taken: ['prompt-ok']});
+  const refused = await take('deny');
+  assert.deepEqual([refused.outcome, refused.taken], ['refused', ['prompt-deny']]);
+  assert.match(refused.text, /대화에 보내지 않았어요/);
+  for (const mode of ['lost', 'garbled']) {
+    const r = await take(mode);
+    assert.deepEqual([r.outcome, r.taken], ['unconfirmed', [`prompt-${mode}`]], mode);
+    assert.match(r.text, /전달됐는지 확인하지 못했어요/, mode);
+  }
+  for (const r of [refused, await take('lost'), await take('garbled')]) assert(!/https?:|example\.invalid|denied|-320|prompt-/i.test(r.text), r.text);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('a late answer changes nothing: not after a newer request, not on a replaced document', async () => {
+  const v = await opened('openai=1&followup=manual', {clock: true});
+  await v.frame.click('#translate-next');
+  await v.page.clock.fastForward(15_500);
+  await v.frame.waitForFunction(() => /확인하지 못했어요/.test(document.getElementById('status').textContent));
+  await v.frame.click('#ask-summary');
+  assert.equal(await text(v.frame, '#status'), SENDING);
+  await v.frame.evaluate(() => window.__settle.shift()());
+  await v.page.waitForTimeout(200);
+  assert.equal(await text(v.frame, '#status'), SENDING, 'the first, late answer does not settle the newer request');
+  assert.deepEqual(await controls(v.frame), all(true));
+  await v.frame.evaluate(() => window.__settle.shift()());
+  await v.frame.waitForFunction(t => document.getElementById('status').textContent === t, SENT);
+  // A request out when the attachment changes: its answer never reaches the new document.
+  await v.frame.click('#translate-next');
+  await v.host(o => window.testHost.result(o), other);
+  await v.frame.waitForFunction(() => document.getElementById('title').textContent === 'other.pdf');
+  assert.deepEqual(await controls(v.frame), all(false), 'the new document starts with its controls on');
+  const shown = await text(v.frame, '#status');
+  assert.notEqual(shown, SENDING);
+  await v.frame.evaluate(() => window.__settle.shift()());
+  await v.page.waitForTimeout(200);
+  assert.equal(await text(v.frame, '#status'), shown);
+  assert.equal((await followUps(v.frame)).length, 3);
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+test('export: capability-aware buttons, pending, bounded, and no claim that a file exists', async () => {
+  // No download capability: the file buttons are off and the copy is offered instead.
+  const none = await opened('openai=1&nodownload=1');
+  assert.deepEqual(await controls(none.frame, EXPORT_CONTROLS), [true, true, false]);
+  assert(!(await none.frame.$eval('#export-hint', e => e.hidden)));
+  assert.match(await text(none.frame, '#export-hint'), /Markdown 복사/);
+  await none.page.close();
+
+  const v = await opened('openai=1', {clock: true});
+  assert(await v.frame.$eval('#export-hint', e => e.hidden));
+  // Acknowledged: handed to the host, with no claim that a file was saved.
+  await v.frame.click('#export-json');
+  await v.frame.waitForFunction(() => /넘겼어요/.test(document.getElementById('export-msg').textContent));
+  const ack = await text(v.frame, '#export-msg');
+  assert.match(ack, /확인해 주세요/);
+  assert(!/저장했어요|내려받았어요|저장됐어요/.test(ack), ack);
+  // Refused: said so, with the copy as the way out.
+  await v.host(() => { window.testHost.replies.download = 'deny'; });
+  await v.frame.click('#export-md');
+  await v.frame.waitForFunction(() => /거절/.test(document.getElementById('export-msg').textContent));
+  assert.match(await text(v.frame, '#export-msg'), /Markdown 복사/);
+  // Never answered: pending at once, bounded, the buttons come back.
+  await v.host(() => { window.testHost.replies.download = 'hang'; });
+  await v.frame.click('#export-md');
+  assert.equal(await text(v.frame, '#export-msg'), '내보내기를 요청하는 중…');
+  assert.deepEqual(await controls(v.frame, EXPORT_CONTROLS), [true, true, false]);
+  await v.page.clock.fastForward(15_500);
+  await v.frame.waitForFunction(() => /답하지 않았어요/.test(document.getElementById('export-msg').textContent));
+  assert.match(await text(v.frame, '#export-msg'), /Markdown 복사/);
+  assert.deepEqual(await controls(v.frame, EXPORT_CONTROLS), [false, false, false]);
+  assert.equal((await v.host(() => window.testHost.calls.downloads)).length, 3, 'each click asked once, nothing retried');
+  // A late answer for a replaced document says nothing there.
+  await v.host(() => { window.testHost.replies.download = 'manual'; });
+  await v.frame.click('#export-json');
+  await v.host(o => window.testHost.result(o), other);
+  await v.frame.waitForFunction(() => document.getElementById('title').textContent === 'other.pdf');
+  await settle(v, 'download');
+  await v.page.waitForTimeout(200);
+  assert(!/넘겼어요|요청하는 중/.test(await text(v.frame, '#export-msg')));
+  assert.deepEqual(await controls(v.frame, EXPORT_CONTROLS), [false, false, false]);
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+test('restoring into a live reader preserves original, identity and an in-flight page read', async () => {
+  const {page, frame, host, errors} = await open('openai=1');
+  await host(o => window.testHost.result(o), await render(1));
+  await frame.waitForFunction(() => !document.getElementById('stage').hidden);
+  const originalCalls = (await host(() => window.testHost.calls.originals)).length;
+  const snapshot = {format: 'sundark-ephemeral-reading', version: 1, language: 'Korean',
+    attachment: {fileName: 'snapshot.pdf', pdfSha256: pdfSha, numPages: 2},
+    pages: [{...read1.pages[0], sourceHash: read1.sourceHash}],
+    translations: [{id: ids[0], text: 'must not overwrite live'}, {id: ids[1], text: 'restored second sentence'}], analysis: []};
+  // Keep the page read pending while the import settles: no generation change may discard it.
+  await host(reply => { window.testHost.replies.tool = reply; window.testHost.replies.toolHold = new Promise(r => window.releaseRead = r); }, read2);
+  await frame.click('#load-next');
+  await page.waitForFunction(() => window.testHost.calls.tools.length === 1);
+  await frame.setInputFiles('#restore', {name: 'snapshot.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot))});
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('합쳤어요'));
+  assert(!(await frame.$eval('#stage', e => e.hidden)));
+  assert.equal((await host(() => window.testHost.calls.originals)).length, originalCalls, 'same original is retained');
+  const translations = await frame.$$eval('#segments .tr', l => l.map(e => e.textContent));
+  assert.deepEqual(translations.slice(0, 2), ['번역된 문장 1입니다.', 'restored second sentence']);
+  await host(() => window.releaseRead());
+  await frame.waitForFunction(() => document.getElementById('progress-text').textContent.includes('2/2'));
+  const called = (await host(() => window.testHost.calls.tools))[0];
+  assert.equal(called.arguments.file.file_id, 'file-TEST');
+  // A different snapshot must not replace this live document or its canvas.
+  snapshot.attachment.pdfSha256 = 'f'.repeat(64);
+  await frame.setInputFiles('#restore', {name: 'other.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot))});
+  await frame.waitForFunction(() => !document.getElementById('error').hidden);
+  assert.match(await text(frame, '#error'), /다른 파일/);
+  assert(!(await frame.$eval('#stage', e => e.hidden)));
+  assert.equal((await host(() => window.testHost.calls.originals)).length, originalCalls);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('partial imported pages are disclosed separately from freshly read pages', async () => {
+  const {page, frame, host} = await open('openai=1');
+  await host(o => window.testHost.result(o), read1);
+  await frame.waitForSelector('#segments li[role=option]');
+  const snapshot = {format: 'sundark-ephemeral-reading', version: 1,
+    attachment: {pdfSha256: pdfSha, numPages: 2}, pages: read2.pages, translations: [], analysis: []};
+  await frame.setInputFiles('#restore', {name: 'partial.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot))});
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('합쳤어요'));
+  assert.match(await text(frame, '#progress-text'), /원문 1\/2페이지 읽음 · JSON에서 가져온 원문 1페이지\(미확인\)/);
+  assert.match(await text(frame, '#pages-note'), /JSON에서 가져온 원문\(미확인\): 2/);
+  assert.equal(await frame.$eval('#read-state', e => e.dataset.complete), 'false');
+  // Re-reading verifies the page and removes the imported-only label.
+  await host(o => window.testHost.result(o), read2);
+  await frame.waitForFunction(() => document.getElementById('progress-text').textContent.includes('원문 2/2'));
+  assert.doesNotMatch(await text(frame, '#progress-text'), /JSON/);
+  await page.close();
+});
+
+test('an imported future page is neither echoed as attempted nor skipped by fallback scheduling', async () => {
+  const threeFile = {...file, download_url: `${backendOrigin}/three.pdf`};
+  const one = await readAttached({file: threeFile, pages: [1]}, deps);
+  const two = await readAttached({file: threeFile, pages: [2], attemptedPages: [1]}, deps);
+  const three = await readAttached({file: threeFile, pages: [3], attemptedPages: [1, 2]}, deps);
+  const {page, frame, host, errors} = await open('openai=1', undefined, {source: 'three.pdf'});
+  await host(o => window.testHost.result(o), one);
+  await frame.waitForFunction(() => !document.getElementById('stage').hidden);
+  const originalCalls = (await host(() => window.testHost.calls.originals)).length;
+  const snapshot = {format: 'sundark-ephemeral-reading', version: 1,
+    attachment: {pdfSha256: one.attachment.pdfSha256, numPages: 3}, pages: three.pages, translations: [], analysis: []};
+  await frame.setInputFiles('#restore', {name: 'future.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot))});
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('합쳤어요'));
+  await host(o => window.testHost.replies.tool = {...o, nextPages: []}, two);
+  await frame.click('#load-next');
+  await page.waitForFunction(() => window.testHost.calls.tools.length === 1);
+  assert.deepEqual((await host(() => window.testHost.calls.tools))[0].arguments.attemptedPages, [1]);
+  await frame.waitForFunction(() => document.getElementById('progress-text').textContent.includes('원문 2/3'));
+  assert.equal(await frame.$eval('#read-state', e => e.dataset.complete), 'false');
+  assert(!(await frame.$eval('#load-next', e => e.disabled)), 'unverified imported page remains eligible for a fresh read');
+  await host(o => window.testHost.replies.tool = o, three);
+  await frame.click('#load-next');
+  await page.waitForFunction(() => window.testHost.calls.tools.length === 2);
+  const next = (await host(() => window.testHost.calls.tools))[1].arguments;
+  assert.deepEqual(next.pages, [3]);
+  assert.deepEqual(next.attemptedPages, [1, 2]);
+  await frame.waitForFunction(() => document.getElementById('read-state').dataset.complete === 'true');
+  assert(!(await frame.$eval('#stage', e => e.hidden)));
+  assert.equal((await host(() => window.testHost.calls.originals)).length, originalCalls);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('snapshot-only views can replace exports and label imported analysis without grounding claims', async () => {
+  const {page, frame} = await open('');
+  const snapshot = {format: 'sundark-ephemeral-reading', version: 1,
+    attachment: {pdfSha256: pdfSha, fileName: 'first.pdf', numPages: 2}, pages: read1.pages, translations: [],
+    analysis: [{kind: 'summary', language: 'Korean', sourcePages: [1], title: '요약', text: 'imported note'}]};
+  await frame.setInputFiles('#restore-start', {name: 'first.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot))});
+  await frame.waitForFunction(() => document.getElementById('results').textContent.includes('imported note'));
+  assert.match(await text(frame, '#results .scope'), /JSON에서 가져온 결과\(미확인\)/);
+  assert.doesNotMatch(await text(frame, '#results .scope'), /근거 페이지|유효해요|지금 보는 페이지 포함/);
+  snapshot.attachment = {...snapshot.attachment, pdfSha256: 'f'.repeat(64), fileName: 'second.pdf'};
+  await frame.setInputFiles('#restore', {name: 'second.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot))});
+  await frame.waitForFunction(() => document.getElementById('title').textContent === 'second.pdf');
+  assert.doesNotMatch(await text(frame, '#status'), /파일 연결은 유지/);
+  assert.match(await text(frame, '#status'), /원문 PDF는 같은 파일/);
+  assert(await frame.$eval('#error', e => e.hidden));
+  await page.close();
+});
+
+test('a snapshot-only reader replaces a different legacy export without claiming a live connection', async () => {
+  const {page, frame} = await open('');
+  const snapshot = {format: 'sundark-ephemeral-reading', version: 1,
+    attachment: {pdfSha256: pdfSha, fileName: 'legacy-first.pdf', numPages: 2}, pages: read1.pages, translations: [], analysis: []};
+  await frame.setInputFiles('#restore-start', {name: 'first.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot))});
+  await frame.waitForFunction(() => document.getElementById('title').textContent === 'legacy-first.pdf');
+  snapshot.attachment = {...snapshot.attachment, pdfSha256: 'e'.repeat(64), fileName: 'legacy-second.pdf'};
+  await frame.setInputFiles('#restore', {name: 'second.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot))});
+  await frame.waitForFunction(() => document.getElementById('title').textContent === 'legacy-second.pdf' || !document.getElementById('error').hidden);
+  assert.equal(await text(frame, '#title'), 'legacy-second.pdf');
+  assert.doesNotMatch(await text(frame, '#status'), /파일 연결은 유지/);
+  assert(await frame.$eval('#error', e => e.hidden));
+  await page.close();
+});
+
+// ---------------- display modes: declared, feature-detected, the host's answer decides ----------------
+const MODES = 'openai=1&modes=inline,fullscreen';
+const display = frame => frame.$eval('#display-mode', b => ({hidden: b.hidden, pressed: b.getAttribute('aria-pressed'), disabled: b.disabled, name: b.textContent.trim()}));
+const displayCalls = v => v.host(() => window.testHost.calls.displayModes);
+const hostContext = (v, change) => v.host(c => window.testHost.context(c), change);
+const DISPLAY_PENDING = '화면 전환을 요청하는 중…';
+
+test('the view declares inline and fullscreen, never pip, and requests no mode by itself', async () => {
+  const v = await opened(MODES);
+  const caps = await v.host(() => window.testHost.appCapabilities());
+  assert.deepEqual(caps.availableDisplayModes, ['inline', 'fullscreen']);
+  assert.deepEqual(await display(v.frame), {hidden: false, pressed: 'false', disabled: false, name: '전체 화면'});
+  await v.page.waitForTimeout(300);
+  assert.deepEqual(await displayCalls(v), [], 'no automatic fullscreen or pip');
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+test('the fullscreen control is offered only when the host lists the mode it would switch to', async () => {
+  // No modes in the host context, inline only, and fullscreen without a way back to inline.
+  for (const query of ['openai=1', 'openai=1&modes=inline', 'openai=1&modes=fullscreen&mode=fullscreen']) {
+    const v = await opened(query);
+    assert.equal((await display(v.frame)).hidden, true, query);
+    assert.deepEqual(await displayCalls(v), [], query);
+    assert.deepEqual(v.errors, []);
+    await v.page.close();
+  }
+});
+
+test('a granted request paints the mode the host returned, one request per press, and focus returns', async () => {
+  const v = await opened(MODES);
+  await v.frame.focus('#display-mode');
+  await v.frame.press('#display-mode', 'Enter');
+  await v.frame.waitForFunction(() => document.getElementById('display-mode').getAttribute('aria-pressed') === 'true');
+  assert.deepEqual(await displayCalls(v), ['fullscreen']);
+  assert.equal(await text(v.frame, '#status'), '전체 화면으로 보고 있어요.');
+  assert.equal(await v.frame.evaluate(() => document.activeElement?.id), 'display-mode', 'keyboard focus returns to the control');
+  await v.frame.click('#display-mode');
+  await v.frame.waitForFunction(() => document.getElementById('display-mode').getAttribute('aria-pressed') === 'false');
+  assert.deepEqual(await displayCalls(v), ['fullscreen', 'inline']);
+  assert.equal(await text(v.frame, '#status'), '대화 안의 카드로 보고 있어요.');
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+test('a host that refuses and returns inline keeps the control unpressed and says so', async () => {
+  const v = await opened(MODES);
+  await v.host(() => { window.testHost.replies.display = 'refuse'; });
+  await v.frame.click('#display-mode');
+  await v.frame.waitForFunction(() => /화면을 바꾸지 않았어요/.test(document.getElementById('status').textContent));
+  assert.deepEqual(await display(v.frame), {hidden: false, pressed: 'false', disabled: false, name: '전체 화면'});
+  assert.deepEqual(await displayCalls(v), ['fullscreen'], 'never retried');
+  assert.equal(await v.frame.evaluate(() => document.activeElement?.id), 'display-mode');
+  assert(await v.frame.$eval('#error', e => e.hidden), 'a refusal is not a document error');
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+test('display mode keeps keyboard focus on the status when the host hides the pending control', async () => {
+  const v = await opened(MODES);
+  await v.host(() => { window.testHost.replies.display = 'manual'; });
+  await v.frame.focus('#display-mode');
+  await v.frame.press('#display-mode', 'Enter');
+  await v.frame.waitForFunction(() => document.getElementById('display-mode').disabled);
+  await v.page.waitForFunction(() => window.testHost.calls.displayModes.length === 1);
+  const scroll = await v.frame.evaluate(() => {
+    const space = document.createElement('div'); space.style.height = '2000px'; document.body.appendChild(space);
+    window.scrollTo(0, 300); return window.scrollY;
+  });
+  assert(scroll > 0, 'the status is above the current viewport');
+  await hostContext(v, {availableDisplayModes: ['inline']});
+  assert.equal((await display(v.frame)).disabled, true, 'the outstanding request remains pending');
+  await settle(v, 'display', {mode: 'inline'});
+  await v.frame.waitForFunction(() => !document.getElementById('display-mode').disabled);
+  assert.match(await text(v.frame, '#status'), /화면을 바꾸지 않았어요/);
+  assert.equal((await display(v.frame)).hidden, true, 'the unsupported control is hidden on settlement');
+  assert.equal(await v.frame.evaluate(() => document.activeElement?.id), 'status', 'focus does not fall to body or a hidden button');
+  assert.equal(await v.frame.evaluate(() => window.scrollY), scroll, 'restoring focus does not scroll the view');
+  assert.deepEqual(await v.frame.$eval('#status', e => ({role: e.getAttribute('role'), live: e.getAttribute('aria-live'), tabIndex: e.tabIndex})),
+    {role: 'status', live: 'polite', tabIndex: -1});
+  assert.deepEqual(await displayCalls(v), ['fullscreen'], 'one request');
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+test('a host error changes nothing and shows fixed text, never the host text', async () => {
+  const v = await opened(MODES);
+  await v.host(() => { window.testHost.replies.display = 'deny'; });
+  await v.frame.click('#display-mode');
+  await v.frame.waitForFunction(() => /처리하지 못했어요/.test(document.getElementById('status').textContent));
+  const status = await text(v.frame, '#status');
+  assert(!/https?:|denied|-320|request-display-mode/i.test(status), status);
+  assert.deepEqual(await display(v.frame), {hidden: false, pressed: 'false', disabled: false, name: '전체 화면'});
+  assert.deepEqual(await displayCalls(v), ['fullscreen']);
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+test('a display request the host never answers: pending at once, unconfirmed after 15 s, never retried', async () => {
+  const v = await opened(MODES, {clock: true});
+  await v.host(() => { window.testHost.replies.display = 'hang'; });
+  await v.frame.click('#display-mode');
+  assert.equal(await text(v.frame, '#status'), DISPLAY_PENDING, 'pending shows at once');
+  assert.equal((await display(v.frame)).disabled, true, 'one request at a time');
+  await v.page.clock.fastForward(14_000);
+  assert.equal(await text(v.frame, '#status'), DISPLAY_PENDING, 'still pending before the bound');
+  await v.page.clock.fastForward(1_500);
+  await v.frame.waitForFunction(() => /답하지 않았어요/.test(document.getElementById('status').textContent));
+  assert.match(await text(v.frame, '#status'), /바뀌었는지 확인/);
+  assert.deepEqual(await display(v.frame), {hidden: false, pressed: 'false', disabled: false, name: '전체 화면'}, 'an unknown outcome keeps the last known mode');
+  assert.equal(await v.frame.evaluate(() => document.activeElement?.id), 'display-mode');
+  await v.page.clock.fastForward(90_000);
+  await v.page.waitForTimeout(200);
+  assert.deepEqual(await displayCalls(v), ['fullscreen'], 'never retried');
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
+});
+
+test('a late answer after the bound, or after teardown, never repaints the control', async () => {
+  const late = await opened(MODES, {clock: true});
+  await late.host(() => { window.testHost.replies.display = 'manual'; });
+  await late.frame.click('#display-mode');
+  await late.page.clock.fastForward(15_500);
+  await late.frame.waitForFunction(() => /답하지 않았어요/.test(document.getElementById('status').textContent));
+  const unconfirmed = await text(late.frame, '#status');
+  await settle(late, 'display', {mode: 'fullscreen'});
+  await late.page.waitForTimeout(300);
+  assert.equal((await display(late.frame)).pressed, 'false', 'a late answer is dropped');
+  assert.equal(await text(late.frame, '#status'), unconfirmed);
+  assert.deepEqual(late.errors, []);
+  await late.page.close();
+
+  const closed = await opened(MODES);
+  await closed.host(() => { window.testHost.replies.display = 'manual'; });
+  await closed.frame.click('#display-mode');
+  await closed.host(() => window.testHost.teardown());
+  await closed.frame.waitForFunction(() => document.getElementById('display-mode').hidden);
+  const after = await text(closed.frame, '#status');
+  await settle(closed, 'display', {mode: 'fullscreen'});
+  await closed.page.waitForTimeout(300);
+  assert.deepEqual(await display(closed.frame), {hidden: true, pressed: 'false', disabled: false, name: '전체 화면'}, 'nothing after teardown');
+  assert.equal(await text(closed.frame, '#status'), after);
+  assert.deepEqual(closed.errors, []);
+  await closed.page.close();
+});
+
+test('host context changes repaint the control, also while a request is out', async () => {
+  const v = await opened(MODES);
+  await hostContext(v, {displayMode: 'fullscreen'});
+  await v.frame.waitForFunction(() => document.getElementById('display-mode').getAttribute('aria-pressed') === 'true');
+  await hostContext(v, {displayMode: 'inline'});
+  await v.frame.waitForFunction(() => document.getElementById('display-mode').getAttribute('aria-pressed') === 'false');
+  await hostContext(v, {availableDisplayModes: ['inline']});
+  await v.frame.waitForFunction(() => document.getElementById('display-mode').hidden);
+  await hostContext(v, {availableDisplayModes: ['inline', 'fullscreen']});
+  await v.frame.waitForFunction(() => !document.getElementById('display-mode').hidden);
+  assert.deepEqual(await displayCalls(v), [], 'context changes send no request');
+
+  await v.host(() => { window.testHost.replies.display = 'manual'; });
+  await v.frame.click('#display-mode');
+  await hostContext(v, {displayMode: 'fullscreen'});
+  await v.frame.waitForFunction(() => document.getElementById('display-mode').getAttribute('aria-pressed') === 'true');
+  assert.equal((await display(v.frame)).disabled, true, 'still one request at a time');
+  await settle(v, 'display', {mode: 'fullscreen'});
+  await v.frame.waitForFunction(() => !document.getElementById('display-mode').disabled);
+  assert.equal((await display(v.frame)).pressed, 'true');
+  assert.deepEqual(await displayCalls(v), ['fullscreen']);
+  assert.deepEqual(v.errors, []);
+  await v.page.close();
 });
