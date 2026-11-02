@@ -602,6 +602,46 @@ class NonAsciiLowercaseContinuationTests(unittest.TestCase):
         self.assertEqual(n_at(t, "σ is"), 2)
 
 
+class SpacedEllipsisTests(unittest.TestCase):
+    """TeX's \\dots comes out as spaced periods ("{ x 1 , . . . , x n }"), and the segmenter
+    ended the sentence inside them, so one sentence came out as several short pieces."""
+
+    @staticmethod
+    def _merged(text: str, cuts: list[str]) -> list[str]:
+        """Merge `text` cut before each string in `cuts` (the segmenter's boundaries)."""
+        starts = [0] + [text.index(c) for c in cuts]
+        raw = list(zip(starts, starts[1:] + [len(text)]))
+        return [t for *_, t in _merge_fragments(raw, text)]
+
+    def test_a_list_goes_on_after_the_dots(self):
+        t = "Let the set { x 1 , . . . , x n } and { y 1 , . . . } be given. Each is a vector."
+        self.assertEqual(
+            self._merged(t, [". , x n }", "} be given.", "Each is"]),
+            [
+                "Let the set { x 1 , . . . , x n } and { y 1 , . . . } be given.",
+                "Each is a vector.",
+            ],
+        )
+
+    def test_an_operator_or_a_closing_quote_goes_on(self):
+        t = "Choose 0 ≤ h 1 < . . . < h k so that it holds."
+        self.assertEqual(self._merged(t, ["< h k"]), [t])
+        t = "As marked by “. . . ”, parts are omitted."
+        self.assertEqual(self._merged(t, ["”, parts"]), [t])
+
+    def test_a_new_sentence_or_a_page_number_starts_anew(self):
+        t = "Let σ 1 ≥ σ 2 ≥ . . . . Choose a target rank k."
+        self.assertEqual(
+            self._merged(t, ["Choose"]),
+            ["Let σ 1 ≥ σ 2 ≥ . . . .", "Choose a target rank k."],
+        )
+        t = "2.1 Setup . . . . . . . 4 2.2 Results . . . . . . 5"
+        self.assertEqual(
+            self._merged(t, ["4 2.2"]),
+            ["2.1 Setup . . . . . . .", "4 2.2 Results . . . . . . 5"],
+        )
+
+
 # Only when the model is already installed: loading it here must not trigger a download.
 @unittest.skipUnless(
     spacy_util.is_package("en_core_web_sm"), "spaCy model not installed"
@@ -618,6 +658,14 @@ class EndToEndNoSharedWordTests(unittest.TestCase):
         for s, _e, _st in segs:
             self.assertTrue(s == 0 or t[s - 1].isspace() or t[s].isspace(), segs)
         self.assertEqual(len(segs), 2, [st for *_, st in segs])
+
+    def test_spaced_ellipsis_stays_in_its_sentence(self):
+        t = (
+            "Given observations { O t − h +1 , . . . , O t } and actions { A t − h , . . . , "
+            "A t − 1 } , our goal is to predict { A t , . . . , A t + h ′ − 1 } . The next "
+            "sentence starts here."
+        )
+        self.assertEqual(len(pu._split_sentences(t)), 2, pu._split_sentences(t))
 
 
 if __name__ == "__main__":

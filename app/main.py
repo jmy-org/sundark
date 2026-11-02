@@ -352,8 +352,8 @@ _layout_lock = asyncio.Lock()
 # to the display equation beside it (as the sentence's "eqno") instead of dropping it as a
 # short fragment. v12: page 0 drops a footnote with an e-mail address, the authors' contact
 # block. v13: a line under both a furniture box and a body box goes by the more confident
-# box.)
-_LAYOUT_VERSION = 13
+# box. v14: a spaced ellipsis ("x 1 , . . . , x n") no longer ends a sentence.)
+_LAYOUT_VERSION = 14
 
 
 def _page_layout_cached(doc_id: str, page: int) -> dict:

@@ -258,7 +258,11 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   `_merge_fragments` rejoin those; the punctuation- and symbol-led rules apply only
   while the running text is not a finished sentence (`_ends_sentence`, which also
   accepts curly quotes, footnote marks and a spaced ". )"), so two real sentences are
-  not merged. Enumeration runs ("a) ... b) ... c)", "(1) ..., (2) ...") are split into
+  not merged. A spaced ellipsis from TeX's \dots ("{ x 1 , . . . , x n }") ends with a
+  period, so it needs its own rule (`_continues_ellipsis`): the text goes on when the next
+  fragment opens with punctuation, a closing bracket or quote, or an operator, and starts
+  anew after a page number (a table of contents' dot leader) or a capitalized word. Over 36
+  papers this rejoined 89 cuts in 12 of them. Enumeration runs ("a) ... b) ... c)", "(1) ..., (2) ...") are split into
   items by `_split_on_markers`; "Eqn.(1)" references and two-part subfigure phrases
   ("show (a) X and (b) Y") are left whole. Short prose that `_keep_sentence` would drop
   as a label (a lead-in before a display equation, "Then we have") is kept by
