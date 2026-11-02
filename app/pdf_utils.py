@@ -554,6 +554,22 @@ def _starts_closing(text: str, span: tuple[int, int]) -> bool:
     return text[span[0] : span[1]].lstrip()[:1] in _CLOSE_START
 
 
+# TeX's \dots comes out as spaced periods ("{ x 1 , . . . , x n }"), and the segmenter ends a
+# sentence inside or right after them. A fragment ending in such a run goes on when the next one
+# opens with punctuation, a closing bracket or quote, or an operator (", x n }", ". , x n }",
+# "< h k", "”"); a page number or a capitalized word after it (a table of contents' dot leader,
+# "σ 3 ≥ . . . ." + "Choose ...") starts anew.
+_ELLIPSIS_END = re.compile(r"(?:^|\s)\.(?:\s\.)+$")
+
+
+def _continues_ellipsis(t: str, text: str, span: tuple[int, int]) -> bool:
+    return bool(_ELLIPSIS_END.search(t)) and (
+        _starts_closing(text, span)
+        or _starts_math_cont(text, span)
+        or text[span[0] : span[1]].lstrip()[:1] == "”"
+    )
+
+
 def _merge_fragments(
     raw: list[tuple[int, int]], text: str
 ) -> list[tuple[int, int, str]]:
@@ -594,6 +610,9 @@ def _merge_fragments(
                 # this fragment ends inside a hyphenated compound split by a line break
                 # ("LIBERO-" + "Long", "GPT-" + "5.6 Sol", "base-" + "Λ CDM")
                 or re.search(r"[^\W_]-$", t)
+                # ... or inside a spaced ellipsis the list goes on after ("{ x 1 , . ." +
+                # ". , x n }")
+                or _continues_ellipsis(t, text, raw[i + 1])
                 # a sentence never ends on ',' or ';' ("( Holz & Hughes 2005 ;" + "Abbott et
                 # al. 2017", "In his seminal paper ," + "Hamilton proved") or on a standalone
                 # math operator (_MATH_OPEN_END) - but an enumeration item or bullet after it
