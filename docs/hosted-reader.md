@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `aa0d2770912b94d76b17a8718a63eb0844ffae2a` ("Support regional attachment hosts with per-account authentication"; in-band delivery in `1be30a6`) |
+| Exported Site commit | `d90e7e1fced7f518621029b1f5f99e6c1485867f` ("Complete MCP response envelopes for protocol 2026-07-28"; in-band delivery in `1be30a6`) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 

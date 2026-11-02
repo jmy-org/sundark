@@ -155,8 +155,10 @@ test('flag on: errors, refusals and unknown methods are sanitized classes', asyn
     {level: 'error', method: 'other', tool: undefined, resource: undefined, outcome: 'error', status: 415, reason: 'content_type'},
   ]);
   assert(!all.includes(SECRET), 'no marker anywhere in console output');
-  // Responses keep their existing shape: HTTP 200, an isError result or a -32601 error.
-  assert(responses.every(r => r.status === 200));
+  // Tool failures stay isError results; unknown resources and methods are JSON-RPC errors; refusals
+  // before a request is read carry their HTTP status.
+  assert.deepEqual(responses.map(r => r.status), [200, 200, 200, 200, 200, 400, 403, 415]);
+  assert.equal(responses[2].body.error.code, -32602);
   assert.equal(responses[3].body.error.code, -32601);
   assert.equal(responses[0].body.result.isError, true);
   assert.match(responses[0].body.result.content[0].text, /unsupported_host/);
