@@ -1,7 +1,7 @@
 import {env} from 'cloudflare:workers';
 /** Opt-in MCP protocol telemetry (SUNDARK_MCP_DIAGNOSTICS=1, default off): one console line per
  * /mcp request, `{"event":"sundark_mcp_observation",...}`, so a live probe shows which methods reach
- * the Site and how each ended, although HTTP is 200 even for an RPC error. Every field is a known
+ * the Site and how each ended, although HTTP is 200 for most RPC errors. Every field is a known
  * enum, a date-formatted version or a byte count: never params, arguments, URIs, file ids, headers,
  * identity, paper text or error messages. It never throws and never changes the response. */
 const METHODS=new Set(['initialize','server/discover','ping','notifications/initialized','tools/list','tools/call','resources/list','resources/read','resources/templates/list','prompts/list']);

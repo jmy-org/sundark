@@ -616,7 +616,8 @@ async function rpc(method, params, headers = signedIn) {
   globalThis.__requestHeaders = headers;
   try {
     const response = await POST(new Request('https://site.example/mcp', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method, params})}));
-    return (await response.json()).result;
+    const body = await response.json();
+    return body.result ?? {error: body.error};
   } finally { globalThis.__requestHeaders = undefined; }
 }
 const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
@@ -692,7 +693,7 @@ test('route: old reader URIs read the current body but only the new URIs are adv
     if (current === ATTACHMENT_URI) assert.deepEqual([alias._meta.ui.csp.connectDomains, alias._meta['openai/widgetCSP'].connect_domains], [[], []], old);
   }
   const unknown = await rpc('resources/read', {uri: 'ui://sundark/attachment-reader-v1.html'});
-  assert.equal(unknown.isError, true, 'unknown URIs still fail');
+  assert.equal(unknown.error.code, -32602, 'unknown URIs still fail, as a JSON-RPC error');
   assert.equal(unknown.contents, undefined);
 });
 
@@ -846,8 +847,9 @@ test('route: original requires sign-in and a same-origin request, before any dow
     const response = await POST(new Request('https://site.example/mcp', {method: 'POST', headers: {'content-type': 'application/json', origin: 'https://widget.example'},
       body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'tools/call', params: args})}));
     const body = await response.json();
-    assert.equal(body.result.isError, true);
-    assert.match(body.result.content[0].text, /Cross-origin/);
+    assert.equal(response.status, 403);
+    assert.equal(body.error.code, -32600);
+    assert.match(body.error.message, /Cross-origin/);
   } finally { globalThis.__requestHeaders = undefined; }
   assert.equal(bigRequests, before, 'nothing downloaded without identity or from another origin');
   const ok = await rpc('tools/call', args);
