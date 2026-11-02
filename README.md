@@ -86,7 +86,9 @@ Next time you only need `source .venv/bin/activate` before the `uvicorn` line.
 ## Papers folder (the library)
 
 Put your PDFs in **`sundark/papers/`** and they show up in the left sidebar.
-Click one to read it; hit ⟳ to rescan after adding files.
+Click one to read it; hit ⟳ to rescan after adding files. The **×** on a paper takes it
+out of the list: the PDF moves to `data/trash/`, and its translations and chat are kept
+(they come back if you add the same file again).
 
 Use a different folder without moving files:
 ```bash
