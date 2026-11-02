@@ -20,6 +20,8 @@ DOCS = DATA / "docs"
 CACHE = DATA / "cache"
 CHATS = DATA / "chats"
 PAPERS = DATA / "papers"
+# PDFs taken out of the Library folder (main.remove_paper); created on first use
+TRASH = DATA / "trash"
 
 for _d in (PDFS, DOCS, CACHE):
     _d.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -265,6 +266,27 @@ async def open_paper(req: OpenReq):
         return _schedule_prewarm(await _ingest(path.read_bytes()))
     except Exception as e:
         raise HTTPException(400, f"Could not read PDF: {e}") from e
+
+
+@app.post("/api/papers/remove")
+async def remove_paper(req: OpenReq):
+    """Take a PDF out of the Library: it moves to data/trash under the same relative path, so
+    nothing is lost. Its cached results and chat are kept (they are keyed by the file and the
+    paper, not the path) and come back if the same PDF is added again. Zotero items are
+    read-only and are never removed."""
+    path = (PAPERS_DIR / req.rel).resolve()
+    if not path.is_relative_to(PAPERS_DIR):
+        raise HTTPException(400, "Invalid path")
+    if not path.is_file() or path.suffix.lower() != ".pdf":
+        raise HTTPException(404, "Paper not found")
+    dest = store.TRASH / path.relative_to(PAPERS_DIR)
+    stem, suffix, i = dest.stem, dest.suffix, 1
+    while dest.exists():
+        dest = dest.with_name(f"{stem}-{i}{suffix}")
+        i += 1
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(path, dest)
+    return {"moved_to": str(dest)}
 
 
 # --- Zotero (read-only, through Zotero's local API) ---

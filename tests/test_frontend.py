@@ -51,3 +51,6 @@ class FrontendTests(unittest.TestCase):
 
     def test_zotero_list_ignores_stale_replies_and_pages_by_next(self):
         self.node("tests/frontend_zotero_list.test.js")
+
+    def test_folder_papers_can_be_removed_from_the_list(self):
+        self.node("tests/frontend_library_remove.test.js")

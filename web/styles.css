@@ -86,6 +86,14 @@ button { font: inherit; }
 .paperlist li.active { background: var(--accent); color: var(--accent-ink); }
 .paperlist li .meta { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
 .paperlist li.active .meta { color: var(--accent-ink); opacity: .75; }
+.paperlist li:has(> .lib-remove) { position: relative; padding-right: 34px; }
+.paperlist .lib-remove { position: absolute; top: 8px; right: 6px; width: 24px; height: 24px; padding: 0;
+  border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 16px; line-height: 1;
+  cursor: pointer; opacity: 0; }
+.paperlist li:hover .lib-remove, .paperlist .lib-remove:focus-visible { opacity: 1; }
+.paperlist .lib-remove:hover { background: var(--elev); color: var(--text); }
+.paperlist li.active .lib-remove { color: var(--accent-ink); }
+@media (hover: none) { .paperlist .lib-remove { opacity: 1; } }
 .paperlist .emptylib { color: var(--muted); font-size: 12px; padding: 12px; line-height: 1.5; }
 
 /* ---------- PDF ---------- */

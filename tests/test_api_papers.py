@@ -33,6 +33,7 @@ class PaperApiTests(unittest.TestCase):
             patch.object(store, "CACHE", root / "cache"),
             patch.object(store, "CHATS", root / "chats"),
             patch.object(store, "PAPERS", root / "papers"),
+            patch.object(store, "TRASH", root / "trash"),
             # upload() copies each PDF into the library folder; keep it out of papers/
             patch.object(main, "PAPERS_DIR", root / "library"),
             patch("app.main._schedule_prewarm", side_effect=lambda meta: meta),
@@ -235,3 +236,63 @@ class PaperApiTests(unittest.TestCase):
         ):
             names = [p["name"] for p in self.client.get("/api/papers").json()["papers"]]
         self.assertNotIn("Stale", names)
+
+    def _library(self, *names):
+        lib = self.root / "lib"
+        (lib / "sub").mkdir(parents=True)
+        for name in names:
+            (lib / name).write_bytes(make_pdf([PAGE]))
+        return lib
+
+    def test_remove_moves_the_pdf_to_trash_and_keeps_its_data(self):
+        lib = self._library("q.pdf", "sub/r.pdf")
+        with (
+            patch.object(main, "PAPERS_DIR", lib),
+            patch.object(main, "_titles", {}),
+            patch.object(main, "_TITLES_FILE", self.root / "titles.json"),
+            patch("app.main.biblio.lookup", new=AsyncMock(return_value=RECORD)),
+        ):
+            meta = self.client.post("/api/open", json={"rel": "q.pdf"}).json()
+            store.chat_put(meta["paper_id"], [{"role": "user", "content": "hi"}])
+            r = self.client.post("/api/papers/remove", json={"rel": "q.pdf"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(
+                self.client.post(
+                    "/api/papers/remove", json={"rel": "sub/r.pdf"}
+                ).status_code,
+                200,
+            )
+            files = [p["rel"] for p in self.client.get("/api/papers").json()["papers"]]
+        self.assertEqual(files, [])
+        self.assertTrue((self.root / "trash" / "q.pdf").is_file())
+        self.assertTrue((self.root / "trash" / "sub" / "r.pdf").is_file())
+        # nothing keyed by the file or the paper is touched
+        self.assertIsNotNone(store.load_doc(meta["doc_id"]))
+        self.assertEqual(len(store.chat_get(meta["paper_id"])), 1)
+
+    def test_remove_keeps_an_earlier_trashed_copy(self):
+        lib = self._library("q.pdf")
+        (self.root / "trash").mkdir()
+        (self.root / "trash" / "q.pdf").write_bytes(b"earlier")
+        with patch.object(main, "PAPERS_DIR", lib):
+            r = self.client.post("/api/papers/remove", json={"rel": "q.pdf"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((self.root / "trash" / "q.pdf").read_bytes(), b"earlier")
+        self.assertTrue((self.root / "trash" / "q-1.pdf").is_file())
+
+    def test_remove_only_touches_pdfs_inside_the_library(self):
+        lib = self._library("q.pdf")
+        outside = self.root / "outside.pdf"
+        outside.write_bytes(make_pdf([PAGE]))
+        (lib / "notes.txt").write_text("x")
+        with patch.object(main, "PAPERS_DIR", lib):
+            for rel, code in (
+                ("../outside.pdf", 400),
+                ("missing.pdf", 404),
+                ("notes.txt", 404),
+            ):
+                r = self.client.post("/api/papers/remove", json={"rel": rel})
+                self.assertEqual(r.status_code, code, rel)
+        self.assertTrue(outside.is_file())
+        self.assertTrue((lib / "notes.txt").is_file())
+        self.assertFalse((self.root / "trash").exists())

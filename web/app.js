@@ -442,6 +442,14 @@ async function loadLibrary() {
       const li = document.createElement("li");
       li.innerHTML = `${esc(p.name)}<span class="meta">${esc(p.file || "")} · ${fmtSize(p.size)}</span>`;
       li.addEventListener("click", () => openFromLibrary(p.rel, li));
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "lib-remove";
+      rm.textContent = "×";
+      rm.title = "Remove from the list (the PDF moves to data/trash)";
+      rm.setAttribute("aria-label", "Remove " + p.name + " from the list");
+      rm.addEventListener("click", (e) => { e.stopPropagation(); removeFromLibrary(p); });
+      li.appendChild(rm);
       list.appendChild(li);
     }
   } catch (err) {
@@ -450,6 +458,21 @@ async function loadLibrary() {
   }
 }
 $("refresh").addEventListener("click", () => { zotCollectionsLoaded = false; loadLibrary(); });
+
+// Taking a paper out of the folder Library moves its PDF to data/trash; its translations and
+// chat stay, and come back if the same file is added again. Zotero items are never removed.
+async function removeFromLibrary(p) {
+  const ask = `Remove "${p.name}" from the list?\n\nThe PDF moves to the trash folder (data/trash). ` +
+    "Its translations and chat are kept and come back if you add the file again.";
+  if (!confirm(ask)) return;
+  try {
+    await postJSON("/api/papers/remove", { rel: p.rel });
+  } catch (err) {
+    setTitle("Remove failed: " + err.message);
+    return;
+  }
+  loadLibrary();
+}
 
 async function openFromLibrary(rel, li) {
   document.querySelectorAll(".paperlist li").forEach((x) => x.classList.remove("active"));
