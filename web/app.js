@@ -468,10 +468,10 @@ async function removeFromLibrary(p) {
   try {
     await postJSON("/api/papers/remove", { rel: p.rel });
   } catch (err) {
-    setTitle("Remove failed: " + err.message);
-    return;
+    // not in the title bar: that shows the paper that is open
+    alert("Remove failed: " + err.message);
   }
-  loadLibrary();
+  loadLibrary(); // also drops a row whose file is already gone
 }
 
 async function openFromLibrary(rel, li) {

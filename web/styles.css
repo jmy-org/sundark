@@ -86,7 +86,8 @@ button { font: inherit; }
 .paperlist li.active { background: var(--accent); color: var(--accent-ink); }
 .paperlist li .meta { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
 .paperlist li.active .meta { color: var(--accent-ink); opacity: .75; }
-.paperlist li:has(> .lib-remove) { position: relative; padding-right: 34px; }
+.paperlist li { position: relative; }
+.paperlist li:has(> .lib-remove) { padding-right: 34px; }
 .paperlist .lib-remove { position: absolute; top: 8px; right: 6px; width: 24px; height: 24px; padding: 0;
   border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 16px; line-height: 1;
   cursor: pointer; opacity: 0; }

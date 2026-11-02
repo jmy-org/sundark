@@ -31,8 +31,9 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
 - **Removing a paper from the folder Library moves its PDF to `data/trash/`**
   (`/api/papers/remove`, same relative path, a number added on a name clash). Nothing else
   is deleted: caches are keyed by the File Fingerprint and chat by the Paper ID, so they
-  come back if the same PDF is added again. Only paths inside `PAPERS_DIR` are accepted,
-  and Zotero items have no remove action.
+  come back if the same PDF is added again. Only paths inside `PAPERS_DIR` are accepted; a
+  symlink is moved itself, never its target (another entry, or a file outside the library).
+  Zotero items have no remove action.
 - **`app/pdf_utils.py`** turns a PDF page into word geometry + sentences:
   `get_text("rawdict")` for per-word position/size, margin filtering, region drop/
   heading/equation typing from the layout model's boxes (no font/stroke heuristics —

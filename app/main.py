@@ -7,6 +7,7 @@ calls Claude (via the subscription CLI) for summary, translation, and Q&A.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import hashlib
 import io
@@ -273,19 +274,29 @@ async def remove_paper(req: OpenReq):
     """Take a PDF out of the Library: it moves to data/trash under the same relative path, so
     nothing is lost. Its cached results and chat are kept (they are keyed by the file and the
     paper, not the path) and come back if the same PDF is added again. Zotero items are
-    read-only and are never removed."""
-    path = (PAPERS_DIR / req.rel).resolve()
-    if not path.is_relative_to(PAPERS_DIR):
+    read-only and are never removed. A symlink is moved itself, never the file it points to:
+    that file may be another entry of the list, or lie outside the library."""
+    path = Path(os.path.normpath(PAPERS_DIR / req.rel))
+    folder = path.parent.resolve()
+    if path == PAPERS_DIR or not folder.is_relative_to(PAPERS_DIR):
         raise HTTPException(400, "Invalid path")
     if not path.is_file() or path.suffix.lower() != ".pdf":
         raise HTTPException(404, "Paper not found")
-    dest = store.TRASH / path.relative_to(PAPERS_DIR)
+    dest = store.TRASH / folder.relative_to(PAPERS_DIR) / path.name
     stem, suffix, i = dest.stem, dest.suffix, 1
-    while dest.exists():
+    while os.path.lexists(dest):
         dest = dest.with_name(f"{stem}-{i}{suffix}")
         i += 1
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(path, dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(path, dest)
+    except OSError as e:
+        # a move across disks copies, then deletes: when the delete fails, drop the copy so
+        # a retry does not leave another one in the trash
+        if os.path.lexists(path) and os.path.lexists(dest):
+            with contextlib.suppress(OSError):
+                dest.unlink()
+        raise HTTPException(500, "Could not move the PDF to data/trash") from e
     return {"moved_to": str(dest)}
 
 

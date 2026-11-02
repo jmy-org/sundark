@@ -238,7 +238,8 @@ class PaperApiTests(unittest.TestCase):
         self.assertNotIn("Stale", names)
 
     def _library(self, *names):
-        lib = self.root / "lib"
+        # resolved, as main.PAPERS_DIR is: a macOS temp dir lies behind a symlink (/var)
+        lib = (self.root / "lib").resolve()
         (lib / "sub").mkdir(parents=True)
         for name in names:
             (lib / name).write_bytes(make_pdf([PAGE]))
@@ -296,3 +297,41 @@ class PaperApiTests(unittest.TestCase):
         self.assertTrue(outside.is_file())
         self.assertTrue((lib / "notes.txt").is_file())
         self.assertFalse((self.root / "trash").exists())
+
+    def test_remove_moves_a_symlink_itself_not_its_target(self):
+        lib = self._library("q.pdf")
+        outside = self.root / "outside.pdf"
+        outside.write_bytes(make_pdf([PAGE]))
+        try:
+            os.symlink(lib / "q.pdf", lib / "q-link.pdf")
+            os.symlink(outside, lib / "out-link.pdf")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available here")
+        with patch.object(main, "PAPERS_DIR", lib):
+            for rel in ("q-link.pdf", "out-link.pdf"):
+                r = self.client.post("/api/papers/remove", json={"rel": rel})
+                self.assertEqual(r.status_code, 200, r.text)
+        # the other entry and the outside file are untouched; only the links moved
+        self.assertTrue((lib / "q.pdf").is_file())
+        self.assertTrue(outside.is_file())
+        self.assertTrue((self.root / "trash" / "q-link.pdf").is_symlink())
+        self.assertTrue((self.root / "trash" / "out-link.pdf").is_symlink())
+
+    def test_a_failed_move_is_reported_and_leaves_no_copy(self):
+        lib = self._library("q.pdf")
+        trashed = self.root / "trash" / "q.pdf"
+
+        def copy_then_fail(src, dst):
+            # a move across disks copies first; the delete that follows fails
+            Path(dst).write_bytes(Path(src).read_bytes())
+            raise PermissionError("read-only folder")
+
+        with (
+            patch.object(main, "PAPERS_DIR", lib),
+            patch("app.main.shutil.move", side_effect=copy_then_fail),
+        ):
+            r = self.client.post("/api/papers/remove", json={"rel": "q.pdf"})
+        self.assertEqual(r.status_code, 500)
+        self.assertEqual(r.json()["detail"], "Could not move the PDF to data/trash")
+        self.assertTrue((lib / "q.pdf").is_file())
+        self.assertFalse(trashed.exists())
