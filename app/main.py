@@ -269,6 +269,63 @@ async def open_paper(req: OpenReq):
         raise HTTPException(400, f"Could not read PDF: {e}") from e
 
 
+# Sample papers for a first visit: page 1 of CC BY 4.0 arXiv papers (samples/README.md has the
+# attribution). Offered on the start screen, first one as the main action; never copied into
+# PAPERS_DIR, so they do not appear in the user's Library.
+SAMPLES_DIR = ROOT / "samples"
+SAMPLES = (
+    {
+        "id": "mamba",
+        "file": "mamba-2312.00752v2-p1.pdf",
+        "title": "Mamba: Linear-Time Sequence Modeling with Selective State Spaces",
+        "credit": "Gu & Dao",
+        "arxiv": "2312.00752v2",
+    },
+    {
+        "id": "chain-of-thought",
+        "file": "chain-of-thought-2201.11903v6-p1.pdf",
+        "title": "Chain-of-Thought Prompting Elicits Reasoning in Large Language Models",
+        "credit": "Wei et al.",
+        "arxiv": "2201.11903v6",
+    },
+    {
+        "id": "llama",
+        "file": "llama-2302.13971v1-p1.pdf",
+        "title": "LLaMA: Open and Efficient Foundation Language Models",
+        "credit": "Touvron et al.",
+        "arxiv": "2302.13971v1",
+    },
+)
+
+
+@app.get("/api/samples")
+async def samples():
+    """The sample papers that are present, in their offered order."""
+    present = [s for s in SAMPLES if (SAMPLES_DIR / s["file"]).is_file()]
+    return {
+        "samples": [
+            {k: s[k] for k in ("id", "title", "credit", "arxiv")} for s in present
+        ]
+    }
+
+
+class SampleReq(BaseModel):
+    id: str
+
+
+@app.post("/api/samples/open")
+async def open_sample(req: SampleReq):
+    """Open a sample paper by its id (never a path)."""
+    sample = next((s for s in SAMPLES if s["id"] == req.id), None)
+    path = SAMPLES_DIR / sample["file"] if sample else None
+    if not path or not path.is_file():
+        raise HTTPException(404, "Sample not found")
+    try:
+        return _schedule_prewarm(await _ingest(path.read_bytes()))
+    except Exception as e:
+        raise HTTPException(400, f"Could not read PDF: {e}") from e
+
+
 @app.post("/api/papers/remove")
 async def remove_paper(req: OpenReq):
     """Take a PDF out of the Library: it moves to data/trash under the same relative path, so
