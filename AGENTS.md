@@ -268,8 +268,10 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   period, so it needs its own rule (`_continues_ellipsis`): the text goes on when the next
   fragment opens with punctuation, a closing bracket or quote, or an operator, and starts
   anew after a page number (a table of contents' dot leader) or a capitalized word. Over 36
-  papers this rejoined 89 cuts in 12 of them. Enumeration runs ("a) ... b) ... c)", "(1)
-  ..., (2) ...") are split into items by `_split_on_markers`; "Eqn.(1)" references and
+  papers this rejoined 89 cuts in 12 of them. A one-letter symbol after a range with no
+  period of its own goes on ("k = 1 . . ." + "K do"; not "A" or "I", which open sentences):
+  3 more cuts in 2 of 138 documents, nothing else. Enumeration runs ("a) ... b) ... c)",
+  "(1) ..., (2) ...") are split into items by `_split_on_markers`; "Eqn.(1)" references and
   two-part subfigure phrases ("show (a) X and (b) Y") are left whole. A list item or an
   algorithm step that opens a line starts a sentence (`_item_starts`): "1.", "(1)", "a)", a
   bullet, or a line number "12:", when the line before ends with a colon or, for a number,

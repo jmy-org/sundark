@@ -643,6 +643,16 @@ class SpacedEllipsisTests(unittest.TestCase):
             ["2.1 Setup . . . . . . .", "4 2.2 Results . . . . . . 5"],
         )
 
+    def test_a_symbol_after_a_range_goes_on(self):
+        # three dots after a value end no sentence before a one-letter symbol; "A" may open
+        # one
+        t = "2: for k = 1 . . . K do"
+        self.assertEqual(self._merged(t, ["K do"]), [t])
+        t = "We count t = 1 . . . A new run starts."
+        self.assertEqual(
+            self._merged(t, ["A new"]), ["We count t = 1 . . .", "A new run starts."]
+        )
+
 
 def item_starts(*lines: str, numbered=()) -> list[str]:
     """The markers `_item_starts` finds in a paragraph of `lines`, given the page's

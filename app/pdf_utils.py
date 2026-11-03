@@ -558,15 +558,21 @@ def _starts_closing(text: str, span: tuple[int, int]) -> bool:
 # sentence inside or right after them. A fragment ending in such a run goes on when the next one
 # opens with punctuation, a closing bracket or quote, or an operator (", x n }", ". , x n }",
 # "< h k", "”"); a page number or a capitalized word after it (a table of contents' dot leader,
-# "σ 3 ≥ . . . ." + "Choose ...") starts anew.
+# "σ 3 ≥ . . . ." + "Choose ...") starts anew, but not a one-letter symbol after a range with
+# no period of its own, three dots after a value ("k = 1 . . ." + "K do", "t = 1 . . ." +
+# "T , which ..."); "A" and "I" may open a sentence.
 _ELLIPSIS_END = re.compile(r"(?:^|\s)\.(?:\s\.)+$")
+_RANGE_END = re.compile(r"[^.\s]\s+\.\s\.\s\.$")
+_SYMBOL_START = re.compile(r"[B-HJ-ZΑ-Ω](?![\w.])")
 
 
 def _continues_ellipsis(t: str, text: str, span: tuple[int, int]) -> bool:
+    frag = text[span[0] : span[1]].lstrip()
     return bool(_ELLIPSIS_END.search(t)) and (
         _starts_closing(text, span)
         or _starts_math_cont(text, span)
-        or text[span[0] : span[1]].lstrip()[:1] == "”"
+        or frag[:1] == "”"
+        or bool(_RANGE_END.search(t) and _SYMBOL_START.match(frag))
     )
 
 

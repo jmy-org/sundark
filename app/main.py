@@ -388,7 +388,7 @@ _layout_lock = asyncio.Lock()
 # box. v14: a spaced ellipsis ("x 1 , . . . , x n") no longer ends a sentence. v15: a table of
 # contents is dropped, and so are a page-0 footnote whose mark an author carries and a footnote
 # that is only a link; a list item or an algorithm step that opens a line starts a sentence,
-# with or without a line number.)
+# with or without a line number; a symbol after a range ("k = 1 . . . K") goes on.)
 _LAYOUT_VERSION = 15
 
 
