@@ -31,8 +31,8 @@ const {POST} = await import('../app/mcp/route.ts');
 const {attachmentReaderHtml} = await import('../lib/attachment-reader.ts');
 
 const SECRET = 'SECRET-MARKER';
-const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
-const SAVED_URI = 'ui://sundark/reader-compat-v3.html';
+const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v6.html';
+const SAVED_URI = 'ui://sundark/reader-compat-v4.html';
 const signedIn = {'oai-authenticated-user-id': `user-${SECRET}`, 'oai-authenticated-user-email': `${SECRET}@example.invalid`};
 const file = {download_url: `${origin}/two.pdf?sig=${SECRET}`, file_id: `file-${SECRET}`, file_name: `${SECRET}.pdf`};
 const FIELDS = new Set(['event', 'method', 'tool', 'resource', 'requestedVersion', 'protocolVersion', 'uiCapability', 'outcome', 'status', 'reason', 'bytes']);

@@ -5,10 +5,10 @@ import { normalizeSegments, type SourceSegment } from '../../lib/source-geometry
 
 export type Segment = SourceSegment & { tex?: string };
 export interface Attachment { fileId: string; fileName: string; pdfSha256: string; numPages: number }
-export interface PageSource { page: number; width: number; height: number; segments: Segment[]; sourceHash?: string }
+export interface PageSource { page: number; width: number; height: number; segments: Segment[]; sourceHash?: string; restored?: boolean }
 /** One prepare_attachment_task result as render_attached_reader returned it (already
  * checked by the server), flattened to readable text for the sidebar and exports. */
-export interface AnalysisItem { kind: string; language: string; sourcePages: number[]; title: string; text: string; coversShownPage?: boolean }
+export interface AnalysisItem { kind: string; language: string; sourcePages: number[]; title: string; text: string; coversShownPage?: boolean; imported?: boolean }
 export interface Batch { page: number; language: string; segmentIds: string[] }
 export interface ReaderOutput {
   attachment: Attachment | null; page: number | null; sourceHash: string | null;
@@ -168,10 +168,23 @@ export function merge(doc: Doc, out: ReaderOutput): Doc {
   const next = out.attachment && doc.attachment && !sameAttachment(doc.attachment, out.attachment) ? emptyDoc()
     : { ...doc, pages: new Map(doc.pages), translations: new Map(doc.translations), analysis: [...doc.analysis] };
   if (out.attachment) next.attachment = { ...next.attachment, ...out.attachment,
+    fileId: out.attachment.fileId || next.attachment?.fileId || '',
     numPages: out.attachment.numPages || next.attachment?.numPages || 0 };
-  for (const page of out.pages) {
+  // A snapshot can claim an ID that a genuine future page later uses. Discard that
+  // imported page and its translations before any live source can inherit them.
+  const incomingIds = new Map(out.pages.flatMap(p => p.segments.map(s => [s.id, p.page] as const)));
+  for (const [n, held] of next.pages) if (held.restored
+      && held.segments.some(s => incomingIds.has(s.id) && incomingIds.get(s.id) !== n)) {
+    next.pages.delete(n);
+    for (const s of held.segments) next.translations.delete(s.id);
+    next.analysis = next.analysis.filter(a => !a.imported || !a.sourcePages.includes(n));
+  }
+  for (const source of out.pages) {
+    const page = !source.sourceHash && out.page === source.page && out.sourceHash
+      ? { ...source, sourceHash: out.sourceHash } : source;
     const old = next.pages.get(page.page);
-    if (old && old.segments.map(s => s.id).join('\n') !== page.segments.map(s => s.id).join('\n'))
+    if (old && (old.segments.map(s => s.id).join('\n') !== page.segments.map(s => s.id).join('\n')
+        || (old.restored && !sameSource(old, page))))
       for (const s of old.segments) next.translations.delete(s.id);
     next.pages.set(page.page, page);
   }
@@ -201,7 +214,8 @@ export function merge(doc: Doc, out: ReaderOutput): Doc {
   if (out.pageLimit !== null) next.pageLimit = out.pageLimit;
   if (out.extractablePages !== null && out.attachment) next.extractablePages = out.extractablePages;
   next.complete = isComplete(next, read ? out.complete : next.complete);
-  next.reportedComplete = !next.complete && (read ? out.reportedComplete : next.reportedComplete) && !next.unreadPages.length;
+  next.reportedComplete = !next.complete && (read ? out.reportedComplete : next.reportedComplete) && !next.unreadPages.length
+    && ![...next.pages.values()].some(p => p.restored);
   if (out.storageNotice) next.storageNotice = out.storageNotice;
   next.prompt = out.prompt;
   // Questions accumulate; any other kind keeps only its newest result.
@@ -210,6 +224,49 @@ export function merge(doc: Doc, out: ReaderOutput): Doc {
     next.analysis.push(item);
   }
   next.analysis = next.analysis.slice(-100);
+  next.restored = [...next.pages.values()].some(p => p.restored);
+  return next;
+}
+
+/** Imported hashes are claims, not proof: matching live pages must also have exactly the
+ * same normalized source and geometry. Older v1 files can omit the source hash. */
+function sameSource(a: PageSource, b: PageSource) {
+  return a.width === b.width && a.height === b.height
+    && !(a.sourceHash && b.sourceHash && a.sourceHash !== b.sourceHash)
+    && JSON.stringify(a.segments) === JSON.stringify(b.segments);
+}
+
+/** Merge an explicitly imported snapshot into the same live PDF. Keep live identity,
+ * read-loop state and existing translations; imported-only pages remain unverified. */
+export function mergeRestored(live: Doc, restored: Doc): Doc {
+  if (!live.attachment?.pdfSha256 || live.attachment.pdfSha256 !== restored.attachment?.pdfSha256)
+    throw new Error('이 카드의 PDF와 다른 파일의 읽기 결과예요.');
+  if (live.language && restored.language && !sameLanguage(live.language, restored.language))
+    throw new Error('현재 리더와 번역 언어가 다른 읽기 결과예요.');
+  const next = { ...live, pages: new Map(live.pages), translations: new Map(live.translations), analysis: [...live.analysis] };
+  const allowed = new Set<string>();
+  const sourcePages = new Set<number>();
+  const liveIds = new Map([...live.pages.values()].flatMap(p => p.segments.map(s => [s.id, p.page] as const)));
+  for (const page of restored.pages.values()) {
+    if (live.attachment.numPages && page.page > live.attachment.numPages)
+      throw new Error('현재 PDF의 페이지 범위를 벗어난 읽기 결과예요.');
+    if (page.segments.some(s => liveIds.has(s.id) && liveIds.get(s.id) !== page.page))
+      throw new Error('읽기 결과의 원문 문장 ID가 다른 페이지와 중복되었어요.');
+    const current = live.pages.get(page.page);
+    if (current && !sameSource(current, page)) continue;
+    if (!current) next.pages.set(page.page, { ...page, restored: true });
+    sourcePages.add(page.page);
+    for (const s of page.segments) allowed.add(s.id);
+  }
+  for (const [id, text] of restored.translations)
+    if (!(live.language && !restored.language) && allowed.has(id) && !next.translations.has(id)) next.translations.set(id, text);
+  next.language ||= restored.language;
+  for (const item of restored.analysis)
+    if (item.sourcePages.every(p => sourcePages.has(p))
+        && !next.analysis.some(a => a.kind === item.kind && a.text === item.text && JSON.stringify(a.sourcePages) === JSON.stringify(item.sourcePages)))
+      next.analysis.push({ ...item, imported: true });
+  next.analysis = next.analysis.slice(-100);
+  next.restored = [...next.pages.values()].some(p => p.restored);
   return next;
 }
 
@@ -219,6 +276,7 @@ export function merge(doc: Doc, out: ReaderOutput): Doc {
  * scanned or failed document, or one only the caller's echoed lists call read, is never
  * shown as finished. */
 function isComplete(doc: Doc, claimed: boolean) {
+  if ([...doc.pages.values()].some(p => p.restored)) return false;
   const n = doc.attachment?.numPages ?? 0;
   if (!n) return false;
   let held = true;
@@ -250,7 +308,8 @@ export function progress(doc: Doc) {
   const numPages = doc.attachment?.numPages ?? 0;
   const limit = doc.pageLimit;
   return { received: doc.pages.size, numPages, translated: f.translated, total: f.total,
-    readable: [...doc.pages.values()].filter(p => p.segments.length).length,
+    readable: [...doc.pages.values()].filter(p => p.segments.length && !p.restored).length,
+    imported: [...doc.pages.values()].filter(p => p.segments.length && p.restored).length,
     attempted: doc.attemptedPages.length, unread: doc.unreadPages, complete: doc.complete, reportedComplete: doc.reportedComplete,
     extractable: doc.extractablePages ?? (limit !== null && numPages ? Math.min(numPages, limit) : numPages),
     beyondLimit: limit !== null && numPages > limit ? numPages - limit : 0 };
@@ -280,7 +339,8 @@ export function exportJson(doc: Doc) {
   return JSON.stringify({
     format: EXPORT_FORMAT, version: 1, exportedAt: new Date().toISOString(), ...(doc.language ? { language: doc.language } : {}),
     attachment: doc.attachment ? { fileName: doc.attachment.fileName, pdfSha256: doc.attachment.pdfSha256, numPages: doc.attachment.numPages } : null,
-    pages: orderedPages(doc).map(p => ({ page: p.page, width: p.width, height: p.height, segments: p.segments })),
+    pages: orderedPages(doc).map(p => ({ page: p.page, width: p.width, height: p.height, segments: p.segments,
+      ...(p.sourceHash ? { sourceHash: p.sourceHash } : {}) })),
     translations: [...frontier(doc).shown].map(id => ({ id, text: doc.translations.get(id)! })),
     analysis: doc.analysis,
   }, null, 1);
@@ -320,5 +380,22 @@ export function restoreJson(text: string): Doc {
   if (translations.length > sentences) throw new Error('번역이 원문 문장보다 많아요.');
   const out = parseOutput({ mode: 'ephemeral', persistent: false, attachment: a, pages, translations, analysis: raw.analysis,
     ...(typeof raw.language === 'string' ? { translation: { language: raw.language } } : {}) }, translations.length);
-  return { ...merge(emptyDoc(), out), restored: true };
+  const pageIds = new Set<number>(), sourceIds = new Set<string>(), translatedIds = new Set<string>();
+  for (const page of out.pages) {
+    if (pageIds.has(page.page)) throw new Error('원문 페이지가 중복되었어요.');
+    pageIds.add(page.page);
+    for (const s of page.segments) {
+      if (sourceIds.has(s.id)) throw new Error('원문 문장 ID가 중복되었어요.');
+      sourceIds.add(s.id);
+    }
+  }
+  for (const t of out.translations) {
+    if (translatedIds.has(t.id)) throw new Error('번역 문장 ID가 중복되었어요.');
+    if (!sourceIds.has(t.id)) throw new Error('번역에 대응하는 원문 문장이 없어요.');
+    translatedIds.add(t.id);
+  }
+  const restored = merge(emptyDoc(), out);
+  restored.pages = new Map([...restored.pages].map(([n, p]) => [n, { ...p, restored: true }]));
+  restored.analysis = restored.analysis.map(a => ({ ...a, imported: true }));
+  return { ...restored, restored: true, attemptedPages: [], complete: false, reportedComplete: false };
 }

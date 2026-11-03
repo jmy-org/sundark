@@ -39,9 +39,11 @@ vars.SUNDARK_FILE_HOSTS = 'files.oaiusercontent.com';
 const {POST} = await import('../app/mcp/route.ts');
 const {attachmentReaderHtml} = await import('../lib/attachment-reader.ts');
 
-const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
-const SAVED_URI = 'ui://sundark/reader-compat-v3.html';
-const OLD_ATTACHMENT_URI = 'ui://sundark/attachment-reader.html', OLD_SAVED_URI = 'ui://sundark/reader-compat-v2.html';
+const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v6.html';
+const V4_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
+const V5_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v5.html';
+const SAVED_URI = 'ui://sundark/reader-compat-v4.html';
+const OLD_ATTACHMENT_URI = 'ui://sundark/attachment-reader.html', OLD_SAVED_URI = 'ui://sundark/reader-compat-v2.html', V3_SAVED_URI = 'ui://sundark/reader-compat-v3.html';
 const MODERN = {'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {extensions: {'io.modelcontextprotocol/ui': {mimeTypes: ['text/html;profile=mcp-app']}}}};
 const signedIn = {'oai-authenticated-user-id': 'synthetic-user', 'oai-authenticated-user-email': 'synthetic@example.invalid'};
 const file = {download_url: `${origin}/two.pdf`, file_id: 'file-SYNTHETIC', file_name: 'synthetic.pdf'};
@@ -110,7 +112,7 @@ test('tools/list and resources/list: complete and cacheable, payload unchanged',
 });
 
 test('resources/read: current and alias URIs are complete and cacheable with unchanged contents', async () => {
-  for (const [uri, mimeType] of [[ATTACHMENT_URI, 'text/html;profile=mcp-app'], [OLD_ATTACHMENT_URI, 'text/html;profile=mcp-app'], [SAVED_URI, 'text/html+skybridge'], [OLD_SAVED_URI, 'text/html+skybridge']]) {
+  for (const [uri, mimeType] of [[ATTACHMENT_URI, 'text/html;profile=mcp-app'], [OLD_ATTACHMENT_URI, 'text/html;profile=mcp-app'], [V4_ATTACHMENT_URI, 'text/html;profile=mcp-app'], [V5_ATTACHMENT_URI, 'text/html;profile=mcp-app'], [SAVED_URI, 'text/html+skybridge'], [OLD_SAVED_URI, 'text/html+skybridge'], [V3_SAVED_URI, 'text/html+skybridge']]) {
     const result = cacheable(await call('resources/read', {uri}));
     assert.deepEqual(Object.keys(result).sort(), ['cacheScope', 'contents', 'resultType', 'ttlMs'], uri);
     assert.equal(result.contents.length, 1);
@@ -121,6 +123,12 @@ test('resources/read: current and alias URIs are complete and cacheable with unc
   const attachment = complete(await call('resources/read', {uri: ATTACHMENT_URI})).contents[0];
   assert.equal(attachment.text, attachmentReaderHtml);
   assert.deepEqual(attachment._meta.ui.csp, {connectDomains: [], resourceDomains: []});
+  assert.deepEqual(attachment._meta['openai/widgetCSP'], {connect_domains: [], resource_domains: []});
+  assert.deepEqual(attachment._meta['openai/ui'], {preferredDisplayMode: 'inline', availableDisplayModes: ['inline', 'fullscreen']});
+  for (const uri of [OLD_ATTACHMENT_URI, V4_ATTACHMENT_URI, V5_ATTACHMENT_URI])
+    assert.deepEqual(complete(await call('resources/read', {uri})).contents[0]._meta['openai/ui'], attachment._meta['openai/ui'], uri);
+  // The saved-paper reader is a different resource and keeps its metadata.
+  assert.equal(complete(await call('resources/read', {uri: SAVED_URI})).contents[0]._meta['openai/ui'], undefined);
 });
 
 test('resources/read: an unknown resource is a JSON-RPC -32602 error, not an isError result', async () => {

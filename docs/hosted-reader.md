@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `d90e7e1fced7f518621029b1f5f99e6c1485867f` ("Complete MCP response envelopes for protocol 2026-07-28"; in-band delivery in `1be30a6`) |
+| Exported Site commit | `1a65c2a8b70adb8ab9ccc2fa503afa996bbe456a` ("Announce copy outcomes and keep saved untranslated text readable"; on top of `80ae67b`, the shared reader presentation, and `fed8803` with its reader action, restore, display-mode and host-error fixes) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 
@@ -48,6 +48,24 @@ byte matches the Site commit:
 diff <(git -C "$SITE" ls-tree -r "$SHA" | grep -vE $'\t(tsconfig\\.tsbuildinfo|examples/)') \
      <(git ls-tree -r "$(git write-tree --prefix=hosted-reader/)")
 ```
+
+### Shared reader presentation
+
+`web/reader-ui.css` in this repository is the canonical presentation of every Sundark reader. The
+Site cannot see this repository, so it keeps a generated copy, `client/shared/reader-ui.css`, whose
+first line names the source and the sha256 of the rest. A change to the presentation is made here
+and then carried to the Site:
+
+```bash
+uv run python scripts/sync_reader_ui.py --site "$SITE"          # writes client/shared/reader-ui.css
+uv run python scripts/sync_reader_ui.py --site "$SITE" --check  # exit 1 on drift
+```
+
+Then commit at the Site, re-export as below, and `tests/test_reader_ui_parity.py` confirms that the
+exported copy matches the source byte for byte. At the Site, `scripts/shared-css.mjs` refuses a copy
+whose body does not match its header hash, or that holds an external reference, before the build
+inlines it into the attachment reader and the saved-paper view and copies it for `/original`.
+A changed widget body needs a new template URI (hosts cache by URI); the earlier ones stay aliases.
 
 ## Build, test and deploy
 
@@ -264,3 +282,41 @@ were removed (environment revision 8, applied on deployment). Local tests cover
 read/render across the two families, future account labels, malformed/lookalike
 endpoints and redirect refusal. Actual post-repair ChatGPT PDF/reader acceptance is
 still a separate gate; public audience alone did not establish reader success.
+
+### Reader controls and restoration checkpoint (2026-11-02)
+
+The current export is a local, undeployed source revision. It bounds reader actions,
+preserves unknown message-delivery outcomes without retrying, keeps live PDF identity
+when restoring verified results, declares supported display modes, and sanitizes host
+errors by loading stage. Restored-only pages and analysis remain marked unverified.
+Local verification on Node 24 with the committed dependency lock passed 133 unit tests,
+78 reader state/Chromium tests, 95 local development workerd checks, 40 local production
+workerd checks, TypeScript and the production build. Both integration modes reported
+no first failure; development checks also verified no D1/R2 growth.
+
+On the unchanged live v34 source, a synthetic PDF plus a Sundark mention automatically
+invoked the tools and produced ordered Korean for page 1 without a clarification. A
+subsequent attempt failed to show the original PDF and recorded HTTP 400 from ChatGPT's
+file-download-URL endpoint; its response body and cause remain unknown. These observations
+do not verify the new display controls, fullscreen result routing, whole-document
+continuation, widget Q&A or export/restore in ChatGPT. The required test-deployment and
+live-deployment gates remain open; no deployment is performed by this export.
+
+### Shared presentation checkpoint (2026-11-03)
+
+The exported Site commit `1a65c2a` (on `80ae67b`) takes every reader's presentation from `web/reader-ui.css`
+(see *Shared reader presentation*). The attachment reader now has the local reader's layout:
+the PDF under its page bar beside a tabbed panel (번역, 분석·질문, 내보내기·저장), one column below
+820px, the host's light or dark theme. Its ids, listbox, live regions, shortcuts, IME guards,
+display-mode control and request handling are unchanged. The saved-paper view and `/original` use
+the same file. Template URIs are attachment v6 (v5 and older are aliases) and saved reader v4 (v2,
+v3 aliases); the CSP stays empty.
+
+This is a local, undeployed revision. Local verification on Node 24 with the committed lock passed
+135 unit tests, 83 reader state/Chromium tests (including tabs, host theme, contrast in both themes
+and in the saved-paper view, fullscreen sizing, focus on tab switches, and export and copy outcomes
+announced from a hidden tab), the `/original` checks, TypeScript, the production
+build, and 41 production / 96 development workerd checks with no first failure and unchanged D1/R2.
+None of this was run in ChatGPT: the original-PDF HTTP 400, continuation, widget questions, export,
+restore and reopen remain native gates, as do the test and live deployment gates.
+

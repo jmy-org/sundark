@@ -14,8 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODE=sys.argv[1] if len(sys.argv)>1 else 'dev'
 assert MODE in ('dev','prod'),'mode is dev or prod'
-SECRET='sig=SYNTHETIC-SIGNED-TOKEN-a7c1';FILE_HOST='files.oaiusercontent.com';URI='ui://sundark/attachment-reader-v4.html'
-ALIASES=('ui://sundark/attachment-reader.html','ui://sundark/attachment-reader-v2.html','ui://sundark/attachment-reader-v3.html');CHUNK=2*1024*1024
+SECRET='sig=SYNTHETIC-SIGNED-TOKEN-a7c1';FILE_HOST='files.oaiusercontent.com';URI='ui://sundark/attachment-reader-v6.html'
+ALIASES=('ui://sundark/attachment-reader.html','ui://sundark/attachment-reader-v2.html','ui://sundark/attachment-reader-v3.html','ui://sundark/attachment-reader-v4.html','ui://sundark/attachment-reader-v5.html');CHUNK=2*1024*1024
 checks=[];chunk_heads=[]
 def check(name,condition,detail:object=''):
  if not condition:raise AssertionError(f'{name} {detail}'.strip())
@@ -150,6 +150,7 @@ try:
  c=rpc('resources/read',{'uri':URI})[1]['result']['contents'][0];meta=c['_meta']
  check('resource read: uri, mime, html body',c['uri']==URI and c['mimeType']=='text/html;profile=mcp-app' and '<' in c['text'] and len(c['text'])>1000)
  check('resource CSP: no widget egress at all',meta['ui']['csp']=={'connectDomains':[],'resourceDomains':[]} and meta['openai/widgetCSP']=={'connect_domains':[],'resource_domains':[]},meta)
+ check('resource display modes: inline preferred, fullscreen available, no pip',meta.get('openai/ui')=={'preferredDisplayMode':'inline','availableDisplayModes':['inline','fullscreen']},meta.get('openai/ui'))
  for alias in ALIASES:
   ac=rpc('resources/read',{'uri':alias})[1]['result']['contents'][0]
   check(f'alias {alias}: same body, empty CSP',ac['text']==c['text'] and ac['_meta']['ui']['csp']=={'connectDomains':[],'resourceDomains':[]} and ac['_meta']['openai/widgetCSP']=={'connect_domains':[],'resource_domains':[]},ac['_meta'])
