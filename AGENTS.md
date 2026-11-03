@@ -350,7 +350,16 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   Its footnote with an e-mail address (`_EMAIL`) goes too: that is the authors' contact
   block (affiliations, "Correspondence to: ..."), the same front matter set at the foot of
   the page. Over 32 papers all 10 such footnotes were one; content footnotes carry no
-  address, and "Equal contribution" or a venue notice without one is still translated.
+  address. So does a footnote whose mark an author carries ("Ann Lee∗" + "∗Equal
+  contribution", "Bo Li†" + "†Work done at ..."): an author note, from its mark to the next
+  footnote (a mark or a small number) in its PDF block, taken out after the e-mail rule has
+  judged the whole block. Only mark symbols count (`_MARKS`, "∗" and "*" as one): an
+  affiliation number ("Lee¹") and the text's first footnote ("¹Code is at ...") share "1",
+  and counting numbers took three content footnotes with them. A mark in a caption kept
+  above the Abstract is no author's. A note a mark ties to an author or the title goes
+  whatever it says (funding, "A preliminary version appeared in ..."), as the contact block
+  does; the Acknowledgements section is translated. A venue notice, or a note with no mark,
+  is still translated. Over 89 papers this dropped author notes in 13 and nothing else.
 - **A table of contents is not translated.** `_toc_lines()` finds it on each page by its
   entries: a row that ends in a page number after a dot leader or a wide gap, or a number on
   a line of its own beside a title (the nearest line to its left; a row of numbers, such as

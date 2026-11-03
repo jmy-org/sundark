@@ -961,6 +961,35 @@ _ABSTRACT_RE = re.compile(r"(?:Abstract|ABSTRACT)(?:[.:—–-].*)?")
 # An e-mail domain ("x@mit.edu", "{a, b} @mit.edu"); not "mAP@0.5" or "Recall@1".
 _EMAIL = re.compile(r"@ ?[A-Za-z][\w-]*(?:\.[A-Za-z][\w-]*)+")
 
+# Footnote mark symbols. Numbers are left out: an affiliation number on an author ("Ann Lee¹")
+# and the first footnote of the text ("... GPUs.¹" + "¹Code is at ...") share "1".
+_MARKS = "*∗⋆†‡§¶‖#"
+
+
+def _mark(ch: str) -> str:
+    """A mark symbol with both asterisks as one: an author line's "∗" may mark a "*" note."""
+    return "*" if ch == "∗" else ch
+
+
+def _numbered_note(ws: list[dict]) -> bool:
+    """A line of words (with sizes) opens with a footnote number or letter, set smaller than the
+    rest of the line ("¹Code is at ...")."""
+    return (
+        len(ws) > 1
+        and bool(re.fullmatch(r"\d{1,2}|[a-z]", ws[0]["t"]))
+        and ws[0]["size"] < 0.85 * statistics.median(w["size"] for w in ws[1:])
+    )
+
+
+def _marked_note(t: str) -> bool:
+    """A word opens with a footnote mark symbol ("†Work done ..."), not a sign before a number
+    ("§4.2", "#3") or a sign of the text ("#tokens", "‖x‖")."""
+    return (
+        t[0] in _MARKS
+        and not t[1:2].isdigit()
+        and (t[0] not in "#‖" or not t[1:2].islower())
+    )
+
 
 def _front_cut(words: list[dict], height: float) -> float:
     """Where page 0's front matter (title, authors, affiliations) ends: the top of the Abstract
@@ -1847,6 +1876,7 @@ def _page_layout(
         raw = [w for w in styled if not _drop(w)]
         # On page 1, drop everything above the Abstract (title, authors, affiliations), except a
         # figure caption: a teaser figure above the Abstract (SAM) has a caption to translate.
+        front_marks: set[str] = set()
         if page_index == 0:
             cut = _front_cut(
                 [
@@ -1855,6 +1885,16 @@ def _page_layout(
                 ],
                 ph,
             )
+            front_marks = {
+                _mark(ch)
+                for w in raw
+                if w["y1"] <= cut
+                and not _in_rects(
+                    (w["x0"] + w["x1"]) / 2, (w["y0"] + w["y1"]) / 2, caption_rects
+                )
+                for ch in w["t"]
+                if ch in _MARKS
+            }
             raw = [
                 w
                 for w in raw
@@ -2038,6 +2078,28 @@ def _page_layout(
             else:
                 ln["aside"] = None
 
+        # Page 0's footnotes whose mark an author or the title carries ("Ann Lee∗" + "∗Equal
+        # contribution", "Bo Li†" + "†Work done at ...") are author notes: front matter, like
+        # the lines above the Abstract. A footnote runs from its mark to the next one, within
+        # its PDF block. A footnote marked from the text ("... GPUs.¹" + "¹Code: ...") stays.
+        # Their words go after the e-mail rule below, which judges the whole footnote block.
+        note_words: set[int] = set()
+        if front_marks:
+            cur, blk = False, None
+            for ln in lines:
+                if ln["aside"] != "foot":
+                    continue
+                first = words[ln["widx"][0]]["t"]
+                if _marked_note(first):
+                    cur = _mark(first[0]) in front_marks
+                elif ln["key"][0] != blk or _numbered_note(
+                    [raw[g] for g in ln["widx"]]
+                ):
+                    cur = False
+                blk = ln["key"][0]
+                if cur:
+                    note_words.update(ln["widx"])
+
         # Merge a lone section-number line ("1", "2.2") into the title that follows, so it reads
         # "1 Introduction" / "2.1 Denoising ...". Many papers typeset the number as a separate
         # element, so the title line carries no number and may not look like a heading on its
@@ -2186,6 +2248,11 @@ def _page_layout(
                     and _EMAIL.search(" ".join(words[g]["t"] for g in p["widx"]))
                 )
             ]
+            paras = [
+                {**p, "widx": [g for g in p["widx"] if g not in note_words]}
+                for p in paras
+            ]
+            paras = [p for p in paras if p["widx"]]
 
         # An appendix or supplement may open on a cover that repeats page 0's front matter
         # (title, authors, affiliations). Page 0 drops those lines, so a later paragraph made

@@ -179,6 +179,88 @@ class FirstPageTests(unittest.TestCase):
             ["@mit.edu"],
         )
 
+    def _notes_page(self, notes: str, below: str = "") -> str:
+        """Page 0's text with an author line marked "*" and "†", and `notes` (one PDF block,
+        lines split by newlines) and `below` (a block of its own) in the footnote area."""
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((150, 80), "A Model for Learning from Data", fontsize=14)
+        p.insert_text((150, 110), "Ann Lee*  Bo Li†", fontsize=10, fontname="japan")
+        p.insert_text((50, 150), "Abstract", fontsize=12)
+        p.insert_text((50, 170), TEXT, fontsize=10)
+        p.insert_text((50, 740), notes, fontsize=8, fontname="japan")
+        if below:
+            p.insert_text((50, 800), below, fontsize=8)
+        data = doc.tobytes()
+        doc.close()
+        foot = [{"role": "furniture", "x0": 45, "y0": 730, "x1": 400, "y1": 805}]
+        return " ".join(s["text"] for s in _layout(data, 0, {0: foot}))
+
+    def test_a_footnote_whose_mark_an_author_carries_is_front_matter(self):
+        # an author note carries no address: its mark ties it to the author line. It runs to
+        # the next mark ("is random." goes with it). A mark no author carries, or a numbered
+        # footnote, belongs to the text and is still read
+        text = self._notes_page(
+            "*Equal contribution. Listing order\nis random.\n"
+            "†Work done at Example Lab.\n‡We report the mean of three runs.",
+            below="1 The code is available online.",
+        )
+        self.assertIn(TEXT, text)
+        for note in ("Equal contribution", "is random", "Example Lab"):
+            self.assertNotIn(note, text)
+        self.assertIn("We report the mean of three runs.", text)
+        self.assertIn("The code is available online.", text)
+
+    def test_a_mark_in_a_caption_above_the_abstract_marks_no_author(self):
+        # a teaser caption above the Abstract is kept, and its "*" is no author's: a footnote
+        # with that mark belongs to the text
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((150, 80), "A Model for Learning from Data", fontsize=14)
+        p.insert_text((150, 110), "Ann Lee  Bo Li", fontsize=10)
+        p.insert_text(
+            (50, 140), "Figure 1: The results; * marks the best run.", fontsize=9
+        )
+        p.insert_text((50, 170), "Abstract", fontsize=12)
+        p.insert_text((50, 190), TEXT, fontsize=10)
+        p.insert_text((50, 760), "*We report the mean of three runs.", fontsize=8)
+        data = doc.tobytes()
+        doc.close()
+        regions = [
+            {"role": "caption", "x0": 45, "y0": 130, "x1": 550, "y1": 145},
+            {"role": "furniture", "x0": 45, "y0": 750, "x1": 400, "y1": 770},
+        ]
+        text = " ".join(s["text"] for s in _layout(data, 0, {0: regions}))
+        self.assertIn("We report the mean of three runs.", text)
+
+    def test_an_author_note_block_with_an_address_goes_whole(self):
+        # the e-mail rule judges the whole block before the marked notes are taken out of it
+        text = self._notes_page(
+            "*Equal contribution. Correspondence to: ann@example.com\n"
+            "Author contributions are listed in the appendix."
+        )
+        self.assertNotIn("Author contributions", text)
+        self.assertIn(TEXT, text)
+
+    def test_note_marks(self):
+        # an author line's "∗" marks a "*" note
+        self.assertEqual(pdf_utils._mark("∗"), pdf_utils._mark("*"))
+        # a footnote number set smaller than its line opens a new footnote
+        small = [{"t": "1", "size": 5.0}, {"t": "Code:", "size": 8.0}]
+        self.assertTrue(pdf_utils._numbered_note(small))
+        same = [{"t": "1", "size": 8.0}, {"t": "Code:", "size": 8.0}]
+        self.assertFalse(pdf_utils._numbered_note(same))
+        # a word at the line's size is no mark, though a larger symbol is beside it
+        sizes = [("a", 8.0), ("Σ", 12.0), ("set", 8.0), ("of", 8.0), ("points", 8.0)]
+        self.assertFalse(
+            pdf_utils._numbered_note([{"t": t, "size": z} for t, z in sizes])
+        )
+        self.assertTrue(pdf_utils._numbered_note([{"t": "a", "size": 5.0}, small[1]]))
+        # a sign of the text is no mark
+        self.assertTrue(pdf_utils._marked_note("†Work"))
+        for t in ("§4.2", "#tokens", "‖x‖"):
+            self.assertFalse(pdf_utils._marked_note(t), t)
+
 
 def _contents_page(p, y: float, entries, title_x: float = 80) -> float:
     """Write contents entries (number, title, page) from `y`: a dot leader up to the page number
