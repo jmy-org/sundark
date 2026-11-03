@@ -533,8 +533,10 @@ async function exportAs(kind: 'md' | 'json') {
   } finally { if (exporting === mine) { exporting = 0; paintExportControls(); refocus(from); } }
 }
 async function copyMarkdown() {
-  try { await navigator.clipboard.writeText(exportMarkdown(doc)); $('export-msg').textContent = 'Markdown을 클립보드에 복사했어요.'; }
-  catch { $('export-msg').textContent = '이 환경에서는 클립보드에 쓸 수 없어요.'; }
+  // Like an export, the outcome is also said in the page status when the export tab is hidden.
+  const say = (line: string) => { $('export-msg').textContent = line; if ($('keep').hidden) status(line); };
+  try { await navigator.clipboard.writeText(exportMarkdown(doc)); say('Markdown을 클립보드에 복사했어요.'); }
+  catch { say('이 환경에서는 클립보드에 쓸 수 없어요.'); }
 }
 async function restore(input: HTMLInputElement) {
   const file = input.files?.[0];

@@ -19,6 +19,7 @@ html,body{height:auto}h1,p{margin:0}
 .segment.trseg{display:block;margin:0;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:inherit;font-size:13.5px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;cursor:pointer}
 .segment.trseg:hover,.segment.trseg.pinned{background:var(--hl)}
 .segment.trseg.muted{color:var(--muted)}
+.segment.trseg.muted:hover,.segment.trseg.muted.pinned{color:var(--text)}
 .empty{padding:20px;color:var(--muted);font-size:13px}.note{font-size:12px}
 @media(max-width:480px){.topbar{gap:10px;padding:0 10px}.saved{padding:10px}.row,.head{gap:6px;padding:6px}.segment.trseg{font-size:13px;padding:4px}}
 </style></head><body><header class="topbar"><div class="brand">Sundark</div><h1 id="title" class="doc-title">Sundark 대조 리더</h1><a id="site" class="btn-ghost" href="https://sundark-research-library.keenranger.chatgpt.site" target="_blank" rel="noopener noreferrer">비공개 사이트에서 열기</a></header>

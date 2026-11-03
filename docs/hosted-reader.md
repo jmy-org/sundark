@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `80ae67b0a51628e3335c4522bc71994792299363` ("Share the local reader's presentation with the hosted readers"; on top of `fed8803` and its reader action, restore, display-mode and host-error fixes) |
+| Exported Site commit | `1a65c2a8b70adb8ab9ccc2fa503afa996bbe456a` ("Announce copy outcomes and keep saved untranslated text readable"; on top of `80ae67b`, the shared reader presentation, and `fed8803` with its reader action, restore, display-mode and host-error fixes) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 
@@ -304,7 +304,7 @@ live-deployment gates remain open; no deployment is performed by this export.
 
 ### Shared presentation checkpoint (2026-11-03)
 
-The exported Site commit `80ae67b` takes every reader's presentation from `web/reader-ui.css`
+The exported Site commit `1a65c2a` (on `80ae67b`) takes every reader's presentation from `web/reader-ui.css`
 (see *Shared reader presentation*). The attachment reader now has the local reader's layout:
 the PDF under its page bar beside a tabbed panel (번역, 분석·질문, 내보내기·저장), one column below
 820px, the host's light or dark theme. Its ids, listbox, live regions, shortcuts, IME guards,
@@ -313,8 +313,9 @@ the same file. Template URIs are attachment v6 (v5 and older are aliases) and sa
 v3 aliases); the CSP stays empty.
 
 This is a local, undeployed revision. Local verification on Node 24 with the committed lock passed
-135 unit tests, 82 reader state/Chromium tests (including tabs, host theme, contrast in both themes,
-fullscreen sizing and focus on tab switches), the `/original` checks, TypeScript, the production
+135 unit tests, 83 reader state/Chromium tests (including tabs, host theme, contrast in both themes
+and in the saved-paper view, fullscreen sizing, focus on tab switches, and export and copy outcomes
+announced from a hidden tab), the `/original` checks, TypeScript, the production
 build, and 41 production / 96 development workerd checks with no first failure and unchanged D1/R2.
 None of this was run in ChatGPT: the original-PDF HTTP 400, continuation, widget questions, export,
 restore and reopen remain native gates, as do the test and live deployment gates.

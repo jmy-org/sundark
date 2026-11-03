@@ -1665,6 +1665,39 @@ test('shared presentation: a result that switches tabs never drops keyboard focu
   await host(() => window.testHost.settle('download'));
   await frame.waitForFunction(() => /넘겼어요/.test(document.getElementById('status').textContent));
   assert.equal(await text(frame, '#status'), await text(frame, '#export-msg'));
+  // So is a clipboard copy, success or refusal, that settles after the reader left the tab.
+  for (const ok of [true, false]) {
+    await frame.evaluate(() => { navigator.clipboard.writeText = () => new Promise((resolve, reject) => { window.settleCopy = ok => ok ? resolve() : reject(new Error('denied')); }); });
+    await frame.click('#tab-keep');
+    await frame.click('#copy-md');
+    await frame.click('#tab-read');
+    await frame.evaluate(ok => window.settleCopy(ok), ok);
+    await frame.waitForFunction(re => new RegExp(re).test(document.getElementById('status').textContent), ok ? '복사했어요' : '쓸 수 없어요');
+    assert.equal(await text(frame, '#status'), await text(frame, '#export-msg'));
+  }
   assert.deepEqual(errors, []);
   await page.close();
+});
+
+test('shared presentation: the saved-paper view keeps untranslated text readable when selected or hovered', async () => {
+  const {readerHtml} = await import('../lib/reader-resource.ts');
+  for (const theme of ['light', 'dark']) {
+    const page = await browser.newPage({viewport: {width: 900, height: 600}, reducedMotion: 'reduce'});
+    await page.setContent(readerHtml);
+    await page.evaluate(CONTRAST);
+    const ratio = await page.evaluate(t => {
+      document.documentElement.dataset.theme = t;
+      const b = document.createElement('button');
+      b.className = 'segment trseg muted pinned'; b.textContent = '아직 저장된 번역이 없어요.';
+      document.getElementById('rows').append(b);
+      const s = getComputedStyle(b);
+      return contrast(s.color, s.backgroundColor, getComputedStyle(document.getElementById('rows')).backgroundColor);
+    }, theme);
+    assert(ratio >= 4.5, `${theme} pinned untranslated ${ratio}`);
+    await page.evaluate(() => document.querySelector('#rows .muted').classList.remove('pinned'));
+    await page.hover('#rows .muted');
+    const hovered = await page.evaluate(() => { const b = document.querySelector('#rows .muted'), s = getComputedStyle(b); return contrast(s.color, s.backgroundColor, getComputedStyle(document.getElementById('rows')).backgroundColor); });
+    assert(hovered >= 4.5, `${theme} hovered untranslated ${hovered}`);
+    await page.close();
+  }
 });
