@@ -973,6 +973,234 @@ def _front_cut(words: list[dict], height: float) -> float:
     return height * 0.22
 
 
+# A row of a list of symbols opens with its symbol ("α  the learning rate . . . 12", "x  an
+# input . . . 3"), and a contents entry with a title or a number ("A Proofs", "2.1 Results").
+_SYMBOL_ROW = re.compile(r"[a-z]|[^\W\d_A-Za-z]{1,2}|[^\w\s]")
+
+
+def _toc_lines(
+    lines: list[dict],
+    words: list[dict],
+    page_count: int,
+    title_rects: list,
+    heads: set[int] | frozenset[int] = frozenset(),
+    page=None,
+) -> set[int]:
+    """Indices of `lines` that make up a table of contents (or a list of figures/tables),
+    and the list's own heading (a line in `title_rects`) right above it ("Contents", "List
+    of Tables"); a chapter title over a chapter's short contents stays. An entry ends in a
+    page number set apart from its title, after a dot leader or a wide gap ("3.1 Results . .
+    . 10", "1 Introduction 4"); a number on a line of its own pairs with the nearest line to
+    its left, which must hold a title or a leader, so a row of numbers (axis ticks, table
+    cells) is no entry, and neither is a row of a list of symbols, which opens with its
+    symbol ("α", "x"). On a page set in two columns (_two_columns of `page`), a title with
+    no dot leader is in its number's column: a number in the other column beside prose (a
+    plot's ticks, a rank) is no entry. A page is a contents page when five or more rows hold
+    entries that follow on without a wide gap, and their numbers mostly go up in reading
+    order; a table typed as text rarely does both, and the lines a table box covers are gone
+    by now. Two rows, one with a dot leader, are enough right below a "Contents" heading:
+    the contents may start at a page's foot. A running head or foot (`heads`, indices of
+    `lines`) is never an entry. In each column of entries, from its first entry's row to its
+    last one's, everything goes, wrapped entries included (a first title that wraps above
+    its number's row too, up to a heading, and a last one whose title runs up to its number
+    below); text below the last entry, or beside the entries in the other column, stays. It
+    runs before page numbers go: the model may call an entry's number furniture."""
+    # (number, its line, the entry's lines), and the entries with a dot leader
+    entries: list[tuple[int, int, list[int]]] = []
+    dotted: set[int] = set()
+    split: list[bool] = []  # _two_columns(page), worked out once if it is needed
+
+    def symbol_row(j: int) -> bool:
+        """The row of line `j` opens with a symbol, on that line or on one just left of it."""
+        o = lines[j]
+        lead = [
+            q
+            for q in lines
+            if q is not o
+            and abs(q["cy"] - o["cy"]) < o["h"] / 2
+            and o["left"] - 60 <= q["right"] <= o["left"]
+        ]
+        first = min(lead, key=lambda q: q["left"]) if lead else o
+        return bool(_SYMBOL_ROW.fullmatch(words[first["widx"][0]]["t"]))
+
+    for i, ln in enumerate(lines):
+        ws = ln["widx"]
+        m = re.fullmatch(r"(\.*)(\d{1,4})", words[ws[-1]]["t"])
+        if not m or not 1 <= int(m.group(2)) <= page_count + 10:
+            continue
+        if i in heads:
+            continue
+        if len(ws) > 1:
+            if symbol_row(i):
+                continue
+            prev = words[ws[-2]]
+            leader = (
+                m.group(1)
+                or re.fullmatch(r"\.+", prev["t"])
+                or prev["t"].endswith("...")
+            )
+            if not leader and words[ws[-1]]["x0"] - prev["x1"] < 1.5 * ln["size"]:
+                continue
+            if leader:
+                dotted.add(i)
+            row = [i]
+        else:
+            beside = [
+                j
+                for j, o in enumerate(lines)
+                if j != i
+                and abs(o["cy"] - ln["cy"]) < ln["h"] / 2
+                and o["right"] <= ln["left"]
+            ]
+            if not beside:
+                continue  # a bare number with no title beside it
+            j = max(beside, key=lambda j: lines[j]["right"])
+            title = lines[j]["text"]
+            mid = page.rect.width / 2 if page is not None else 0
+            if (
+                page is not None
+                and (lines[j]["cx"] > mid) != (ln["cx"] > mid)
+                and not re.search(r"\.\s*\.$", title)
+            ):
+                if not split:
+                    split.append(_two_columns(page))
+                if split[0]:
+                    continue  # beside a line of the other column
+            if not re.search(r"[^\W\d_]|\.\s*\.$", title):
+                continue
+            if j in heads or symbol_row(j):
+                continue
+            if re.search(r"\.\s*\.$", title):
+                dotted.add(i)
+            row = [j, i]
+        entries.append((int(m.group(2)), i, row))
+    titled = [
+        o["bottom"]
+        for o in lines
+        if re.fullmatch(r"(?:table of )?contents", o["text"].strip(), re.IGNORECASE)
+        and _in_rects(o["cx"], o["cy"], title_rects)
+    ]
+    if len(entries) < (2 if titled else 5):
+        return set()
+    # the longest run of entries with no wide gap between two of them
+    entries.sort(key=lambda e: lines[e[1]]["top"])
+    tops = [lines[i]["top"] for _, i, _ in entries]
+    steps = [b - a for a, b in zip(tops, tops[1:])]
+    wide = max(
+        3 * statistics.median(steps), 3 * statistics.median(ln["h"] for ln in lines)
+    )
+    runs = [[entries[0]]]
+    for e, step in zip(entries[1:], steps):
+        if step > wide:
+            runs.append([])
+        runs[-1].append(e)
+    run = sorted(max(runs, key=len), key=lambda e: e[1])  # back in reading order
+    n_rows = len({round(lines[i]["cy"]) for _, i, _ in run})
+    first = lines[run[0][1]]
+    if n_rows < 5 and not (
+        n_rows >= 2
+        and any(i in dotted for _, i, _ in run)
+        and any(0 <= first["top"] - b + 1 <= 3 * first["h"] for b in titled)
+    ):
+        return set()
+    vals = [v for v, _, _ in run]
+    if len(set(vals)) < min(3, n_rows):
+        return set()  # a column of one number is a table's, not page numbers
+    if sum(b >= a for a, b in zip(vals, vals[1:])) < 0.8 * (len(vals) - 1):
+        return set()
+    # one band per column of entries: contents that fill one column and run on in the next
+    # stand beside text that is not theirs (a figure, the start of the introduction)
+    span = {
+        i: (min(lines[j]["left"] for j in row), max(lines[j]["right"] for j in row))
+        for _, i, row in run
+    }
+    groups: list[list[tuple[int, int, list[int]]]] = []
+    edge = 0.0
+    for e in sorted(run, key=lambda e: span[e[1]][0]):
+        if not groups or span[e[1]][0] >= edge:
+            groups.append([])
+            edge = span[e[1]][1]
+        groups[-1].append(e)
+        edge = max(edge, span[e[1]][1])
+    out: set[int] = set()
+    for group in groups:
+        group.sort(key=lambda e: e[1])  # reading order
+        vals = [v for v, _, _ in group]
+        rows = [lines[j] for _, _, row in group for j in row]
+        top, bottom = min(o["top"] for o in rows), max(o["bottom"] for o in rows)
+        # an entry whose long title runs up to its number ("C Further Results on ... Tasks
+        # 48"): a line right below, ending at the page-number column with a number that goes on
+        col = max(lines[i]["right"] for _, i, _ in group)
+        tops = sorted(lines[i]["top"] for _, i, _ in group)
+        steps = [b - a for a, b in zip(tops, tops[1:])]
+        pitch = min(max(steps), 2.5 * statistics.median(steps)) if steps else 0.0
+        low = tops[-1]
+        grew = True
+        while grew:
+            grew = False
+            for ln in lines:
+                last = words[ln["widx"][-1]]["t"]
+                if (
+                    low < ln["top"] <= low + pitch + 1
+                    and abs(ln["right"] - col) <= 3
+                    and re.fullmatch(r"\d{1,4}", last)
+                    and vals[-1] <= int(last) <= page_count + 10
+                ):
+                    rows.append(ln)
+                    low, bottom = ln["top"], max(bottom, ln["bottom"])
+                    vals.append(int(last))
+                    grew = True
+        left, right = min(o["left"] for o in rows), max(o["right"] for o in rows)
+        # the first entry's title may wrap above its number's row: up to three lines right
+        # above, back to the one that opens with an entry's number ("2.1 Two simple ...")
+        upper = min(o["cy"] for o in rows)
+        for _ in range(3):
+            near = [
+                o
+                for o in lines
+                if upper - pitch - 1 <= o["cy"] < upper - 1
+                and o["right"] > left - 30
+                and o["left"] < right
+            ]
+            if not near:
+                break
+            # the next row up, with its number if that is a line of its own
+            row_cy = max(o["cy"] for o in near)
+            row = [o for o in near if row_cy - o["cy"] < o["h"] / 2]
+            if any(_in_rects(o["cx"], o["cy"], title_rects) for o in row):
+                break  # a heading is no wrapped title
+            upper = min(o["cy"] for o in row)
+            wrap = min(row, key=lambda o: o["left"])
+            label = words[wrap["widx"][0]]["t"]
+            if re.fullmatch(r"(?:\d{1,2}|[A-Z]\.\d{1,2})(?:\.\d{1,2})*\.?", label):
+                top = min([top] + [o["top"] for o in row])
+                break
+        band = {
+            j
+            for j, o in enumerate(lines)
+            if top - 1 <= o["cy"] <= bottom + 1 and left - 30 <= o["cx"] <= right + 5
+        }
+        above = [
+            j
+            for j, o in enumerate(lines)
+            if j not in band
+            and o["bottom"] <= top + 1
+            and o["right"] > left
+            and o["left"] < right
+        ]
+        if above:
+            j = max(above, key=lambda j: lines[j]["bottom"])
+            o = lines[j]
+            if (
+                _in_rects(o["cx"], o["cy"], title_rects)
+                and len(o["widx"]) <= 4
+                and re.search(r"contents|^list of", o["text"].strip(), re.IGNORECASE)
+            ):
+                band.add(j)
+        out |= band
+    return out
+
+
 def _front_matter(page) -> set[str]:
     """The letters (`_letters`) of each line of page 0 above the cut (`_front_cut`)."""
     words = [
@@ -1728,6 +1956,19 @@ def _page_layout(
                 ),
                 None,
             )
+
+        # A table of contents is not translated: the headings it lists are, where they stand.
+        # A running head is no entry, by where it stands as well as its words: a monograph's
+        # heads repeat its chapter titles ("INTRODUCTION"), and so does its contents.
+        heads = {
+            j
+            for j, ln in enumerate(lines)
+            if _norm_header(ln["text"]) in (headers or ())
+            and (ln["top"] < ph * 0.12 or ln["bottom"] > ph * 0.90)
+        }
+        toc = _toc_lines(lines, words, doc.page_count, title_rects, heads, page)
+        if toc:
+            lines = [ln for j, ln in enumerate(lines) if j not in toc]
 
         # Drop running heads and page numbers, by their text, not by height alone. A line repeated
         # across pages (`headers`) goes when it is in the page's top or bottom band, or inside a

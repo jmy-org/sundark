@@ -351,6 +351,36 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   block (affiliations, "Correspondence to: ..."), the same front matter set at the foot of
   the page. Over 32 papers all 10 such footnotes were one; content footnotes carry no
   address, and "Equal contribution" or a venue notice without one is still translated.
+- **A table of contents is not translated.** `_toc_lines()` finds it on each page by its
+  entries: a row that ends in a page number after a dot leader or a wide gap, or a number on
+  a line of its own beside a title (the nearest line to its left; a row of numbers, such as
+  axis ticks, is no entry; on a two-column page a title with no dot leader is in its
+  number's column, or a plot's ticks beside the other column's prose would take that prose).
+  It needs five rows of entries that follow on without a wide gap, three different numbers,
+  mostly going up in reading order. Not by a "Contents" heading: the contents run on to
+  pages without one; the list's own heading right above the entries ("Contents", "List of
+  Tables") goes with them, and so does a list of figures or tables. A "Contents" heading
+  right above lowers the need to two rows, one with a dot leader, for contents that start at
+  a page's foot (two rows that end in numbers under a section named "Contents" are no
+  contents). Only the entries' own band goes, one column at a time: contents that fill one
+  column and run on in the next stand beside text that is not theirs (a figure caption, the
+  start of the introduction), and one band across the page took that text too. The band
+  takes a first title that wraps above its number's row, back to the line that opens with
+  its number ("2.1 Two simple ..."), and a last title that runs on below up to its number,
+  but never grows past a heading: a thesis chapter may open with the short contents of its
+  sections, and its title ("1 Introduction") opens with a number like an entry. Text below
+  the last entry stays, and a table with dot leaders is gone before (a table box covers it).
+  A running head is never an entry, by its words and its place in the page's top or bottom
+  band: a monograph's heads repeat its chapter titles ("INTRODUCTION"), and by its words
+  alone the entry "1 Introduction" was none. It runs before page numbers are dropped, since
+  the model may call an entry's number furniture. Over 89 papers it dropped 25 pages of
+  contents in 16 and nothing else, over 22 papers kept out of the tuning (a 180-page
+  monograph, surveys, a two-column supplement, math, physics, ACM and IEEE layouts) 6 pages
+  in 4 and the start of a seventh, and in a PhD thesis its contents and lists of figures and
+  tables; the internal links of hyperref contents found no page it missed. A list of symbols
+  is no contents, page numbers or not: its rows open with the symbol ("α", "x"), on the
+  title's line or just left of it. A list of abbreviations with page numbers would go like a
+  list of figures (none had them in the documents seen).
 - **An appendix cover's copy of the front matter is dropped.** Page 0 drops everything
   above the Abstract (title, authors, affiliations; `_front_cut`). An appendix or
   supplement often opens on a cover that repeats those lines, and the model may type its
