@@ -89,9 +89,9 @@ PDF takes 10 calls.
   sourceHash,pages:[{page,width,height,segments,sourceHash}],translations,nextPages,needsOcrPages,
   failedPages,deferredPages,attemptedPages,unreadPages,complete,reportedComplete,progressBasis,pageLimit,extractablePages,
   translation:{language,instructions,batches:[{page,sourceHash,language,segmentIds}]},storageNotice}` as both model
-  text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader-v5.html`
+  text and `structuredContent`, with the reader resource `ui://sundark/attachment-reader-v6.html`
   (`_meta.ui.resourceUri` plus the `openai/outputTemplate` alias; the earlier
-  `ui://sundark/attachment-reader.html`, `-v2.html`, `-v3.html` and `-v4.html`, and the saved reader's `ui://sundark/reader-compat-v2.html`
+  `ui://sundark/attachment-reader.html`, `-v2.html`, `-v3.html`, `-v4.html` and `-v5.html`, and the saved reader's `ui://sundark/reader-compat-v2.html` and `-v3.html`
   stay readable with the same body for existing chats, but are no longer listed), so the first requested page's source
   shows before any translation. The download URL is never echoed, stored or logged.
 - `sourceHash` is per page: sha256 over the original file's sha256 and that page's exact geometry and
@@ -142,6 +142,17 @@ PDF takes 10 calls.
   are `[]` for the current URI and every alias. The view makes no network request of its own: the
   original PDF arrives through `read_attachment_original`. The empty declaration is what Sundark
   controls; enforcement is the host's.
+- The reader looks like the local Sundark reader: the PDF under its page bar beside a tabbed panel
+  (번역 / 분석·질문 / 내보내기·저장), one column below 820px. Its tokens and components come from
+  `client/shared/reader-ui.css`, a generated copy of jmy-org/sundark `web/reader-ui.css` (written by
+  that repository's `scripts/sync_reader_ui.py`; never edit it here). The copy carries the sha256 of
+  its body in its header; `scripts/build-attachment-reader.mjs` refuses a copy whose body does not
+  match and inlines it into this reader and the saved-paper view, and `prepare-reader-assets.mjs`
+  serves it to `/original` as `/vendor/sundark/reader-ui.css`. The reader follows the host's
+  `theme` (light or dark), and the system theme when the host names none; the local reader is dark
+  only, so the light values are derived and contrast-checked in `tests/attachment-reader.browser.mjs`.
+  `node tests/reader-visual.capture.mjs <pdf> <dir>` saves screenshots of the reader at wide,
+  inline and phone widths in both themes (after the widget build).
 - The UI tools (the four attachment reader tools and `render_paper_reader`) declare `outputSchema`
   `{type:"object",additionalProperties:true}`: their `structuredContent` is always an object; the schema adds no shape.
 - ChatGPT's own file retention is outside Sundark. Results live only in the conversation.

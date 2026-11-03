@@ -64,6 +64,15 @@ Backend (Claude Code, Hermes, or ChatGPT) — never a billable API key.
   translation, summarize, anatomy, chat. **`web/`** is plain JS + pdf.js + KaTeX,
   no build step. Highlighting maps server word coordinates (PDF points) to the
   viewport, so highlights are sentence-accurate.
+- **`web/reader-ui.css`** is the ONE source of the reader presentation (tokens, buttons, bars,
+  tabs, PDF frame, highlight, translation, cards, composer) shared by this reader, the hosted
+  `/original` page, the ChatGPT attachment reader and its saved-paper view. `web/styles.css` keeps
+  only this reader's layout and local-only components. The Site holds a generated, hash-headed copy
+  (`client/shared/reader-ui.css`, written by `scripts/sync_reader_ui.py --site <checkout>`) and
+  refuses one that was edited; `tests/test_reader_ui_parity.py` fails when the exported copy in
+  `hosted-reader/` differs from the source by a byte. No URL, font or `@import` in it: the widget
+  inlines it under an empty CSP. This reader is dark only; the light values in it are derived for
+  the widget (opt-in by `data-theme`/`data-theme-auto`), not extracted from here.
 - **`app/store.py`** persists uploads + cached AI results under `data/`.
 - **`hosted-reader/`** is the hosted ChatGPT Site's source, a byte-exact `git archive` export
   of a Site commit (`docs/hosted-reader.md`). Never edit it here: change the Site, then

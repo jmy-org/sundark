@@ -60,6 +60,9 @@ await cp(`${root}/node_modules/dompurify/dist/purify.min.js`,`${assets}/dompurif
 for (const file of ['katex.min.css','katex.min.js']) await cp(`${root}/node_modules/katex/dist/${file}`,`${assets}/katex/${file}`);
 for (const file of ['auto-render.min.js','copy-tex.min.js']) await cp(`${root}/node_modules/katex/dist/contrib/${file}`,`${assets}/katex/${file}`);
 await cp(`${root}/node_modules/katex/dist/fonts`,`${assets}/katex/fonts`,{recursive:true});
+// The presentation shared with the local reader, verified against its hash header (scripts/shared-css.mjs).
+const {readSharedCss}=await import('./shared-css.mjs');
+await writeFile(`${assets}/sundark/reader-ui.css`,await readSharedCss());
 for (const name of ['marked','katex','dompurify']) {try{await cp(`${root}/node_modules/${name}/LICENSE`,`${assets}/${name}/LICENSE`)}catch{}}
 const {build}=await import('esbuild');
 await build({entryPoints:[`${root}/lib/pdf-engine.ts`],outfile:`${assets}/sundark/pdf-engine.js`,bundle:true,format:'esm',platform:'browser',target:'es2022',alias:{'pdfjs-dist':'/vendor/pdf/pdf.mjs'},external:['/vendor/pdf/pdf.mjs'],minify:true});

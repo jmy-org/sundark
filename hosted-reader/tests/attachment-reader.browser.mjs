@@ -204,8 +204,8 @@ const painted = frame => frame.$eval('#canvas', c => {
 
 test('exports the resource the backend registers', () => {
   // The CSP is part of the host's template cache key: the empty-CSP body gets a new URI.
-  assert.equal(attachmentReaderUri, 'ui://sundark/attachment-reader-v5.html');
-  for (const old of ['ui://sundark/attachment-reader.html', 'ui://sundark/attachment-reader-v2.html', 'ui://sundark/attachment-reader-v3.html', 'ui://sundark/attachment-reader-v4.html'])
+  assert.equal(attachmentReaderUri, 'ui://sundark/attachment-reader-v6.html');
+  for (const old of ['ui://sundark/attachment-reader.html', 'ui://sundark/attachment-reader-v2.html', 'ui://sundark/attachment-reader-v3.html', 'ui://sundark/attachment-reader-v4.html', 'ui://sundark/attachment-reader-v5.html'])
     assert(attachmentReaderAliases.includes(old), `${old} still served`);
   assert(attachmentReaderHtml.includes('read_attachment_original'));
   assert(attachmentReaderHtml.startsWith('<!doctype html>'));
@@ -297,6 +297,7 @@ test('translations show only as a contiguous prefix; state stays small; keyboard
   assert.notEqual(await frame.$eval('#next-seg', e => getComputedStyle(e).outlineStyle), 'none');
 
   // IME: Enter while composing Hangul never sends; a plain Enter sends once.
+  await frame.click('#tab-ask');
   await frame.fill('#question', '이 방법의 한계는');
   await frame.dispatchEvent('#question', 'keydown', {key: 'Enter', isComposing: true, bubbles: true});
   await frame.focus('#question');
@@ -365,6 +366,7 @@ test('summary, analysis results, export and explicit save', async () => {
   await host(o => window.testHost.result(o), read1);
   await host(o => window.testHost.result(o), await render(2));
   await frame.waitForSelector('#segments li[role=option]');
+  await frame.click('#tab-ask');
   await frame.click('#ask-summary');
   await frame.click('#ask-anatomy');
   await page.waitForFunction(() => window.testHost.calls.messages.length === 2);
@@ -375,6 +377,7 @@ test('summary, analysis results, export and explicit save', async () => {
   await host(o => window.testHost.result(o), {...await render(2), analysis: {kind: 'summary', language: 'Korean', sourcePages: [1], sourceHash: 'x', content: {text: '식물이 빛으로 자란다는 합성 요약.', citations: []}}});
   await frame.waitForFunction(() => document.getElementById('results').textContent.includes('합성 요약'));
 
+  await frame.click('#tab-keep');
   await frame.click('#export-md');
   await frame.click('#export-json');
   await page.waitForFunction(() => window.testHost.calls.downloads.length === 2);
@@ -811,6 +814,7 @@ test('a fully read document shows complete, and a render keeps it', async () => 
   if (read2.reportedComplete) assert.match(await text(fresh.frame, '#read-state'), /이 화면이 받은 원문은 1\/2페이지/);
   await fresh.page.close();
   // The same complete reading restored from its exported JSON says the claim rests on that file.
+  await frame.click('#tab-keep');
   await frame.click('#export-json');
   await page.waitForFunction(() => window.testHost.calls.downloads.length > 0);
   const exported = (await host(() => window.testHost.calls.downloads)).at(-1).resource.text;
@@ -841,12 +845,14 @@ test('a non-Korean translation keeps its language through render and requests', 
   assert.equal(await frame.$eval('#segments li[role=option] .tr', e => e.lang), 'ja', 'assistive technology reads it as Japanese');
   // Every request the reader sends keeps the language.
   await frame.click('#translate-next');
+  await frame.click('#tab-ask');
   await frame.click('#ask-summary');
   await page.waitForFunction(() => window.testHost.calls.messages.length === 2);
   const [next, summary] = await host(() => window.testHost.calls.messages);
   assert.match(next, /language Japanese/);
   assert.match(summary, /language Japanese/);
   await host(r => { window.testHost.replies.tool = r; }, read2);
+  await frame.click('#tab-read');
   await frame.click('#load-next');
   await page.waitForFunction(() => window.testHost.calls.tools.length === 1);
   assert.equal((await host(() => window.testHost.calls.tools))[0].arguments.language, 'Japanese');
@@ -1060,6 +1066,7 @@ test("ChatGPT's own follow-up helper, when present, is the one sender: one call 
 
 test('without the helper the advertised ui/message is the sender; with neither, every message control is off', async () => {
   const v = await opened('openai=1');
+  await v.frame.click('#tab-ask');
   await v.frame.click('#ask-summary');
   await v.frame.waitForFunction(t => document.getElementById('status').textContent === t, SENT);
   assert.equal((await v.host(() => window.testHost.calls.messages)).length, 1);
@@ -1102,6 +1109,7 @@ test('a refused request shows its own error, even after an earlier load error, w
     const v = await opened(query);
     if (mode) await v.host(m => { window.testHost.replies.message = m; }, mode);
     const earlier = await loadError(v);
+    await v.frame.click('#tab-ask');
     await v.frame.click('#ask-summary');
     await v.frame.waitForFunction(e => document.getElementById('error').textContent !== e, earlier);
     const error = await text(v.frame, '#error');
@@ -1112,6 +1120,7 @@ test('a refused request shows its own error, even after an earlier load error, w
     if (mode) {
       // The next request that goes through clears that error; the card's first error remains.
       await v.host(() => { window.testHost.replies.message = undefined; });
+      await v.frame.click('#tab-read');
       await v.frame.click('#translate-next');
       await v.frame.waitForFunction(t => document.getElementById('status').textContent === t, SENT);
       assert.equal(await text(v.frame, '#error'), earlier);
@@ -1163,6 +1172,7 @@ test('a late answer changes nothing: not after a newer request, not on a replace
   await v.frame.click('#translate-next');
   await v.page.clock.fastForward(15_500);
   await v.frame.waitForFunction(() => /확인하지 못했어요/.test(document.getElementById('status').textContent));
+  await v.frame.click('#tab-ask');
   await v.frame.click('#ask-summary');
   assert.equal(await text(v.frame, '#status'), SENDING);
   await v.frame.evaluate(() => window.__settle.shift()());
@@ -1172,6 +1182,7 @@ test('a late answer changes nothing: not after a newer request, not on a replace
   await v.frame.evaluate(() => window.__settle.shift()());
   await v.frame.waitForFunction(t => document.getElementById('status').textContent === t, SENT);
   // A request out when the attachment changes: its answer never reaches the new document.
+  await v.frame.click('#tab-read');
   await v.frame.click('#translate-next');
   await v.host(o => window.testHost.result(o), other);
   await v.frame.waitForFunction(() => document.getElementById('title').textContent === 'other.pdf');
@@ -1197,6 +1208,7 @@ test('export: capability-aware buttons, pending, bounded, and no claim that a fi
   const v = await opened('openai=1', {clock: true});
   assert(await v.frame.$eval('#export-hint', e => e.hidden));
   // Acknowledged: handed to the host, with no claim that a file was saved.
+  await v.frame.click('#tab-keep');
   await v.frame.click('#export-json');
   await v.frame.waitForFunction(() => /넘겼어요/.test(document.getElementById('export-msg').textContent));
   const ack = await text(v.frame, '#export-msg');
@@ -1517,4 +1529,142 @@ test('host context changes repaint the control, also while a request is out', as
   assert.deepEqual(await displayCalls(v), ['fullscreen']);
   assert.deepEqual(v.errors, []);
   await v.page.close();
+});
+
+// ---------------- shared presentation (client/shared/reader-ui.css, from the local reader) ----------------
+/** WCAG contrast of two computed colors; a translucent color is laid over `under` first. */
+const CONTRAST = `(() => {
+  const rgb = c => { const m = c.match(/[\\d.]+/g).map(Number); return {r: m[0], g: m[1], b: m[2], a: m[3] ?? 1}; };
+  const over = (top, under) => ({r: top.r * top.a + under.r * (1 - top.a), g: top.g * top.a + under.g * (1 - top.a), b: top.b * top.a + under.b * (1 - top.a), a: 1});
+  const lum = c => { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b); };
+  window.contrast = (fg, bg, under) => { let b = rgb(bg); if (under) b = over(b, rgb(under)); const f = over(rgb(fg), b); const [x, y] = [lum(f), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+})()`;
+
+test('shared presentation: the local reader\'s two panes, tabs and components', async () => {
+  const {page, frame, host, errors} = await open('openai=1');
+  await host(o => window.testHost.result(o), await render(2));
+  await frame.waitForFunction(() => !document.getElementById('stage').hidden, null, {timeout: 15000});
+  // Shared component classes, not lookalikes: the PDF pane, its bar, the panel tabs, the translation.
+  for (const sel of ['#layout.workspace', '#original.pdfcol > .pdfbar', '#original-scroll.pdfview', '#stage.pdfpage', '#hl.hllayer',
+    '.aipanel > .tabs[role=tablist]', '#segments.trpage', '#segments li[role=option].trseg', '#segments li.page-head.ph', '.topbar .brand'])
+    assert(await frame.$(sel), sel);
+  assert.equal(await frame.$eval('#layout', e => getComputedStyle(e).gridTemplateColumns.split(' ').length), 2, 'PDF | panel');
+  // The selected sentence is pinned in both panes: tint with the accent bar, and the ring on the PDF.
+  const pinned = await frame.$eval('#segments li[aria-selected=true]', e => getComputedStyle(e).boxShadow);
+  assert.match(pinned, /inset/);
+  assert(await frame.$$eval('#hl .hlrect.hlring', l => l.length) > 0);
+  // The translation leads, as in the local reader; the source line follows.
+  assert.deepEqual(await frame.$eval('#segments li[role=option]', e => [...e.children].map(c => c.className.split(' ')[0])), ['tr', 'src']);
+
+  // Tabs: one selected, the others out of the tab order; arrows move and focus, Home/End jump.
+  const state = () => frame.$$eval('[role=tab]', l => l.map(t => [t.id, t.getAttribute('aria-selected'), t.tabIndex, document.getElementById(t.getAttribute('aria-controls')).hidden]));
+  assert.deepEqual(await state(), [['tab-read', 'true', 0, false], ['tab-ask', 'false', -1, true], ['tab-keep', 'false', -1, true]]);
+  await frame.focus('#tab-read');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await frame.evaluate(() => document.activeElement.id), 'tab-ask');
+  assert.deepEqual((await state()).map(s => s[1]), ['false', 'true', 'false']);
+  await page.keyboard.press('End');
+  assert.equal(await frame.evaluate(() => document.activeElement.id), 'tab-keep');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await frame.evaluate(() => document.activeElement.id), 'tab-read', 'wraps around');
+  // IME: a composing key never switches.
+  await frame.dispatchEvent('#tab-read', 'keydown', {key: 'ArrowRight', isComposing: true, bubbles: true});
+  assert.equal((await state())[0][1], 'true');
+  // An analysis result shows where it was asked for.
+  await host(o => window.testHost.result(o), {...await render(2), analysis: {kind: 'summary', language: 'Korean', sourcePages: [1], sourceHash: 'x', content: {text: '합성 요약.', citations: []}}});
+  await frame.waitForFunction(() => document.getElementById('tab-ask').getAttribute('aria-selected') === 'true');
+  assert(await frame.$('#results .anat-card .anat-head h3.name'));
+  assert(!(await frame.$eval('#results', e => e.offsetParent === null)), 'visible');
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('shared presentation: host theme, derived light palette and contrast in both themes', async () => {
+  for (const scheme of ['light', 'dark']) {
+    // Reduced motion: the shared rules drop transitions, so colors are read settled, not mid-fade.
+    const page = await browser.newPage({viewport: {width: 1320, height: 960}, ignoreHTTPSErrors: true, colorScheme: scheme === 'light' ? 'dark' : 'light', reducedMotion: 'reduce'});
+    const errors = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.exposeFunction('serveOriginal', originalServer({}));
+    await page.goto(`${origin}/host.html?openai=1&modes=inline,fullscreen`);
+    await page.waitForFunction(() => window.testHost);
+    await page.evaluate(() => window.testHost.ready());
+    const frame = page.frames().find(f => f.url().includes('/widget.html'));
+    // The host's theme wins over the system's (emulated as the opposite here).
+    await page.evaluate(t => window.testHost.context({theme: t}), scheme);
+    await frame.waitForFunction(t => document.documentElement.dataset.theme === t, scheme);
+    await page.evaluate(o => window.testHost.result(o), await render(2));
+    await frame.waitForSelector('#segments li[role=option]');
+    await frame.evaluate(CONTRAST);
+    const report = await frame.evaluate(() => {
+      const s = sel => getComputedStyle(document.querySelector(sel));
+      const bg = s('body').backgroundColor, panel = s('.tabs').backgroundColor, sel = s('#segments li[aria-selected=true]').backgroundColor;
+      return {
+        scheme: getComputedStyle(document.documentElement).colorScheme,
+        text: contrast(s('body').color, bg), textPanel: contrast(s('.tab.active').color, panel),
+        muted: contrast(s('#progress-text').color, bg), mutedPanel: contrast(s('.tab:not(.active)').color, panel),
+        selectedTr: contrast(s('#segments li[aria-selected=true] .tr').color, sel, bg),
+        selectedSrc: contrast(s('#segments li[aria-selected=true] .src').color, sel, bg),
+        accent: contrast(s('.tab.active').borderBottomColor, panel), primary: contrast(s('#translate-next').color, s('#translate-next').backgroundColor),
+      };
+    });
+    assert.match(report.scheme, new RegExp(scheme), JSON.stringify(report));
+    assert.equal(await frame.$eval('.tab', e => getComputedStyle(e).transitionDuration), '0s', 'reduced motion drops transitions');
+    for (const k of ['text', 'textPanel', 'muted', 'mutedPanel', 'selectedTr', 'selectedSrc', 'primary']) assert(report[k] >= 4.5, `${scheme} ${k} ${report[k]}`);
+    assert(report.accent >= 3, `${scheme} accent ${report.accent}`);
+    // The focus ring is the accent at 3:1 or more against the page.
+    await frame.focus('#next-seg');
+    const ring = await frame.evaluate(() => { const s = getComputedStyle(document.getElementById('next-seg')); return [s.outlineStyle, contrast(s.outlineColor, getComputedStyle(document.body).backgroundColor)]; });
+    assert.notEqual(ring[0], 'none'); assert(ring[1] >= 3, `${scheme} ring ${ring[1]}`);
+    // A selected sentence not translated yet: its placeholder line is readable on the tint too.
+    await frame.click('#seg-' + ids.at(-1));
+    const pending = await frame.evaluate(() => { const li = document.querySelector('#segments li[aria-selected=true]'), tr = li.querySelector('.tr');
+      return {muted: tr.classList.contains('muted'), ratio: contrast(getComputedStyle(tr).color, getComputedStyle(li).backgroundColor, getComputedStyle(document.body).backgroundColor)}; });
+    assert(pending.muted && pending.ratio >= 4.5, `${scheme} untranslated selected ${JSON.stringify(pending)}`);
+    // A host that stops naming a theme leaves the system's in charge.
+    await page.evaluate(() => window.testHost.context({theme: undefined}));
+    assert.deepEqual(errors, []);
+    await page.close();
+  }
+});
+
+test('shared presentation: fullscreen fills the view, inline keeps a fixed height', async () => {
+  const {page, frame, host, errors} = await open('openai=1&modes=inline,fullscreen');
+  await host(o => window.testHost.result(o), await render(2));
+  await frame.waitForSelector('#segments li[role=option]');
+  assert.equal(await frame.evaluate(() => document.documentElement.dataset.display), 'inline');
+  assert.equal(await frame.$eval('#layout', e => e.getBoundingClientRect().height), 640);
+  await frame.click('#display-mode');
+  await frame.waitForFunction(() => document.documentElement.dataset.display === 'fullscreen');
+  const fit = await frame.evaluate(() => ({doc: document.documentElement.scrollHeight, view: innerHeight}));
+  assert(fit.doc <= fit.view, JSON.stringify(fit));
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('shared presentation: a result that switches tabs never drops keyboard focus', async () => {
+  const {page, frame, host, errors} = await open('openai=1');
+  await host(o => window.testHost.result(o), await render(2));
+  await frame.waitForSelector('#segments li[role=option]');
+  await frame.click('#tab-keep');
+  await frame.focus('#export-json');
+  await host(o => window.testHost.result(o), {...await render(2), analysis: {kind: 'summary', language: 'Korean', sourcePages: [1], sourceHash: 'x', content: {text: '합성 요약.', citations: []}}});
+  await frame.waitForFunction(() => document.getElementById('tab-ask').getAttribute('aria-selected') === 'true');
+  assert.equal(await frame.evaluate(() => document.activeElement.id), 'tab-ask');
+  // A switch while focus is elsewhere (the list) leaves it there.
+  await frame.click('#tab-read');
+  await frame.focus('#segments');
+  await host(o => window.testHost.result(o), {...await render(2), analysis: {kind: 'summary', language: 'Korean', sourcePages: [1], sourceHash: 'x', content: {text: '합성 요약 둘째.', citations: []}}});
+  await frame.waitForFunction(() => document.getElementById('tab-ask').getAttribute('aria-selected') === 'true');
+  assert.equal(await frame.evaluate(() => document.activeElement.id), 'tab-ask', 'the list is hidden with its tab, so focus moves to the tab');
+  // An export outcome that settles after the reader left the export tab is also said in the page status.
+  await host(() => { window.testHost.replies.download = 'manual'; });
+  await frame.click('#tab-keep');
+  await frame.click('#export-json');
+  await frame.click('#tab-read');
+  await host(() => window.testHost.settle('download'));
+  await frame.waitForFunction(() => /넘겼어요/.test(document.getElementById('status').textContent));
+  assert.equal(await text(frame, '#status'), await text(frame, '#export-msg'));
+  assert.deepEqual(errors, []);
+  await page.close();
 });

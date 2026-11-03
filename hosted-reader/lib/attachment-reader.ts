@@ -5,7 +5,8 @@ import { html } from './generated/attachment-reader-html';
 // tool results named stay readable (same body), so existing chats keep their reader.
 // v4 has an empty CSP (the CSP is part of the cached template) and reads the original in-band.
 // v5 keeps that CSP and adds bounded, visible feedback for conversation requests and exports.
-export const attachmentReaderUri = 'ui://sundark/attachment-reader-v5.html';
+// v6 keeps that CSP and takes the presentation shared with the local reader (client/shared/reader-ui.css).
+export const attachmentReaderUri = 'ui://sundark/attachment-reader-v6.html';
 // Earlier URIs serve the current body and CSP, unadvertised. v3 was the failed widget-domain experiment.
-export const attachmentReaderAliases: readonly string[] = ['ui://sundark/attachment-reader.html', 'ui://sundark/attachment-reader-v2.html', 'ui://sundark/attachment-reader-v3.html', 'ui://sundark/attachment-reader-v4.html'];
+export const attachmentReaderAliases: readonly string[] = ['ui://sundark/attachment-reader.html', 'ui://sundark/attachment-reader-v2.html', 'ui://sundark/attachment-reader-v3.html', 'ui://sundark/attachment-reader-v4.html', 'ui://sundark/attachment-reader-v5.html'];
 export const attachmentReaderHtml: string = html;

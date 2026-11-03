@@ -11,9 +11,9 @@ export const dynamic='force-dynamic';
 const id={type:'string',description:'Paper UUID returned by search_library, import_paper_pdf or import_paper_text.'};
 const pageList={type:'array',items:{type:'integer',minimum:1,maximum:200},minItems:1,maxItems:200};
 const readAnnotations={readOnlyHint:true,destructiveHint:false,openWorldHint:false};
-const readerUri='ui://sundark/reader-compat-v3.html';
+const readerUri='ui://sundark/reader-compat-v4.html';
 // Earlier published URIs: read only, never listed or advertised.
-const readerAliases=['ui://sundark/reader-compat-v2.html'];
+const readerAliases=['ui://sundark/reader-compat-v2.html','ui://sundark/reader-compat-v3.html'];
 const attachmentUri=attachmentReaderUri;
 // Resource contents metadata: prefer inline for model-invoked cards; the host chooses the actual
 // mode. Entrypoint behavior and fullscreen result routing still need native verification.

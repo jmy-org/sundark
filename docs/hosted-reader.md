@@ -15,7 +15,7 @@ there, and exported here.
 
 | Field | Value |
 | --- | --- |
-| Exported Site commit | `fed880308830b1e8c56e1a2db3caefeaadafb6db` ("Keep focus visible when reader expansion becomes unavailable"; includes reader action, restore, display-mode and host-error fixes) |
+| Exported Site commit | `80ae67b0a51628e3335c4522bc71994792299363` ("Share the local reader's presentation with the hosted readers"; on top of `fed8803` and its reader action, restore, display-mode and host-error fixes) |
 | Export method | `git archive` of that commit; working-tree changes are never copied |
 | Excluded | `tsconfig.tsbuildinfo` (tsc output, ignored here instead), `examples/` (template sample, excluded by `tsconfig.json` and unused) |
 
@@ -48,6 +48,24 @@ byte matches the Site commit:
 diff <(git -C "$SITE" ls-tree -r "$SHA" | grep -vE $'\t(tsconfig\\.tsbuildinfo|examples/)') \
      <(git ls-tree -r "$(git write-tree --prefix=hosted-reader/)")
 ```
+
+### Shared reader presentation
+
+`web/reader-ui.css` in this repository is the canonical presentation of every Sundark reader. The
+Site cannot see this repository, so it keeps a generated copy, `client/shared/reader-ui.css`, whose
+first line names the source and the sha256 of the rest. A change to the presentation is made here
+and then carried to the Site:
+
+```bash
+uv run python scripts/sync_reader_ui.py --site "$SITE"          # writes client/shared/reader-ui.css
+uv run python scripts/sync_reader_ui.py --site "$SITE" --check  # exit 1 on drift
+```
+
+Then commit at the Site, re-export as below, and `tests/test_reader_ui_parity.py` confirms that the
+exported copy matches the source byte for byte. At the Site, `scripts/shared-css.mjs` refuses a copy
+whose body does not match its header hash, or that holds an external reference, before the build
+inlines it into the attachment reader and the saved-paper view and copies it for `/original`.
+A changed widget body needs a new template URI (hosts cache by URI); the earlier ones stay aliases.
 
 ## Build, test and deploy
 
@@ -283,3 +301,21 @@ file-download-URL endpoint; its response body and cause remain unknown. These ob
 do not verify the new display controls, fullscreen result routing, whole-document
 continuation, widget Q&A or export/restore in ChatGPT. The required test-deployment and
 live-deployment gates remain open; no deployment is performed by this export.
+
+### Shared presentation checkpoint (2026-11-03)
+
+The exported Site commit `80ae67b` takes every reader's presentation from `web/reader-ui.css`
+(see *Shared reader presentation*). The attachment reader now has the local reader's layout:
+the PDF under its page bar beside a tabbed panel (번역, 분석·질문, 내보내기·저장), one column below
+820px, the host's light or dark theme. Its ids, listbox, live regions, shortcuts, IME guards,
+display-mode control and request handling are unchanged. The saved-paper view and `/original` use
+the same file. Template URIs are attachment v6 (v5 and older are aliases) and saved reader v4 (v2,
+v3 aliases); the CSP stays empty.
+
+This is a local, undeployed revision. Local verification on Node 24 with the committed lock passed
+135 unit tests, 82 reader state/Chromium tests (including tabs, host theme, contrast in both themes,
+fullscreen sizing and focus on tab switches), the `/original` checks, TypeScript, the production
+build, and 41 production / 96 development workerd checks with no first failure and unchanged D1/R2.
+None of this was run in ChatGPT: the original-PDF HTTP 400, continuation, widget questions, export,
+restore and reopen remain native gates, as do the test and live deployment gates.
+

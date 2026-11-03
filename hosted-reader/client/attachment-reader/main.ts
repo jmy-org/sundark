@@ -132,19 +132,21 @@ function paintSegments() {
   list.replaceChildren();
   for (const p of orderedPages(doc)) {
     const head = document.createElement('li');
-    head.className = 'page-head'; head.setAttribute('role', 'presentation');
+    head.className = 'page-head ph'; head.setAttribute('role', 'presentation');
     head.textContent = `페이지 ${p.page}` + (p.segments.length ? '' : ' · 추출된 텍스트 없음');
     list.appendChild(head);
     for (const s of p.segments) {
       const li = document.createElement('li');
+      li.className = 'trseg';
       li.id = 'seg-' + s.id; li.setAttribute('role', 'option'); li.dataset.id = s.id; li.dataset.page = String(p.page);
       li.setAttribute('aria-selected', String(s.id === selected));
       // The paper's language is not known: lang="" says so, rather than a wrong tag.
       const src = document.createElement('div'); src.className = 'src'; src.lang = ''; src.textContent = s.text;
-      const tr = document.createElement('div'); tr.className = 'tr';
+      const tr = document.createElement('div'); tr.className = 'tr trpara';
       if (shown.has(s.id)) { tr.textContent = doc.translations.get(s.id)!; const tag = langTag(language()); if (tag) tr.lang = tag; }
       else { tr.textContent = '아직 번역 전이에요.'; tr.classList.add('muted'); }
-      li.appendChild(src); li.appendChild(tr);
+      // The translation leads, as in the local reader; the source line follows it.
+      li.appendChild(tr); li.appendChild(src);
       list.appendChild(li);
     }
   }
@@ -192,7 +194,9 @@ function paintExportControls() {
 function paintAnalysis() {
   const box = $('results'); box.replaceChildren();
   for (const a of doc.analysis) {
-    const head = document.createElement('h3'); head.textContent = a.title;
+    const card = document.createElement('article'); card.className = 'anat-card';
+    const top = document.createElement('div'); top.className = 'anat-head';
+    const head = document.createElement('h3'); head.className = 'name'; head.textContent = a.title;
     // The scope is always written out: a document-level analysis may rest on other pages
     // than the one on screen, and stays valid beside any page.
     const scope = document.createElement('p'); scope.className = 'scope';
@@ -203,9 +207,11 @@ function paintAnalysis() {
       + (a.sourcePages.length ? covers ? ' · 지금 보는 페이지 포함' : ` · 지금 보는 ${page}페이지는 근거 밖이에요 (문서 단위 결과로 유효해요)` : '')
       )
       + (a.language && !sameLang(a.language, 'Korean') ? ` · 언어: ${a.language}` : '');
+    const inner = document.createElement('div'); inner.className = 'anat-body';
     const body = document.createElement('div'); body.className = 'result'; body.textContent = a.text;
     const tag = langTag(a.language); if (tag) body.lang = tag;
-    box.appendChild(head); box.appendChild(scope); box.appendChild(body);
+    top.appendChild(head); inner.appendChild(scope); inner.appendChild(body);
+    card.appendChild(top); card.appendChild(inner); box.appendChild(card);
   }
   box.hidden = !doc.analysis.length;
   paintMessageControls();
@@ -215,6 +221,7 @@ function paintAnalysis() {
  * mode the host reported, never the one asked for. */
 function paintDisplayControl() {
   const button = $<HTMLButtonElement>('display-mode');
+  document.documentElement.dataset.display = host.displayMode;
   button.hidden = !host.displayTarget && !displaying;
   button.disabled = !!displaying;
   button.setAttribute('aria-pressed', String(host.displayMode === 'fullscreen'));
@@ -234,12 +241,29 @@ function paintHighlight() {
   if (!hit || hit.page !== page) return;
   for (const r of rects(hit.s)) {
     const d = document.createElement('div');
+    d.className = 'hlrect hlring';
     d.style.left = r[0] * 100 + '%'; d.style.top = r[1] * 100 + '%';
     d.style.width = r[2] * 100 + '%'; d.style.height = r[3] * 100 + '%';
     layer.appendChild(d);
   }
 }
 const rects = (s: Segment) => s.rects?.length ? s.rects.filter(r => r.page === page).map(r => r.bbox) : [s.bbox];
+
+// ---------------- panel tabs ----------------
+/** The panel's tabs, as in the local reader (tab -> its panel). Every panel stays in the DOM. */
+const TABS = { 'tab-read': 'translation', 'tab-ask': 'analysis', 'tab-keep': 'keep' } as const;
+type Tab = keyof typeof TABS;
+function showTab(id: Tab, focus = false) {
+  for (const [tab, panel] of Object.entries(TABS)) {
+    const on = tab === id, button = $(tab);
+    button.classList.toggle('active', on); button.setAttribute('aria-selected', String(on)); button.tabIndex = on ? 0 : -1;
+    $(panel).hidden = !on;
+  }
+  // Keyboard focus never falls to the page: a switch the reader did not make (a result arriving)
+  // that hides the focused control moves focus to the tab now shown.
+  const active = document.activeElement;
+  if (focus || (active instanceof HTMLElement && active.closest('[role=tabpanel][hidden]'))) $(id).focus({ preventScroll: !focus });
+}
 
 // ---------------- original PDF ----------------
 const sameLang = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
@@ -252,7 +276,7 @@ async function showPage() {
   const g = gen;
   const controller = render = new AbortController();
   const stage = $('stage');
-  const width = Math.max(200, Math.min(1400, $('original-scroll').clientWidth - 16));
+  const width = Math.max(200, Math.min(1400, $('original-scroll').clientWidth - 32));
   try {
     const drawn = await drawPage(pdf, page, $<HTMLCanvasElement>('canvas'), $('text-layer'), width, controller.signal);
     if (controller.signal.aborted || g !== gen) return;
@@ -358,6 +382,8 @@ function receive(data: unknown) {
   const first = switched || (!doc.attachment && !doc.pages.size);
   const shownPage = page;
   doc = merge(doc, out);
+  // A result that carries an analysis answers a request: show it where it was asked.
+  if (out.analysis.length) showTab('tab-ask');
   if (first) {
     const restored = readWidgetState(host.widgetState, doc);
     page = restored?.page ?? out.page ?? orderedPages(doc)[0]?.page ?? 1;
@@ -495,7 +521,9 @@ async function exportAs(kind: 'md' | 'json') {
   const name = safeFilename(fileName(), kind === 'md' ? '-sundark.md' : '-sundark.json');
   const text = kind === 'md' ? exportMarkdown(doc) : exportJson(doc);
   const mine = exporting = ++requests, from = document.activeElement;
-  const say = (line: string) => { if (exporting === mine) $('export-msg').textContent = line; };
+  // The export tab's own status; when the reader has left that tab, the page status says it too,
+  // so an outcome is never announced only inside a hidden panel.
+  const say = (line: string) => { if (exporting !== mine) return; $('export-msg').textContent = line; if ($('keep').hidden) status(line); };
   say('내보내기를 요청하는 중…'); paintExportControls();
   try {
     await host.download(name, kind === 'md' ? 'text/markdown' : 'application/json', text);
@@ -565,6 +593,15 @@ function goPage(n: number) {
 }
 
 function wire() {
+  const tabs = Object.keys(TABS) as Tab[];
+  for (const id of tabs) $(id).onclick = () => showTab(id);
+  $('tab-read').parentElement!.addEventListener('keydown', e => {
+    if (isComposing(e)) return;
+    const at = tabs.findIndex(id => id === (e.target as HTMLElement).id);
+    const to = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (at < 0 || to === undefined) return;
+    e.preventDefault(); showTab(tabs[(to + tabs.length) % tabs.length], true);
+  });
   $('prev-page').onclick = () => goPage(page - 1);
   $('next-page').onclick = () => goPage(page + 1);
   $('prev-seg').onclick = () => step(-1);
@@ -633,6 +670,7 @@ function teardown() {
   doc = emptyDoc(); page = 1; selected = null;
   $('segments').replaceChildren(); $('results').replaceChildren();
   $('title').textContent = 'Sundark 첨부 PDF 리더';
+  showTab('tab-read');
   paint();
 }
 

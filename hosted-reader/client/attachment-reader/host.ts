@@ -8,6 +8,7 @@ import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { OpenAIExtensions, OpenAIFileEntrypointInputSchema } from '@openai/mcp-extensions/app';
 
 interface OpenAiGlobals {
+  theme?: unknown;
   toolInput?: unknown; toolOutput?: unknown; widgetState?: unknown;
   setWidgetState?: (state: unknown) => unknown;
   getFileDownloadUrl?: (args: { fileId: string }) => Promise<{ downloadUrl?: string }>;
@@ -95,6 +96,7 @@ export class Host {
     this.app.onteardown = async () => { this.closed = true; events.teardown(); return {}; };
     // The SDK merges the partial context into getHostContext() before listeners run.
     this.app.addEventListener('hostcontextchanged', change => {
+      if (!this.closed && 'theme' in change) this.applyTheme();
       if (this.closed || !('displayMode' in change || 'availableDisplayModes' in change)) return;
       if (change.displayMode) this.mode = change.displayMode;
       events.display();
@@ -102,6 +104,7 @@ export class Host {
     const fromGlobals = (event?: Event) => {
       // A detail names only the globals that changed; without one, the dedupe above decides.
       const changed = (event as CustomEvent<{ globals?: Record<string, unknown> }> | undefined)?.detail?.globals;
+      if (!changed || 'theme' in changed) this.applyTheme();
       if (changed && !('toolOutput' in changed)) return;
       const o = openai()?.toolOutput;
       if (!o) return;
@@ -111,9 +114,19 @@ export class Host {
     };
     globalThis.addEventListener?.('openai:set_globals', fromGlobals);
     fromGlobals();
-    try { await this.app.connect(); this.connected = true; this.mode = this.app.getHostContext()?.displayMode; }
+    try { await this.app.connect(); this.connected = true; this.mode = this.app.getHostContext()?.displayMode; this.applyTheme(); }
     catch (error) { this.connectError = error instanceof Error ? error.message : String(error); }
     finally { this.settle(); }
+  }
+
+  /** The host's theme on the root (data-theme), which the shared presentation follows. A host
+   * that names none leaves the system theme in charge (data-theme-auto in the template). */
+  private applyTheme() {
+    const theme = (this.connected ? this.app.getHostContext()?.theme : undefined) ?? openai()?.theme;
+    const root = globalThis.document?.documentElement;
+    if (!root) return;
+    if (theme === 'light' || theme === 'dark') root.dataset.theme = theme;
+    else delete root.dataset.theme;
   }
 
   private caps() { return this.connected ? this.app.getHostCapabilities() : undefined; }

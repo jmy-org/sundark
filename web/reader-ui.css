@@ -1,0 +1,187 @@
+/* Sundark reader presentation: the design tokens and components every Sundark reader shares
+   (this local reader, the hosted /original page, the ChatGPT attachment reader and its saved-paper
+   view). This file is the canonical source. scripts/sync_reader_ui.py copies it into the Site with
+   a hash header, and the Site build inlines it; never edit a copy.
+   Rules here hold no host layout, fonts, imports or URLs: the ChatGPT widget inlines this file
+   under an empty CSP. Host layout stays in each reader (web/styles.css here). */
+
+:root {
+  --bg: #0a0a0b;
+  --panel: #111114;
+  --panel2: #17171b;
+  --elev: #202026;
+  --border: #26262c;
+  --text: #e9e9ec;
+  --muted: #8b8b94;
+  --accent: #5b9bff;
+  --accent-ink: #06101f;
+  --hl: rgba(91, 155, 255, 0.20);         /* translation-panel highlight */
+  --sel: rgba(91, 155, 255, 0.40);        /* PDF text selection */
+  --mark: rgba(203, 222, 255, 0.5);       /* progress fill; same tint as the PDF highlight (.hlrect) */
+  --topbar-h: 52px;
+  --radius: 9px;
+  --pdf-bg: #050506;                      /* backdrop behind the PDF pages */
+  --page-shadow: 0 4px 24px rgba(0,0,0,.5);
+  --danger: #f88;
+  --scroll-thumb: #2c2c33;
+  --scroll-thumb-hover: #3a3a42;
+}
+
+/* Light theme. The local reader is dark only; these values are DERIVED, not extracted from it
+   (same roles, contrast-checked: text 14:1 or more, muted 5.2:1 or more, accent 4.6:1 or more on
+   every surface). A page opts in: data-theme="light" picks it, and data-theme-auto follows the
+   system unless data-theme="dark" is set. A page with neither (this local reader) stays dark. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --panel: #f6f6f8;
+  --panel2: #eeeef1;
+  --elev: #e4e4e9;
+  --border: #d9d9df;
+  --text: #18181b;
+  --muted: #5c5c66;
+  --accent: #2563d9;
+  --accent-ink: #ffffff;
+  --hl: rgba(37, 99, 217, 0.14);
+  --sel: rgba(37, 99, 217, 0.28);
+  --mark: rgba(37, 99, 217, 0.55);
+  --pdf-bg: #e4e4e9;
+  --page-shadow: 0 2px 12px rgba(0,0,0,.18);
+  --danger: #b42318;
+  --scroll-thumb: #c9c9d0;
+  --scroll-thumb-hover: #b4b4bc;
+}
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme-auto]:not([data-theme]) { color-scheme: dark; }
+@media (prefers-color-scheme: light) {
+  :root[data-theme-auto]:not([data-theme]) {
+    color-scheme: light;
+    --bg: #ffffff;
+    --panel: #f6f6f8;
+    --panel2: #eeeef1;
+    --elev: #e4e4e9;
+    --border: #d9d9df;
+    --text: #18181b;
+    --muted: #5c5c66;
+    --accent: #2563d9;
+    --accent-ink: #ffffff;
+    --hl: rgba(37, 99, 217, 0.14);
+    --sel: rgba(37, 99, 217, 0.28);
+    --mark: rgba(37, 99, 217, 0.55);
+    --pdf-bg: #e4e4e9;
+    --page-shadow: 0 2px 12px rgba(0,0,0,.18);
+    --danger: #b42318;
+    --scroll-thumb: #c9c9d0;
+    --scroll-thumb-hover: #b4b4bc;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased; }
+button { font: inherit; }
+.hidden { display: none !important; }
+
+/* ---------- Accessibility ---------- */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
+}
+
+/* ---------- Buttons ---------- */
+/* 32px tall at least: a touch target, and every bar keeps one button height. */
+.btn-primary {
+  background: var(--accent); color: var(--accent-ink); border: none; border-radius: var(--radius);
+  padding: 7px 14px; font-weight: 600; font-size: 13px; cursor: pointer; transition: filter .12s;
+  min-height: 32px;
+}
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-primary:disabled { opacity: .5; cursor: default; filter: none; }
+.btn-ghost {
+  background: transparent; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; font-size: 12.5px; cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+  min-height: 32px;
+}
+.btn-ghost:hover { background: var(--elev); color: var(--text); border-color: var(--elev); }
+.btn-ghost:disabled { opacity: .5; cursor: default; }
+.btn-ghost:disabled:hover { background: transparent; color: var(--muted); border-color: var(--border); }
+.btn-ghost[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
+.toggle, .ctl { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.toggle input { accent-color: var(--accent); }
+
+/* ---------- Top bar ---------- */
+.topbar { display: flex; align-items: center; gap: 16px; height: var(--topbar-h);
+  padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.brand { font-weight: 700; white-space: nowrap; letter-spacing: -0.01em; }
+.doc-title { color: var(--muted); font-size: 12.5px; flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- PDF pane ---------- */
+/* same height as the AI panel's tab bar, so the two bars line up */
+.pdfbar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: 0 0 auto;
+  height: 45px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.pdfbar .btn-ghost { padding: 4px 10px; }
+.pdfbar .btn-ghost.on { color: var(--text); border-color: var(--accent); }
+.page-num { margin-right: auto; font-size: 12.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums; }
+.pdfview { flex: 1; min-height: 0; overflow: auto; background: var(--pdf-bg); padding: 22px 0; }
+.pdfpage { position: relative; margin: 0 auto 18px; background: #fff; border-radius: 3px;
+  box-shadow: var(--page-shadow); }
+.pdfpage canvas { display: block; border-radius: 3px; }
+.pdfpage .ph { display: flex; align-items: center; justify-content: center; color: #9a9aa5; font-size: 13px; height: 100%; }
+/* Opaque rects in a translucent layer: overlapping rects of one sentence paint as one. */
+.hllayer { position: absolute; inset: 0; pointer-events: none; opacity: 0.5; }
+.hlrect { position: absolute; background: rgb(203, 222, 255); border-radius: 3px; }
+.hlrect.hlring { box-shadow: 0 0 0 1px rgb(150, 185, 255); }
+.pdfview ::selection { background: var(--sel); }
+
+/* ---------- Panel tabs ---------- */
+.tabs { display: flex; gap: 2px; background: var(--panel); border-bottom: 1px solid var(--border); padding: 0 6px; }
+.tab { flex: 1; background: none; border: none; color: var(--muted); padding: 11px 8px; cursor: pointer;
+  font-size: 13px; font-weight: 500; border-bottom: 2px solid transparent; transition: color .12s; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tr-toolbar { display: flex; justify-content: flex-end; gap: 8px; padding: 0 0 10px; flex: 0 0 auto; }
+
+/* ---------- Translation (paragraph structure, sentence-level hover) ---------- */
+.trpage { margin: 0; }
+.trpage > .ph { color: var(--muted); font-size: 12px; padding: 4px 8px; font-style: italic; }
+.trpage > .ph:empty { display: none; }
+.trpara { margin: 0 0 15px; line-height: 1.7; font-size: 13.5px; }
+.trpara.trhead { margin-top: 8px; line-height: 1.35; color: var(--text); }  /* headings */
+.trseg { display: inline; padding: 1px 2px; border-radius: 4px; cursor: default; box-decoration-break: clone;
+  -webkit-box-decoration-break: clone; transition: background .1s; }
+.trseg:hover, .trseg.hl { background: var(--hl); }
+.trseg.pinned { background: var(--hl); box-shadow: inset 2px 0 0 var(--accent); }
+/* A selectable sentence (a listbox option) is selected like a pinned one. */
+.trseg[aria-selected="true"] { background: var(--hl); box-shadow: inset 2px 0 0 var(--accent); }
+
+/* ---------- Cards (Research Anatomy, analysis results) ---------- */
+.anat-card { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+.anat-head { display: flex; align-items: baseline; gap: 8px; padding: 10px 12px; background: var(--panel); }
+.anat-head .name { font-weight: 700; font-size: 13.5px; }
+.anat-head .q { color: var(--muted); font-size: 11.5px; }
+.anat-body { padding: 8px 12px 10px; }
+
+/* ---------- Composer (chat, questions) ---------- */
+.chatform { display: flex; align-items: flex-end; gap: 8px; padding-top: 10px; flex: 0 0 auto; }
+.chatform textarea { flex: 1; background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 9px; padding: 9px 12px; font: inherit; font-size: 13.5px; line-height: 1.45;
+  resize: none; max-height: 160px; overflow-y: auto; }
+.chatform textarea:focus { outline: none; border-color: var(--accent); }
+.chatform button { background: var(--accent); color: var(--accent-ink); border: none; border-radius: 9px;
+  padding: 0 16px; height: 40px; font-weight: 600; cursor: pointer; }
+.chatform button:disabled { opacity: .5; cursor: default; }
+
+/* ---------- Text ---------- */
+.loading { color: var(--muted); font-style: italic; font-size: 13px; }
+.hint { color: var(--muted); font-size: 12.5px; }
+
+/* thin scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 6px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+::-webkit-scrollbar-track { background: transparent; }

@@ -34,7 +34,12 @@ assert.equal(require("katex/package.json").version, "0.16.11");
       return res.end(
         '<!doctype html><meta charset="utf-8"><div id="rich" contenteditable="true"></div>',
       );
-    const file = { "/": "index.html", "/app.js": "app.js", "/styles.css": "styles.css" }[req.url];
+    const file = {
+      "/": "index.html",
+      "/app.js": "app.js",
+      "/reader-ui.css": "reader-ui.css",
+      "/styles.css": "styles.css",
+    }[req.url];
     if (!file) {
       res.writeHead(404);
       return res.end();

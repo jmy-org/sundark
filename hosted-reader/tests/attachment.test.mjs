@@ -620,14 +620,15 @@ async function rpc(method, params, headers = signedIn) {
     return body.result ?? {error: body.error};
   } finally { globalThis.__requestHeaders = undefined; }
 }
-const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v5.html';
-const SAVED_URI = 'ui://sundark/reader-compat-v3.html';
+const ATTACHMENT_URI = 'ui://sundark/attachment-reader-v6.html';
+const SAVED_URI = 'ui://sundark/reader-compat-v4.html';
 // URIs earlier tool results named; hosts that cached them must still read the current body.
-const OLD_ATTACHMENT_URI = 'ui://sundark/attachment-reader.html', OLD_SAVED_URI = 'ui://sundark/reader-compat-v2.html';
+const OLD_ATTACHMENT_URI = 'ui://sundark/attachment-reader.html', OLD_SAVED_URI = 'ui://sundark/reader-compat-v2.html', V3_SAVED_URI = 'ui://sundark/reader-compat-v3.html';
 // The failed widget-domain experiment's URI, and v2, whose CSP let the widget fetch the file itself.
 const FAILED_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v3.html', V2_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v2.html';
 // v4, the empty-CSP body before the reader's request feedback changed.
 const V4_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v4.html';
+const V5_ATTACHMENT_URI = 'ui://sundark/attachment-reader-v5.html';
 const LEGACY = ['prepare_paper_task', 'list_paper_figures', 'read_paper_figure', 'render_paper_reader', 'search_library', 'list_paper_sources', 'read_paper_source',
   'read_paper_page', 'read_paper_notes', 'read_paper_analysis', 'save_paper_analysis', 'import_paper_pdf', 'extract_paper_pages', 'import_paper_text'];
 
@@ -690,8 +691,8 @@ test('route: old reader URIs read the current body but only the new URIs are adv
   assert.deepEqual(resources.map(r => r.uri).sort(), [ATTACHMENT_URI, SAVED_URI].sort());
   const {tools} = await noStorage(() => rpc('tools/list'));
   const named = JSON.stringify(tools);
-  assert(![OLD_ATTACHMENT_URI, FAILED_ATTACHMENT_URI, V2_ATTACHMENT_URI, V4_ATTACHMENT_URI, OLD_SAVED_URI].some(u => named.includes(u)), 'tool metadata names only the new URIs');
-  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [ATTACHMENT_URI, FAILED_ATTACHMENT_URI], [ATTACHMENT_URI, V2_ATTACHMENT_URI], [ATTACHMENT_URI, V4_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI]]) {
+  assert(![OLD_ATTACHMENT_URI, FAILED_ATTACHMENT_URI, V2_ATTACHMENT_URI, V4_ATTACHMENT_URI, V5_ATTACHMENT_URI, OLD_SAVED_URI, V3_SAVED_URI].some(u => named.includes(u)), 'tool metadata names only the new URIs');
+  for (const [current, old] of [[ATTACHMENT_URI, OLD_ATTACHMENT_URI], [ATTACHMENT_URI, FAILED_ATTACHMENT_URI], [ATTACHMENT_URI, V2_ATTACHMENT_URI], [ATTACHMENT_URI, V4_ATTACHMENT_URI], [ATTACHMENT_URI, V5_ATTACHMENT_URI], [SAVED_URI, OLD_SAVED_URI], [SAVED_URI, V3_SAVED_URI]]) {
     const now = (await rpc('resources/read', {uri: current})).contents[0];
     const alias = (await rpc('resources/read', {uri: old})).contents[0];
     assert.equal(alias.uri, old, 'echoes the URI the host asked for');
