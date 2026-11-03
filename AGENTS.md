@@ -291,12 +291,30 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   lost right splits (an algorithm's comment line starts a paragraph of its own) and fixed
   none, so a wrapped "3." on a page with a list of "2." and "4." would still split. A list
   counts up, though: a number no higher than an item before it in its paragraph is no item
-  ("3. If not converged, go to step" + "2. Otherwise ..." refers back). Short prose that
-  `_keep_sentence` would drop as a label (a lead-in before a display equation, "Then we
-  have") is kept by paragraph context. These rules were measured on 25 papers with no word
-  lost or duplicated. A sentence segmenter swap (Stanza, SaT) was measured and rejected:
-  none reliably splits comma-joined lists, and both are much slower (Stanza ran 8x slower
-  than spaCy on real per-paragraph calls).
+  ("3. If not converged, go to step" + "2. Otherwise ..." refers back). Pseudo-code with no
+  line numbers is split by row (`_pseudo_starts`) once the paragraph shows it is
+  pseudo-code: a row that only closes a block ("end for"), a "repeat" with its "until", or a
+  row that opens a loop ("for t = 1 to T do") with a second sign beside it, another such row
+  or an assignment ("y ← r + γ"). A row that opens with "for" and ends in "do" is no sign
+  alone: prose has them ("for every τ. Indeed, ... we do" + "recover ..."), and taking them
+  cut 3 prose sentences. Nor is a bare "end" row, or ":=", which math prose defines with
+  ("Let f := g, and" + "if x ∈ A then"). From the first keyword row ("Require:",
+  "Initialize", "for", an assignment) to the last, so that prose before the algorithm stays
+  whole, a step opens a row with a keyword, a capitalized word or an assignment, or follows
+  a row that opens or closes a block; a lowercase row, or one after a row that ends on
+  "with", a comma or the like, goes on (a wrapped step). Over 138 documents this split 15
+  pages of pseudo-code in 12 papers (28 sentences into 166) and no prose. A step's own row,
+  numbered or not, is one sentence (`whole` in `_merge_fragments`): the segmenter cut inside
+  it ("Require: f(θ):" + "Stochastic objective ...", "9: //" + "For clarity, ...", a comment
+  "▷ ..." or a fraction's lower half), 12 times in 9 papers; the caption's row and the text
+  after the algorithm keep their sentences. A step that the PDF set on one line with the
+  next stays joined, and one that wraps onto a row opening with a keyword ("Stop the
+  episode" + "if the goal is reached") is cut there. Short prose that `_keep_sentence` would
+  drop as a label (a lead-in before a display equation, "Then we have") is kept by paragraph
+  context. These rules were measured on 25 papers with no word lost or duplicated. A
+  sentence segmenter swap (Stanza, SaT) was measured and rejected: none reliably splits
+  comma-joined lists, and both are much slower (Stanza ran 8x slower than spaCy on real
+  per-paragraph calls).
 - **Word boxes come from the glyphs.** `_words_with_style()` builds each word's box from its
   own glyphs (`rawdict`). Do not go back to splitting a span by character count: a justified
   line often comes as ONE span, the guess drifted up to ~20pt, and a sentence's first capital

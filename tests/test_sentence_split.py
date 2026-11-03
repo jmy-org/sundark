@@ -719,6 +719,119 @@ class LineItemTests(unittest.TestCase):
         )
 
 
+def pseudo_starts(*lines) -> list[str]:
+    """The words `_pseudo_starts` opens a step at, in a paragraph of `lines`: one row each,
+    or (row, text) to set a line on an earlier row."""
+    words, ls = [], []
+    for k, line in enumerate(lines):
+        row, text = line if isinstance(line, tuple) else (k, line)
+        ls.append({"widx": [], "text": text, "cy": 12.0 * row, "size": 10.0})
+        for t in text.split():
+            ls[-1]["widx"].append(len(words))
+            words.append({"t": t})
+    return [words[g]["t"] for g in pu._pseudo_starts(ls, words)]
+
+
+class PseudoCodeTests(unittest.TestCase):
+    """Pseudo-code with no line numbers: each step opens a row, once a row closes a block or
+    two signs show that the paragraph is pseudo-code."""
+
+    def test_each_step_of_a_loop_starts_a_sentence(self):
+        self.assertEqual(
+            pseudo_starts(
+                "Initialize the weights θ",
+                "for each iteration do",
+                "Sample a batch from the data",
+                "θ ← θ − η g",
+                "end for",
+                "the loop stops when the loss is small",
+            ),
+            ["for", "Sample", "θ", "end", "the"],
+        )
+        self.assertEqual(
+            pseudo_starts("repeat", "Sample a batch", "until converged"),
+            ["Sample", "until"],
+        )
+
+    def test_a_wrapped_step_or_a_piece_of_its_row_goes_on(self):
+        self.assertEqual(
+            pseudo_starts(
+                "for t = 1 to T do",
+                "Select an action with noise and",
+                "observe the reward r",
+                "end for",
+            ),
+            ["Select", "end"],
+        )
+        self.assertEqual(
+            pseudo_starts(
+                "repeat",
+                "Require: f ( θ ) :",
+                (1, "Stochastic objective function"),
+                "until converged",
+            ),
+            ["Require:", "until"],
+        )
+        # a step number set apart from its step keeps its step
+        self.assertEqual(pseudo_starts("4:", "Sample a batch", "end for"), ["end"])
+
+    def test_prose_before_the_algorithm_stays_whole(self):
+        self.assertEqual(
+            pseudo_starts(
+                "We now describe how the weights of the",
+                "Transformer model are trained in detail.",
+                "for each batch do",
+                "Update the weights",
+                "end for",
+            ),
+            ["for", "Update", "end"],
+        )
+
+    def test_a_step_that_wraps_on_a_word_goes_on(self):
+        self.assertEqual(
+            pseudo_starts(
+                "for t = 1 to T do",
+                "Update the network with",
+                "SGD and a decayed rate",
+                "end for",
+            ),
+            ["Update", "end"],
+        )
+
+    def test_a_loop_over_a_spaced_ellipsis_opens_a_block(self):
+        self.assertEqual(
+            pseudo_starts(
+                "for t = 1 , . . . , T do",
+                "Sample a batch",
+                "for k = 1 . . . K do",
+                "Update it",
+            ),
+            ["Sample", "for", "Update"],
+        )
+
+    def test_one_row_that_opens_with_for_and_ends_in_do_is_prose(self):
+        self.assertEqual(
+            pseudo_starts(
+                "We check the bound in each case,",
+                "for every set we study, as we do",
+                "Recover it from the lemma",
+            ),
+            [],
+        )
+        # nor is a word "end" on a row of its own, or a math definition beside an "if"
+        self.assertEqual(
+            pseudo_starts("The training runs from one", "end", "To the other side"), []
+        )
+        self.assertEqual(
+            pseudo_starts(
+                "Let f := g + h be the map, and",
+                "if x is in A then",
+                "f is positive on A.",
+            ),
+            [],
+        )
+
+
 # Only when the model is already installed: loading it here must not trigger a download.
 @unittest.skipUnless(
     spacy_util.is_package("en_core_web_sm"), "spaCy model not installed"
@@ -800,7 +913,10 @@ class LineItemSplitTests(unittest.TestCase):
     def test_the_short_pieces_of_a_list_or_an_algorithm_are_kept(self):
         # read whole, each was one sentence long enough to keep; cut at its items and steps,
         # a lead-in and a one-word step are pieces of a list, no figure labels
-        for lines in (["We consider:", "1. Speed", "2. Memory"],):
+        for lines in (
+            ["We consider:", "1. Speed", "2. Memory"],
+            ["repeat", "Sample a batch", "until done"],
+        ):
             doc = pymupdf.open()
             doc.new_page(width=595, height=842)
             p = doc.new_page(width=595, height=842)
@@ -811,6 +927,50 @@ class LineItemSplitTests(unittest.TestCase):
             with patch.object(pu.layout_model, "detect_page", return_value=[]):
                 texts = [s["text"] for s in pu._page_layout(data, 1)["sentences"]]
             self.assertEqual(texts, lines)
+
+    def test_a_step_row_is_one_sentence(self):
+        # the segmenter cut inside a step's own row ("Require: f(θ):" + "Stochastic ...");
+        # the text after an algorithm keeps its sentences
+        doc = pymupdf.open()
+        doc.new_page(width=595, height=842)
+        p = doc.new_page(width=595, height=842)
+        lines = [
+            (50, 100, "1: repeat"),
+            (50, 112, "2: Compute the loss. Update the weights."),
+            (50, 124, "3: until converged"),
+            (50, 300, "for each batch do"),
+            (62, 312, "Update the weights"),
+            (50, 324, "end for"),
+            (50, 336, "Is it done? The answer is yes."),
+        ]
+        for x, y, text in lines:
+            p.insert_text((x, y), text, fontsize=10)
+        data = doc.tobytes()
+        doc.close()
+        with patch.object(pu.layout_model, "detect_page", return_value=[]):
+            texts = [s["text"] for s in pu._page_layout(data, 1)["sentences"]]
+        self.assertEqual(
+            texts, [t for *_, t in lines[:-1]] + ["Is it done?", "The answer is yes."]
+        )
+
+    def test_pseudo_code_without_line_numbers_on_a_page(self):
+        doc = pymupdf.open()
+        doc.new_page(width=595, height=842)
+        p = doc.new_page(width=595, height=842)
+        lines = [
+            (50, 100, "Initialize the weights of the model"),
+            (50, 112, "for each iteration do"),
+            (62, 124, "Sample a batch from the data"),
+            (62, 136, "Update the weights with the batch"),
+            (50, 148, "end for"),
+        ]
+        for x, y, text in lines:
+            p.insert_text((x, y), text, fontsize=10)
+        data = doc.tobytes()
+        doc.close()
+        with patch.object(pu.layout_model, "detect_page", return_value=[]):
+            texts = [s["text"] for s in pu._page_layout(data, 1)["sentences"]]
+        self.assertEqual(texts, [text for *_, text in lines])
 
 
 # Only when the model is already installed: loading it here must not trigger a download.

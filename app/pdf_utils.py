@@ -574,6 +574,7 @@ def _merge_fragments(
     raw: list[tuple[int, int]],
     text: str,
     hard: frozenset[int] = frozenset(),
+    whole: tuple[tuple[int, int], ...] = (),
 ) -> list[tuple[int, int, str]]:
     """Merge lone section numbers, trailing paper-abbreviations, and over-split fragments into
     the sentence they belong to. An over-split continuation is a fragment that starts lowercase
@@ -581,7 +582,8 @@ def _merge_fragments(
     starts with a binary math operator ("...z" + "= (z_1, ..., z_n).") or an inline author-year
     citation ("...(FiLM)" + "Perez et al. (2018) ..."). A fragment that starts at a `hard`
     offset (a list item or an algorithm step, see _item_starts) is never merged into the one
-    before it, and a lone mark or bracket left right before one ends the sentence before it."""
+    before it, and a lone mark or bracket left right before one ends the sentence before it.
+    A fragment that starts inside a `whole` span (an algorithm step's own row) is merged."""
     out: list[tuple[int, int, str]] = []
     i = 0
     while i < len(raw):
@@ -591,7 +593,8 @@ def _merge_fragments(
             i + 1 < len(raw)
             and _lstrip_at(text, raw[i + 1][0]) not in hard
             and (
-                re.fullmatch(r"\d+(\.\d+)*\.?", t)
+                any(a < _lstrip_at(text, raw[i + 1][0]) < b for a, b in whole)
+                or re.fullmatch(r"\d+(\.\d+)*\.?", t)
                 or _ABBR_TAIL.search(t)
                 or len(t) <= 2
                 # a short label ("Right:", "Figure 13:") introduces the capitalized sentence
@@ -832,6 +835,92 @@ def _item_starts(
     return out
 
 
+# Pseudo-code keywords: a line that only closes a block, one that opens a loop or a branch
+# ("for each iteration do", "if t mod d then"), and a line's first word.
+_PC_END = re.compile(
+    r"end\s?(?:for|while|if|function|procedure|loop)?|endfor|endwhile|endif",
+    re.IGNORECASE,
+)
+_PC_OPEN = re.compile(r"(?:for|foreach|forall|while|if)\b.*\b(?:do|then)")
+_PC_KEY = re.compile(
+    r"(?:for|foreach|forall|while|if|else|repeat|until|return|end(?:for|while|if)?)\b"
+    r"|(?:Require|Ensure|Input|Output|Initiali[sz]e|Algorithm)\b"
+)
+# A row that ends on a word or a sign that needs more is a step that wraps ("Update the
+# network with" + "SGD and a decayed rate"). Not "a": a step ends on a symbol ("action a").
+_PC_WRAP = re.compile(
+    r"(?:\b(?:with|and|or|of|the|an|to|from|using|by|in|on|at|as|into|over|via|per)"
+    r"|[,(=+−-])$"
+)
+
+
+def _pseudo_starts(
+    lines: list[dict], words: list[dict], steps_only: bool = False
+) -> list[int]:
+    """Word indices where a step of pseudo-code with no line numbers opens a row of a
+    paragraph (`lines`, in order), so a new sentence starts there: the steps have no period
+    of their own and ran together ("for each iteration do Sample a batch ... end for"). The
+    paragraph is pseudo-code when a row only closes a block ("end for"; a bare "end" needs
+    another sign), a "repeat" has its "until", or a row that opens a loop ("for t = 1 to T
+    do") has a second sign beside it, another such row or an assignment ("y ← r + γ"); prose
+    has rows that open with "for" and end in "do" ("for every τ. Indeed, ... we do" +
+    "recover ..."). From its first keyword row to its last (prose before the algorithm stays
+    whole), a step opens a row with a keyword, a capitalized word ("Sample", "Update"), or an
+    assignment, or follows a row that opens or closes a block; a row after one that ends on
+    "with", a comma or the like goes on (a wrapped step), and the row after an "end ..."
+    starts anew (the text after the algorithm; not with `steps_only`). A row is a line and
+    the pieces beside it at the same height (an accent, the text after a gap)."""
+    rows: list[list[dict]] = []
+    for ln in lines:
+        if rows and abs(ln["cy"] - rows[-1][-1]["cy"]) < ln["size"] / 2:
+            rows[-1].append(ln)
+        else:
+            rows.append([ln])
+    texts = [" ".join(ln["text"].strip() for ln in row) for row in rows]
+    toks = [[words[g]["t"] for ln in row for g in ln["widx"]] for row in rows]
+
+    def assigns(k: int) -> bool:
+        return any("←" in t or t == ":=" for t in toks[k][1:4])
+
+    ends = [k for k, t in enumerate(texts) if _PC_END.fullmatch(t)]
+    if ends or "repeat" in texts:
+        ends += [k for k, t in enumerate(texts) if re.match(r"until\b", t)]
+    opens = [
+        k
+        for k, t in enumerate(texts)
+        if _PC_OPEN.fullmatch(t)
+        and not re.search(r"[.;?!]\s", re.sub(r"\.(?:\s\.)+", "", t))
+    ]
+    # ":=" is also a definition of math prose ("Let f := g, and" + "if x ∈ A then")
+    assigned = any("←" in t for row in toks for t in row[1:4])
+    if (
+        ends
+        and all(texts[k].lower() == "end" for k in ends)
+        and not (opens or assigned)
+    ):
+        ends = []  # "end" alone may be a word of prose ("from one" + "end" + "to the other")
+    if not (ends or len(opens) > 1 or (opens and assigned)):
+        return []
+    keyed = [k for k, t in enumerate(texts) if _PC_KEY.match(t) or assigns(k)]
+    start, last = min(ends + opens + keyed), max(ends + opens + keyed)
+    out = []
+    for k in range(max(1, start), min(len(rows), last + (1 if steps_only else 2))):
+        prev, first = texts[k - 1], toks[k][0]
+        if re.fullmatch(r"\d{1,3}:", prev):
+            continue  # a step number set apart from its step
+        if k - 1 not in ends and _PC_WRAP.search(prev) and not _PC_KEY.match(texts[k]):
+            continue
+        if (
+            k - 1 in ends
+            or _PC_KEY.match(texts[k])
+            or re.search(r"\b(?:do|then|repeat|else)$", prev)
+            or (first[:1].isupper() and first[1:2].islower())
+            or assigns(k)
+        ):
+            out.append(rows[k][0]["widx"][0])
+    return out
+
+
 def _lstrip_at(text: str, i: int) -> int:
     """The offset of the first non-space character at or after `i`."""
     while i < len(text) and text[i].isspace():
@@ -857,6 +946,7 @@ def _split_at(
 def _split_sentences(
     text: str,
     hard: frozenset[int] = frozenset(),
+    whole: tuple[tuple[int, int], ...] = (),
 ) -> list[tuple[int, int, str]]:
     """Split into sentences, returning (start, end, text). Uses pysbd (handles abbreviations,
     decimals, citations, URLs) with a regex fallback, then merges paper-specific leftovers.
@@ -882,7 +972,7 @@ def _split_sentences(
         ]
     raw = _mend_word_splits(raw, text)
     raw = _split_on_markers(_split_on_bullets(raw, text), text)
-    return _merge_fragments(_split_at(raw, text, hard), text, hard)
+    return _merge_fragments(_split_at(raw, text, hard), text, hard, whole)
 
 
 def _keep_sentence(text: str, word_count: int, context: int = 0) -> bool:
@@ -2437,24 +2527,51 @@ def _page_layout(
                 continue
             text, local = _join_words(para["widx"], words)
             hard: frozenset[int] = frozenset()
+            whole: list[tuple[int, int]] = []
             if para["heading"]:
                 # one title, one segment: the splitter cut "A.1. Pre-training" after "A.1."
                 split = [(0, len(text), text.strip(), [g for *_, g in local])]
             else:
                 # a list item or an algorithm step that opens a line starts a sentence: a
                 # colon lead-in ("... as follows:" + "1. ...") and steps with no period of
-                # their own ("1: repeat" + "2: sample a batch") were read as one sentence
+                # their own ("1: repeat" + "2: sample a batch", or the same with no line
+                # numbers) were read as one sentence
                 if not para.get("caption"):
                     plines = [
                         lines[li]
                         for li in dict.fromkeys(line_of[g] for g in para["widx"])
                     ]
                     at = {g: a for a, _, g in local}
-                    starts = _item_starts(plines, words, numbered)
+                    items = _item_starts(plines, words, numbered)
+                    pseudo = _pseudo_starts(plines, words)
+                    starts = items + pseudo
                     hard = frozenset(at[g] for g in starts if g in at)
+                    # an algorithm step's own row is one step: the segmenter cut inside it
+                    # ("Require: f(θ):" + "Stochastic objective ...", "9: //" + "For
+                    # clarity, ..."); not the row of its caption ("Algorithm 1 ...") or the
+                    # text after it
+                    steps = _pseudo_starts(plines, words, steps_only=True) + [
+                        g
+                        for g in items
+                        if (_line_item(lines[line_of[g]], words) or ("",))[0] == "colon"
+                    ]
+                    span = {g: (a, b) for a, b, g in local}
+                    for g in steps:
+                        ln = lines[line_of[g]]
+                        if g not in span or words[g]["t"] == "Algorithm":
+                            continue
+                        end = max(
+                            span[w][1]
+                            for o in plines
+                            if abs(o["cy"] - ln["cy"]) < ln["size"] / 2
+                            for w in o["widx"]
+                            if w in span and span[w][0] >= span[g][0]
+                        )
+                        stop = min((c for c in hard if c > span[g][0]), default=end)
+                        whole.append((span[g][0], min(end, stop)))
                 split = [
                     (s, e, st, [g for (a, b, g) in local if a < e and b > s])
-                    for s, e, st in _split_sentences(text, hard)
+                    for s, e, st in _split_sentences(text, hard, tuple(whole))
                 ]
             near_eq = any(
                 paras[q].get("equation")
