@@ -134,8 +134,10 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   `AIError` if the model drifts (an out-of-order index, or too many/too few lines — a merged or
   renumbered line would otherwise shift every later segment), and the server numbers results by
   arrival (`{"i": len(collected)}`). A drifted stream therefore errors instead of being shown or
-  cached. A failed batch falls back to the source text for its range so it cannot stall the
-  frontier. Every AI call is bounded by a per-backend semaphore in `app/ai.py`
+  cached. A list item's or an algorithm step's own marker ("3:", "2.", "(a)") is put back when
+  the model drops it as if it were the prompt's numbering (`ai._keep_marker`). A failed
+  batch falls back to the source text for its range so it cannot stall the frontier.
+  Every AI call is bounded by a per-backend semaphore in `app/ai.py`
   sized by the same concurrency setting, which also covers summary/anatomy. A rate limit
   (`RateLimitError`, HTTP 429, or a stream line with `rate_limited`) stops the remaining
   batches and leaves source text; the user lowers concurrency in Settings if it repeats. The server stays generic (it
@@ -268,14 +270,55 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   period, so it needs its own rule (`_continues_ellipsis`): the text goes on when the next
   fragment opens with punctuation, a closing bracket or quote, or an operator, and starts
   anew after a page number (a table of contents' dot leader) or a capitalized word. Over 36
-  papers this rejoined 89 cuts in 12 of them. Enumeration runs ("a) ... b) ... c)", "(1) ..., (2) ...") are split into
-  items by `_split_on_markers`; "Eqn.(1)" references and two-part subfigure phrases
-  ("show (a) X and (b) Y") are left whole. Short prose that `_keep_sentence` would drop
-  as a label (a lead-in before a display equation, "Then we have") is kept by
-  paragraph context. These rules were measured on 25 papers with no word lost or
-  duplicated. A sentence segmenter swap (Stanza, SaT) was measured and rejected: none
-  reliably splits comma-joined lists, and both are much slower (Stanza ran 8x slower
-  than spaCy on real per-paragraph calls).
+  papers this rejoined 89 cuts in 12 of them. A one-letter symbol after a range with no
+  period of its own goes on ("k = 1 . . ." + "K do"; not "A" or "I", which open sentences):
+  3 more cuts in 2 of 138 documents, nothing else. Enumeration runs ("a) ... b) ... c)",
+  "(1) ..., (2) ...") are split into items by `_split_on_markers`; "Eqn.(1)" references and
+  two-part subfigure phrases ("show (a) X and (b) Y") are left whole. A list item or an
+  algorithm step that opens a line starts a sentence (`_item_starts`): "1.", "(1)", "a)", a
+  bullet, or a line number "12:", when the line before ends with a colon or, for a number,
+  another line of the page opens with the next or previous number of the same kind. Without
+  that a lead-in absorbed the first item ("... as follows: 1. ..."), and steps with no
+  period of their own ran together ("1: repeat 2: sample ..."). A letter is no evidence
+  ("(b)" also opens a line as a panel reference), and neither is a marker after
+  "Eq."/"Table"/"Figure" or after a word broken at the line's end ("top-" + "5."), a "3)"
+  that closes an open parenthesis, an equation number the text goes on from ("(3) and (4)
+  gives"), or a marker alone on its line ("(5)" is as often an equation number), except a
+  line number, which PDFs set apart from its step. Such items are kept however short ("5:
+  end for"), but not a bare marker, and so are the short pieces they cut a paragraph into (a
+  lead-in "We consider:", a step "repeat"): read whole, the paragraph was one sentence long
+  enough to keep, and cut, `_keep_sentence` dropped its lead-in as a label ("We consider:" +
+  "1. Speed" + "2. Memory"). Over 89 papers this split 175 list items and 133 steps (8
+  papers' algorithms) with no word lost, shared or stitched differently, and over 22 papers
+  kept out of the tuning 21 items and 26 steps, all of them right. The neighbouring number
+  may sit anywhere on the page: asking for it in the same paragraph, or in the same column,
+  lost right splits (an algorithm's comment line starts a paragraph of its own) and fixed
+  none, so a wrapped "3." on a page with a list of "2." and "4." would still split. A list
+  counts up, though: a number no higher than an item before it in its paragraph is no item
+  ("3. If not converged, go to step" + "2. Otherwise ..." refers back). Pseudo-code with no
+  line numbers is split by row (`_pseudo_starts`) once the paragraph shows it is
+  pseudo-code: a row that only closes a block ("end for"), a "repeat" with its "until", or a
+  row that opens a loop ("for t = 1 to T do") with a second sign beside it, another such row
+  or an assignment ("y ← r + γ"). A row that opens with "for" and ends in "do" is no sign
+  alone: prose has them ("for every τ. Indeed, ... we do" + "recover ..."), and taking them
+  cut 3 prose sentences. Nor is a bare "end" row, or ":=", which math prose defines with
+  ("Let f := g, and" + "if x ∈ A then"). From the first keyword row ("Require:",
+  "Initialize", "for", an assignment) to the last, so that prose before the algorithm stays
+  whole, a step opens a row with a keyword, a capitalized word or an assignment, or follows
+  a row that opens or closes a block; a lowercase row, or one after a row that ends on
+  "with", a comma or the like, goes on (a wrapped step). Over 138 documents this split 15
+  pages of pseudo-code in 12 papers (28 sentences into 166) and no prose. A step's own row,
+  numbered or not, is one sentence (`whole` in `_merge_fragments`): the segmenter cut inside
+  it ("Require: f(θ):" + "Stochastic objective ...", "9: //" + "For clarity, ...", a comment
+  "▷ ..." or a fraction's lower half), 12 times in 9 papers; the caption's row and the text
+  after the algorithm keep their sentences. A step that the PDF set on one line with the
+  next stays joined, and one that wraps onto a row opening with a keyword ("Stop the
+  episode" + "if the goal is reached") is cut there. Short prose that `_keep_sentence` would
+  drop as a label (a lead-in before a display equation, "Then we have") is kept by paragraph
+  context. These rules were measured on 25 papers with no word lost or duplicated. A
+  sentence segmenter swap (Stanza, SaT) was measured and rejected: none reliably splits
+  comma-joined lists, and both are much slower (Stanza ran 8x slower than spaCy on real
+  per-paragraph calls).
 - **Word boxes come from the glyphs.** `_words_with_style()` builds each word's box from its
   own glyphs (`rawdict`). Do not go back to splitting a span by character count: a justified
   line often comes as ONE span, the guess drifted up to ~20pt, and a sentence's first capital
@@ -350,7 +393,59 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   Its footnote with an e-mail address (`_EMAIL`) goes too: that is the authors' contact
   block (affiliations, "Correspondence to: ..."), the same front matter set at the foot of
   the page. Over 32 papers all 10 such footnotes were one; content footnotes carry no
-  address, and "Equal contribution" or a venue notice without one is still translated.
+  address. So does a footnote whose mark an author carries ("Ann Lee∗" + "∗Equal
+  contribution", "Bo Li†" + "†Work done at ..."): an author note, from its mark to the next
+  footnote (a mark or a small number) in its PDF block, taken out after the e-mail rule has
+  judged the whole block. Only mark symbols count (`_MARKS`, "∗" and "*" as one): an
+  affiliation number ("Lee¹") and the text's first footnote ("¹Code is at ...") share "1",
+  and counting numbers took three content footnotes with them. A mark in a caption kept
+  above the Abstract is no author's. A note a mark ties to an author or the title goes
+  whatever it says (funding, "A preliminary version appeared in ..."), as the contact block
+  does; the Acknowledgements section is translated. A venue notice, or a note with no mark,
+  is still translated. Over 89 papers this dropped author notes in 13 and nothing else.
+- **Footnotes are read one by one; a link alone is not translated.** A footnote paragraph
+  may hold several footnotes, and the next one's number used to end the one before it ("...
+  all tasks 3" | "After each batch ..."): each line that opens with a mark symbol or with a
+  number or a letter set smaller than the rest of its line starts a sentence (a word at the
+  line's size is none, a larger symbol beside it or not). A sign before a number ("§4.2") or
+  of the text ("#tokens", "‖x‖") is no mark. A footnote sentence that is only a link
+  (`_link_only`: two words or fewer once the links are out, "1 Code: https://...", "5.
+  hf.co/...") is not translated, since its translation would be the same link; one with
+  prose ("1 The code is available at https://...") is, and so is Chinese or Japanese prose,
+  which has no spaces to count words by. Over 89 papers that dropped 433 words on 105 pages,
+  all links, labels and footnote numbers. Footnotes as a whole stay: they are 1% of the
+  words, most of them say something (a definition, a caveat), and the model's furniture
+  boxes they come from also hold text that is no footnote (a dialogue example in mid-page).
+- **A table of contents is not translated.** `_toc_lines()` finds it on each page by its
+  entries: a row that ends in a page number after a dot leader or a wide gap, or a number on
+  a line of its own beside a title (the nearest line to its left; a row of numbers, such as
+  axis ticks, is no entry; on a two-column page a title with no dot leader is in its
+  number's column, or a plot's ticks beside the other column's prose would take that prose).
+  It needs five rows of entries that follow on without a wide gap, three different numbers,
+  mostly going up in reading order. Not by a "Contents" heading: the contents run on to
+  pages without one; the list's own heading right above the entries ("Contents", "List of
+  Tables") goes with them, and so does a list of figures or tables. A "Contents" heading
+  right above lowers the need to two rows, one with a dot leader, for contents that start at
+  a page's foot (two rows that end in numbers under a section named "Contents" are no
+  contents). Only the entries' own band goes, one column at a time: contents that fill one
+  column and run on in the next stand beside text that is not theirs (a figure caption, the
+  start of the introduction), and one band across the page took that text too. The band
+  takes a first title that wraps above its number's row, back to the line that opens with
+  its number ("2.1 Two simple ..."), and a last title that runs on below up to its number,
+  but never grows past a heading: a thesis chapter may open with the short contents of its
+  sections, and its title ("1 Introduction") opens with a number like an entry. Text below
+  the last entry stays, and a table with dot leaders is gone before (a table box covers it).
+  A running head is never an entry, by its words and its place in the page's top or bottom
+  band: a monograph's heads repeat its chapter titles ("INTRODUCTION"), and by its words
+  alone the entry "1 Introduction" was none. It runs before page numbers are dropped, since
+  the model may call an entry's number furniture. Over 89 papers it dropped 25 pages of
+  contents in 16 and nothing else, over 22 papers kept out of the tuning (a 180-page
+  monograph, surveys, a two-column supplement, math, physics, ACM and IEEE layouts) 6 pages
+  in 4 and the start of a seventh, and in a PhD thesis its contents and lists of figures and
+  tables; the internal links of hyperref contents found no page it missed. A list of symbols
+  is no contents, page numbers or not: its rows open with the symbol ("α", "x"), on the
+  title's line or just left of it. A list of abbreviations with page numbers would go like a
+  list of figures (none had them in the documents seen).
 - **An appendix cover's copy of the front matter is dropped.** Page 0 drops everything
   above the Abstract (title, authors, affiliations; `_front_cut`). An appendix or
   supplement often opens on a cover that repeats those lines, and the model may type its

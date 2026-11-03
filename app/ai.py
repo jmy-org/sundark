@@ -299,7 +299,30 @@ async def translate_segments(
         + f"{_UNTRUSTED_HEADER}<segments>\n{numbered}\n</segments>"
     )
     arr = _parse_json_array(await _run("translate", prompt, _TRANSLATE_SYS))
-    return arr if arr is not None and len(arr) == len(segments) else None
+    if arr is None or len(arr) != len(segments):
+        return None
+    return [_keep_marker(src, tr) for src, tr in zip(segments, arr)]
+
+
+# A list item or an algorithm step opens with its own marker ("3:", "2.", "(a)", "•"). The
+# prompt numbers each segment, and the model may drop the marker as if it were that numbering
+# ("1: Let x = ..." came back without its "1:"), so it is put back. A translation that opens
+# with a marker of its own, the source's or a translated one ("a)", "(가)", "가)"), is left
+# alone. The bullets are pdf_utils._BULLET_CHARS and dashes.
+_BULLETS = "•◦▪▫●○‣⁃∙–-"
+_SEGMENT_MARK = re.compile(
+    r"(?:\d{1,3}[:.]|\(?\d{1,2}\)|\(?[a-z]\)|\((?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\)"
+    r"|[" + _BULLETS + r"])(?=\s)"
+)
+_OPENS_MARK = re.compile(r"[\d(" + _BULLETS + r"]|[^\W\d_]{1,4}\)")
+
+
+def _keep_marker(src: str, tr: str) -> str:
+    m = _SEGMENT_MARK.match(src.strip())
+    body = tr.lstrip()
+    if m and body and not _OPENS_MARK.match(body):
+        return f"{m.group()} {body}"
+    return tr
 
 
 def _parse_line(line: str) -> tuple[int | None, str]:
@@ -358,12 +381,14 @@ async def translate_stream(segments: list[str], target_lang: str, brief: str = "
                     line, buf = buf.split("\n", 1)
                     if line.strip():
                         text = translation(line.strip())
+                        text = _keep_marker(segments[emitted], text)
                         emitted += 1
                         yield text
         finally:
             await chunks.aclose()
     if buf.strip():
         text = translation(buf.strip())
+        text = _keep_marker(segments[emitted], text)
         emitted += 1
         yield text
     if emitted != len(segments):

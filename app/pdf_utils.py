@@ -558,26 +558,38 @@ def _starts_closing(text: str, span: tuple[int, int]) -> bool:
 # sentence inside or right after them. A fragment ending in such a run goes on when the next one
 # opens with punctuation, a closing bracket or quote, or an operator (", x n }", ". , x n }",
 # "< h k", "”"); a page number or a capitalized word after it (a table of contents' dot leader,
-# "σ 3 ≥ . . . ." + "Choose ...") starts anew.
+# "σ 3 ≥ . . . ." + "Choose ...") starts anew, but not a one-letter symbol after a range with
+# no period of its own, three dots after a value ("k = 1 . . ." + "K do", "t = 1 . . ." +
+# "T , which ..."); "A" and "I" may open a sentence.
 _ELLIPSIS_END = re.compile(r"(?:^|\s)\.(?:\s\.)+$")
+_RANGE_END = re.compile(r"[^.\s]\s+\.\s\.\s\.$")
+_SYMBOL_START = re.compile(r"[B-HJ-ZΑ-Ω](?![\w.])")
 
 
 def _continues_ellipsis(t: str, text: str, span: tuple[int, int]) -> bool:
+    frag = text[span[0] : span[1]].lstrip()
     return bool(_ELLIPSIS_END.search(t)) and (
         _starts_closing(text, span)
         or _starts_math_cont(text, span)
-        or text[span[0] : span[1]].lstrip()[:1] == "”"
+        or frag[:1] == "”"
+        or bool(_RANGE_END.search(t) and _SYMBOL_START.match(frag))
     )
 
 
 def _merge_fragments(
-    raw: list[tuple[int, int]], text: str
+    raw: list[tuple[int, int]],
+    text: str,
+    hard: frozenset[int] = frozenset(),
+    whole: tuple[tuple[int, int], ...] = (),
 ) -> list[tuple[int, int, str]]:
     """Merge lone section numbers, trailing paper-abbreviations, and over-split fragments into
     the sentence they belong to. An over-split continuation is a fragment that starts lowercase
     (spaced inline math), or - while the running text is not yet a complete sentence - one that
     starts with a binary math operator ("...z" + "= (z_1, ..., z_n).") or an inline author-year
-    citation ("...(FiLM)" + "Perez et al. (2018) ...")."""
+    citation ("...(FiLM)" + "Perez et al. (2018) ..."). A fragment that starts at a `hard`
+    offset (a list item or an algorithm step, see _item_starts) is never merged into the one
+    before it, and a lone mark or bracket left right before one ends the sentence before it.
+    A fragment that starts inside a `whole` span (an algorithm step's own row) is merged."""
     out: list[tuple[int, int, str]] = []
     i = 0
     while i < len(raw):
@@ -585,8 +597,10 @@ def _merge_fragments(
         t = text[s:e].strip()
         while (
             i + 1 < len(raw)
+            and _lstrip_at(text, raw[i + 1][0]) not in hard
             and (
-                re.fullmatch(r"\d+(\.\d+)*\.?", t)
+                any(a < _lstrip_at(text, raw[i + 1][0]) < b for a, b in whole)
+                or re.fullmatch(r"\d+(\.\d+)*\.?", t)
                 or _ABBR_TAIL.search(t)
                 or len(t) <= 2
                 # a short label ("Right:", "Figure 13:") introduces the capitalized sentence
@@ -643,7 +657,21 @@ def _merge_fragments(
             i += 1
             e = raw[i][1]
             t = text[s:e].strip()
-        out.append((s, e, t))
+        if (
+            len(t.split()) == 1
+            and not t[:1].isalpha()
+            and out
+            and i + 1 < len(raw)
+            and _lstrip_at(text, raw[i + 1][0]) in hard
+            and _lstrip_at(text, s) not in hard
+        ):
+            # a mark or a bracket left before an item ends the sentence before it: a footnote
+            # mark ("... data. §" + "2. ..."), an answer ("Did you ...? [Yes]" + "3. ..."); a
+            # word stays, it may lead into the item ("Then" + "(i) ...")
+            ps = out[-1][0]
+            out[-1] = (ps, e, text[ps:e].strip())
+        else:
+            out.append((s, e, t))
         i += 1
     return out
 
@@ -719,9 +747,216 @@ def _split_on_markers(raw: list[tuple[int, int]], text: str) -> list[tuple[int, 
     return out
 
 
-def _split_sentences(text: str) -> list[tuple[int, int, str]]:
+# A list item or an algorithm step at the start of a line: "1.", "2)", "(3)", "(a)", "b)",
+# "(iv)", a bullet, or an algorithm line number ("12:").
+_ITEM_MARK = re.compile(
+    r"(\d{1,2})\.|\(?(\d{1,2})\)|\(?([A-Za-z])\)|\((i|ii|iii|iv|v|vi|vii|viii|ix|x)\)"
+    r"|(\d{1,3}):|[" + _BULLET_CHARS + "]"
+)
+
+
+def _item_kind(tok: str) -> tuple[str, int | None] | None:
+    """The (kind, number) of a line-opening item marker, or None. Kinds: dot "1.", paren "(1)"
+    and colon "1:" (an algorithm step) with their number; alpha "(a)", roman "(ii)" and a
+    bullet (its own kind) have none, since a letter is no evidence of a list (_item_starts)."""
+    m = _ITEM_MARK.fullmatch(tok)
+    if not m:
+        return None
+    dot, paren, alpha, roman, colon = m.groups()
+    if dot or paren or colon:
+        kind = "dot" if dot else "paren" if paren else "colon"
+        return kind, int(dot or paren or colon)
+    return ("alpha" if alpha else "roman" if roman else tok), None
+
+
+def _line_item(ln: dict, words: list[dict]) -> tuple[str, int | None] | None:
+    """The item marker that opens line `ln` (see _item_kind). A marker alone on its line is
+    not one ("(5)" is as often an equation number, "(B)" an answer), except an algorithm line
+    number, which PDFs often set apart from its step ("4:" | "x ← y")."""
+    mk = _item_kind(words[ln["widx"][0]]["t"])
+    if mk is not None and mk[0] != "colon" and len(ln["widx"]) == 1:
+        return None
+    return mk
+
+
+# A line that ends on a capitalized reference word: the number opening the next line is what
+# it refers to ("... shown in Figure" + "3. We then ..."). Not "step" or "line": a step ends
+# on them ("3: take a gradient step" + "4: until converged").
+_REF_TAIL = re.compile(
+    r"\b(?:Figure|Section|Equation|Appendix|Algorithm|Theorem|Lemma|Corollary|Proposition"
+    r"|Definition|Chapter)\s*$"
+)
+# A word after "(3)" that goes on from an equation number, not one that opens an item.
+_REF_NEXT = re.compile(r"and|or|to|into|is|are|gives?|yields?|impl(?:y|ies)|holds?")
+
+
+def _item_starts(
+    lines: list[dict], words: list[dict], numbered: set[tuple]
+) -> list[int]:
+    """Word indices where a list item or an algorithm step opens a line of a paragraph
+    (`lines`, in order), so a new sentence starts there. The marker alone could be prose
+    wrapped onto a new line ("... the batch size was" + "8. The model ..."), so it also needs
+    evidence that a list is laid out: the line before it ends with a colon, or, for a number,
+    another line of the page opens with the next or previous number of the same kind ("3:"
+    after "2:"; `numbered` holds the page's line-opening readings). A letter has no such
+    evidence: "(a)" and "(b)" also open lines as panel references ("... as shown in panel" +
+    "(b) and ..."). Nor is a marker after "Eq.", "Table" or "Figure" an item: it is a
+    reference; nor a "3)" that closes a parenthesis the line before opened ("... (ideally" +
+    "3) as ..."), a number after a word broken at the line's end ("top-" + "5. We ..."), an
+    equation number the text goes on from ("Substituting into" + "(3) and (4) gives ..."),
+    or a number no higher than an item before it in the paragraph: a list counts up, and
+    "... go to step" + "2. Otherwise ..." in item 3 refers back."""
+    out = []
+    last: dict[str, int] = {}  # the number of the paragraph's last item of each kind
+    for k, ln in enumerate(lines):
+        mk = _line_item(ln, words)
+        prev = lines[k - 1]["text"] if k else ""
+        if (
+            mk is None
+            or _ENUM_ABBR.search(prev)
+            or _REF_TAIL.search(prev)
+            or prev.rstrip().endswith("-")
+            or (
+                words[ln["widx"][0]]["t"][0] != "("
+                and mk[0] in ("paren", "alpha")
+                and prev.count("(") > prev.count(")")
+            )
+            or (
+                mk[0] == "paren"
+                and len(ln["widx"]) > 1
+                and _REF_NEXT.fullmatch(words[ln["widx"][1]]["t"])
+            )
+        ):
+            continue
+        kind, n = mk
+        if n is not None and n <= last.get(kind, 0):
+            continue  # a list counts up: "2." after item 3 refers back ("go to step" + "2.")
+        near = kind in ("dot", "paren", "colon") and (
+            (kind, n - 1) in numbered or (kind, n + 1) in numbered
+        )
+        if near or prev.rstrip().endswith(":"):
+            out.append(ln["widx"][0])
+            if n is not None:
+                last[kind] = n
+    return out
+
+
+# Pseudo-code keywords: a line that only closes a block, one that opens a loop or a branch
+# ("for each iteration do", "if t mod d then"), and a line's first word.
+_PC_END = re.compile(
+    r"end\s?(?:for|while|if|function|procedure|loop)?|endfor|endwhile|endif",
+    re.IGNORECASE,
+)
+_PC_OPEN = re.compile(r"(?:for|foreach|forall|while|if)\b.*\b(?:do|then)")
+_PC_KEY = re.compile(
+    r"(?:for|foreach|forall|while|if|else|repeat|until|return|end(?:for|while|if)?)\b"
+    r"|(?:Require|Ensure|Input|Output|Initiali[sz]e|Algorithm)\b"
+)
+# A row that ends on a word or a sign that needs more is a step that wraps ("Update the
+# network with" + "SGD and a decayed rate"). Not "a": a step ends on a symbol ("action a").
+_PC_WRAP = re.compile(
+    r"(?:\b(?:with|and|or|of|the|an|to|from|using|by|in|on|at|as|into|over|via|per)"
+    r"|[,(=+−-])$"
+)
+
+
+def _pseudo_starts(
+    lines: list[dict], words: list[dict], steps_only: bool = False
+) -> list[int]:
+    """Word indices where a step of pseudo-code with no line numbers opens a row of a
+    paragraph (`lines`, in order), so a new sentence starts there: the steps have no period
+    of their own and ran together ("for each iteration do Sample a batch ... end for"). The
+    paragraph is pseudo-code when a row only closes a block ("end for"; a bare "end" needs
+    another sign), a "repeat" has its "until", or a row that opens a loop ("for t = 1 to T
+    do") has a second sign beside it, another such row or an assignment ("y ← r + γ"); prose
+    has rows that open with "for" and end in "do" ("for every τ. Indeed, ... we do" +
+    "recover ..."). From its first keyword row to its last (prose before the algorithm stays
+    whole), a step opens a row with a keyword, a capitalized word ("Sample", "Update"), or an
+    assignment, or follows a row that opens or closes a block; a row after one that ends on
+    "with", a comma or the like goes on (a wrapped step), and the row after an "end ..."
+    starts anew (the text after the algorithm; not with `steps_only`). A row is a line and
+    the pieces beside it at the same height (an accent, the text after a gap)."""
+    rows: list[list[dict]] = []
+    for ln in lines:
+        if rows and abs(ln["cy"] - rows[-1][-1]["cy"]) < ln["size"] / 2:
+            rows[-1].append(ln)
+        else:
+            rows.append([ln])
+    texts = [" ".join(ln["text"].strip() for ln in row) for row in rows]
+    toks = [[words[g]["t"] for ln in row for g in ln["widx"]] for row in rows]
+
+    def assigns(k: int) -> bool:
+        return any("←" in t or t == ":=" for t in toks[k][1:4])
+
+    ends = [k for k, t in enumerate(texts) if _PC_END.fullmatch(t)]
+    if ends or "repeat" in texts:
+        ends += [k for k, t in enumerate(texts) if re.match(r"until\b", t)]
+    opens = [
+        k
+        for k, t in enumerate(texts)
+        if _PC_OPEN.fullmatch(t)
+        and not re.search(r"[.;?!]\s", re.sub(r"\.(?:\s\.)+", "", t))
+    ]
+    # ":=" is also a definition of math prose ("Let f := g, and" + "if x ∈ A then")
+    assigned = any("←" in t for row in toks for t in row[1:4])
+    if (
+        ends
+        and all(texts[k].lower() == "end" for k in ends)
+        and not (opens or assigned)
+    ):
+        ends = []  # "end" alone may be a word of prose ("from one" + "end" + "to the other")
+    if not (ends or len(opens) > 1 or (opens and assigned)):
+        return []
+    keyed = [k for k, t in enumerate(texts) if _PC_KEY.match(t) or assigns(k)]
+    start, last = min(ends + opens + keyed), max(ends + opens + keyed)
+    out = []
+    for k in range(max(1, start), min(len(rows), last + (1 if steps_only else 2))):
+        prev, first = texts[k - 1], toks[k][0]
+        if re.fullmatch(r"\d{1,3}:", prev):
+            continue  # a step number set apart from its step
+        if k - 1 not in ends and _PC_WRAP.search(prev) and not _PC_KEY.match(texts[k]):
+            continue
+        if (
+            k - 1 in ends
+            or _PC_KEY.match(texts[k])
+            or re.search(r"\b(?:do|then|repeat|else)$", prev)
+            or (first[:1].isupper() and first[1:2].islower())
+            or assigns(k)
+        ):
+            out.append(rows[k][0]["widx"][0])
+    return out
+
+
+def _lstrip_at(text: str, i: int) -> int:
+    """The offset of the first non-space character at or after `i`."""
+    while i < len(text) and text[i].isspace():
+        i += 1
+    return i
+
+
+def _split_at(
+    raw: list[tuple[int, int]], text: str, cuts: frozenset[int]
+) -> list[tuple[int, int]]:
+    """Split sentence ranges at each offset in `cuts` that falls inside one."""
+    out: list[tuple[int, int]] = []
+    for s, e in raw:
+        last = s
+        for p in sorted(p for p in cuts if s < p < e):
+            if text[last:p].strip():
+                out.append((last, p))
+                last = p
+        out.append((last, e))
+    return out
+
+
+def _split_sentences(
+    text: str,
+    hard: frozenset[int] = frozenset(),
+    whole: tuple[tuple[int, int], ...] = (),
+) -> list[tuple[int, int, str]]:
     """Split into sentences, returning (start, end, text). Uses pysbd (handles abbreviations,
-    decimals, citations, URLs) with a regex fallback, then merges paper-specific leftovers."""
+    decimals, citations, URLs) with a regex fallback, then merges paper-specific leftovers.
+    `hard` holds offsets where a sentence always starts (list items, algorithm steps)."""
     raw = None
     nlp = _spacy_segmenter()
     if nlp is not None:
@@ -742,16 +977,18 @@ def _split_sentences(text: str) -> list[tuple[int, int, str]]:
             if m.group().strip()
         ]
     raw = _mend_word_splits(raw, text)
-    return _merge_fragments(_split_on_markers(_split_on_bullets(raw, text), text), text)
+    raw = _split_on_markers(_split_on_bullets(raw, text), text)
+    return _merge_fragments(_split_at(raw, text, hard), text, hard, whole)
 
 
 def _keep_sentence(text: str, word_count: int, context: int = 0) -> bool:
     """Keep prose and section headings; drop figure/diagram labels and scattered tokens
     (short fragments with no sentence punctuation, e.g. 'Conv1D', 'Cross Attention').
     `context` rescues short prose that this filter would drop. 2: the paragraph also holds a
-    full sentence, so a fragment with any word (two letters in a row) is kept - a lead-in cut
-    off by a display equation ('Then we have'), a list intro ('We show that:'), a page tail
-    ('In addition, high-'). 1: the paragraph sits next to a display equation, so a fragment
+    full sentence, or is a list or an algorithm cut at its items and steps, so a fragment with
+    any word (two letters in a row) is kept - a lead-in cut off by a display equation ('Then
+    we have'), a list intro ('We show that:'), a step ('repeat'), a page tail ('In addition,
+    high-'). 1: the paragraph sits next to a display equation, so a fragment
     with a lowercase word is kept ('where', 'we get'). Figure labels form paragraphs of their
     own, away from equations, and are still dropped."""
     if word_count >= 5:
@@ -961,6 +1198,57 @@ _ABSTRACT_RE = re.compile(r"(?:Abstract|ABSTRACT)(?:[.:—–-].*)?")
 # An e-mail domain ("x@mit.edu", "{a, b} @mit.edu"); not "mAP@0.5" or "Recall@1".
 _EMAIL = re.compile(r"@ ?[A-Za-z][\w-]*(?:\.[A-Za-z][\w-]*)+")
 
+# A link: a URL with its scheme or "www.", a host with a path ("hf.co/x", "github.com/x"), or a
+# bare host on a common domain ("example.org"). A scheme cut off by a space ("https: //...")
+# leaves "https:" behind, which counts as part of the link.
+_URL = re.compile(
+    r"(?:https?://|www\.)\S+|\bhttps?:|\b[\w-]+(?:\.[\w-]+)*\.[A-Za-z][\w-]*/\S*"
+    r"|\b[\w-]+(?:\.[\w-]+)*\.(?:com|org|net|io|ai|edu|gov|fr|de|cn|uk|co)\b"
+)
+
+
+def _link_only(text: str) -> bool:
+    """A footnote sentence that is only a link, perhaps with its number and a short label
+    ("1 Code: https://...", "3 Code release: https://...", "5. hf.co/..."): with the links
+    out, two words or fewer are left. Its translation would be the same link; one with prose
+    ("1 The code is available at https://...") is translated."""
+    if not _URL.search(text):
+        return False
+    rest = _URL.sub(" ", text)
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]{3}", rest):
+        return False  # Chinese or Japanese prose has no spaces to count words by
+    return len([w for w in rest.split() if re.search(r"[^\W\d_]{2}", w)]) <= 2
+
+
+# Footnote mark symbols. Numbers are left out: an affiliation number on an author ("Ann Lee¹")
+# and the first footnote of the text ("... GPUs.¹" + "¹Code is at ...") share "1".
+_MARKS = "*∗⋆†‡§¶‖#"
+
+
+def _mark(ch: str) -> str:
+    """A mark symbol with both asterisks as one: an author line's "∗" may mark a "*" note."""
+    return "*" if ch == "∗" else ch
+
+
+def _numbered_note(ws: list[dict]) -> bool:
+    """A line of words (with sizes) opens with a footnote number or letter, set smaller than the
+    rest of the line ("¹Code is at ...")."""
+    return (
+        len(ws) > 1
+        and bool(re.fullmatch(r"\d{1,2}|[a-z]", ws[0]["t"]))
+        and ws[0]["size"] < 0.85 * statistics.median(w["size"] for w in ws[1:])
+    )
+
+
+def _marked_note(t: str) -> bool:
+    """A word opens with a footnote mark symbol ("†Work done ..."), not a sign before a number
+    ("§4.2", "#3") or a sign of the text ("#tokens", "‖x‖")."""
+    return (
+        t[0] in _MARKS
+        and not t[1:2].isdigit()
+        and (t[0] not in "#‖" or not t[1:2].islower())
+    )
+
 
 def _front_cut(words: list[dict], height: float) -> float:
     """Where page 0's front matter (title, authors, affiliations) ends: the top of the Abstract
@@ -971,6 +1259,234 @@ def _front_cut(words: list[dict], height: float) -> float:
             return w["y0"]
         prev = w["line"]
     return height * 0.22
+
+
+# A row of a list of symbols opens with its symbol ("α  the learning rate . . . 12", "x  an
+# input . . . 3"), and a contents entry with a title or a number ("A Proofs", "2.1 Results").
+_SYMBOL_ROW = re.compile(r"[a-z]|[^\W\d_A-Za-z]{1,2}|[^\w\s]")
+
+
+def _toc_lines(
+    lines: list[dict],
+    words: list[dict],
+    page_count: int,
+    title_rects: list,
+    heads: set[int] | frozenset[int] = frozenset(),
+    page=None,
+) -> set[int]:
+    """Indices of `lines` that make up a table of contents (or a list of figures/tables),
+    and the list's own heading (a line in `title_rects`) right above it ("Contents", "List
+    of Tables"); a chapter title over a chapter's short contents stays. An entry ends in a
+    page number set apart from its title, after a dot leader or a wide gap ("3.1 Results . .
+    . 10", "1 Introduction 4"); a number on a line of its own pairs with the nearest line to
+    its left, which must hold a title or a leader, so a row of numbers (axis ticks, table
+    cells) is no entry, and neither is a row of a list of symbols, which opens with its
+    symbol ("α", "x"). On a page set in two columns (_two_columns of `page`), a title with
+    no dot leader is in its number's column: a number in the other column beside prose (a
+    plot's ticks, a rank) is no entry. A page is a contents page when five or more rows hold
+    entries that follow on without a wide gap, and their numbers mostly go up in reading
+    order; a table typed as text rarely does both, and the lines a table box covers are gone
+    by now. Two rows, one with a dot leader, are enough right below a "Contents" heading:
+    the contents may start at a page's foot. A running head or foot (`heads`, indices of
+    `lines`) is never an entry. In each column of entries, from its first entry's row to its
+    last one's, everything goes, wrapped entries included (a first title that wraps above
+    its number's row too, up to a heading, and a last one whose title runs up to its number
+    below); text below the last entry, or beside the entries in the other column, stays. It
+    runs before page numbers go: the model may call an entry's number furniture."""
+    # (number, its line, the entry's lines), and the entries with a dot leader
+    entries: list[tuple[int, int, list[int]]] = []
+    dotted: set[int] = set()
+    split: list[bool] = []  # _two_columns(page), worked out once if it is needed
+
+    def symbol_row(j: int) -> bool:
+        """The row of line `j` opens with a symbol, on that line or on one just left of it."""
+        o = lines[j]
+        lead = [
+            q
+            for q in lines
+            if q is not o
+            and abs(q["cy"] - o["cy"]) < o["h"] / 2
+            and o["left"] - 60 <= q["right"] <= o["left"]
+        ]
+        first = min(lead, key=lambda q: q["left"]) if lead else o
+        return bool(_SYMBOL_ROW.fullmatch(words[first["widx"][0]]["t"]))
+
+    for i, ln in enumerate(lines):
+        ws = ln["widx"]
+        m = re.fullmatch(r"(\.*)(\d{1,4})", words[ws[-1]]["t"])
+        if not m or not 1 <= int(m.group(2)) <= page_count + 10:
+            continue
+        if i in heads:
+            continue
+        if len(ws) > 1:
+            if symbol_row(i):
+                continue
+            prev = words[ws[-2]]
+            leader = (
+                m.group(1)
+                or re.fullmatch(r"\.+", prev["t"])
+                or prev["t"].endswith("...")
+            )
+            if not leader and words[ws[-1]]["x0"] - prev["x1"] < 1.5 * ln["size"]:
+                continue
+            if leader:
+                dotted.add(i)
+            row = [i]
+        else:
+            beside = [
+                j
+                for j, o in enumerate(lines)
+                if j != i
+                and abs(o["cy"] - ln["cy"]) < ln["h"] / 2
+                and o["right"] <= ln["left"]
+            ]
+            if not beside:
+                continue  # a bare number with no title beside it
+            j = max(beside, key=lambda j: lines[j]["right"])
+            title = lines[j]["text"]
+            mid = page.rect.width / 2 if page is not None else 0
+            if (
+                page is not None
+                and (lines[j]["cx"] > mid) != (ln["cx"] > mid)
+                and not re.search(r"\.\s*\.$", title)
+            ):
+                if not split:
+                    split.append(_two_columns(page))
+                if split[0]:
+                    continue  # beside a line of the other column
+            if not re.search(r"[^\W\d_]|\.\s*\.$", title):
+                continue
+            if j in heads or symbol_row(j):
+                continue
+            if re.search(r"\.\s*\.$", title):
+                dotted.add(i)
+            row = [j, i]
+        entries.append((int(m.group(2)), i, row))
+    titled = [
+        o["bottom"]
+        for o in lines
+        if re.fullmatch(r"(?:table of )?contents", o["text"].strip(), re.IGNORECASE)
+        and _in_rects(o["cx"], o["cy"], title_rects)
+    ]
+    if len(entries) < (2 if titled else 5):
+        return set()
+    # the longest run of entries with no wide gap between two of them
+    entries.sort(key=lambda e: lines[e[1]]["top"])
+    tops = [lines[i]["top"] for _, i, _ in entries]
+    steps = [b - a for a, b in zip(tops, tops[1:])]
+    wide = max(
+        3 * statistics.median(steps), 3 * statistics.median(ln["h"] for ln in lines)
+    )
+    runs = [[entries[0]]]
+    for e, step in zip(entries[1:], steps):
+        if step > wide:
+            runs.append([])
+        runs[-1].append(e)
+    run = sorted(max(runs, key=len), key=lambda e: e[1])  # back in reading order
+    n_rows = len({round(lines[i]["cy"]) for _, i, _ in run})
+    first = lines[run[0][1]]
+    if n_rows < 5 and not (
+        n_rows >= 2
+        and any(i in dotted for _, i, _ in run)
+        and any(0 <= first["top"] - b + 1 <= 3 * first["h"] for b in titled)
+    ):
+        return set()
+    vals = [v for v, _, _ in run]
+    if len(set(vals)) < min(3, n_rows):
+        return set()  # a column of one number is a table's, not page numbers
+    if sum(b >= a for a, b in zip(vals, vals[1:])) < 0.8 * (len(vals) - 1):
+        return set()
+    # one band per column of entries: contents that fill one column and run on in the next
+    # stand beside text that is not theirs (a figure, the start of the introduction)
+    span = {
+        i: (min(lines[j]["left"] for j in row), max(lines[j]["right"] for j in row))
+        for _, i, row in run
+    }
+    groups: list[list[tuple[int, int, list[int]]]] = []
+    edge = 0.0
+    for e in sorted(run, key=lambda e: span[e[1]][0]):
+        if not groups or span[e[1]][0] >= edge:
+            groups.append([])
+            edge = span[e[1]][1]
+        groups[-1].append(e)
+        edge = max(edge, span[e[1]][1])
+    out: set[int] = set()
+    for group in groups:
+        group.sort(key=lambda e: e[1])  # reading order
+        vals = [v for v, _, _ in group]
+        rows = [lines[j] for _, _, row in group for j in row]
+        top, bottom = min(o["top"] for o in rows), max(o["bottom"] for o in rows)
+        # an entry whose long title runs up to its number ("C Further Results on ... Tasks
+        # 48"): a line right below, ending at the page-number column with a number that goes on
+        col = max(lines[i]["right"] for _, i, _ in group)
+        tops = sorted(lines[i]["top"] for _, i, _ in group)
+        steps = [b - a for a, b in zip(tops, tops[1:])]
+        pitch = min(max(steps), 2.5 * statistics.median(steps)) if steps else 0.0
+        low = tops[-1]
+        grew = True
+        while grew:
+            grew = False
+            for ln in lines:
+                last = words[ln["widx"][-1]]["t"]
+                if (
+                    low < ln["top"] <= low + pitch + 1
+                    and abs(ln["right"] - col) <= 3
+                    and re.fullmatch(r"\d{1,4}", last)
+                    and vals[-1] <= int(last) <= page_count + 10
+                ):
+                    rows.append(ln)
+                    low, bottom = ln["top"], max(bottom, ln["bottom"])
+                    vals.append(int(last))
+                    grew = True
+        left, right = min(o["left"] for o in rows), max(o["right"] for o in rows)
+        # the first entry's title may wrap above its number's row: up to three lines right
+        # above, back to the one that opens with an entry's number ("2.1 Two simple ...")
+        upper = min(o["cy"] for o in rows)
+        for _ in range(3):
+            near = [
+                o
+                for o in lines
+                if upper - pitch - 1 <= o["cy"] < upper - 1
+                and o["right"] > left - 30
+                and o["left"] < right
+            ]
+            if not near:
+                break
+            # the next row up, with its number if that is a line of its own
+            row_cy = max(o["cy"] for o in near)
+            row = [o for o in near if row_cy - o["cy"] < o["h"] / 2]
+            if any(_in_rects(o["cx"], o["cy"], title_rects) for o in row):
+                break  # a heading is no wrapped title
+            upper = min(o["cy"] for o in row)
+            wrap = min(row, key=lambda o: o["left"])
+            label = words[wrap["widx"][0]]["t"]
+            if re.fullmatch(r"(?:\d{1,2}|[A-Z]\.\d{1,2})(?:\.\d{1,2})*\.?", label):
+                top = min([top] + [o["top"] for o in row])
+                break
+        band = {
+            j
+            for j, o in enumerate(lines)
+            if top - 1 <= o["cy"] <= bottom + 1 and left - 30 <= o["cx"] <= right + 5
+        }
+        above = [
+            j
+            for j, o in enumerate(lines)
+            if j not in band
+            and o["bottom"] <= top + 1
+            and o["right"] > left
+            and o["left"] < right
+        ]
+        if above:
+            j = max(above, key=lambda j: lines[j]["bottom"])
+            o = lines[j]
+            if (
+                _in_rects(o["cx"], o["cy"], title_rects)
+                and len(o["widx"]) <= 4
+                and re.search(r"contents|^list of", o["text"].strip(), re.IGNORECASE)
+            ):
+                band.add(j)
+        out |= band
+    return out
 
 
 def _front_matter(page) -> set[str]:
@@ -1619,6 +2135,7 @@ def _page_layout(
         raw = [w for w in styled if not _drop(w)]
         # On page 1, drop everything above the Abstract (title, authors, affiliations), except a
         # figure caption: a teaser figure above the Abstract (SAM) has a caption to translate.
+        front_marks: set[str] = set()
         if page_index == 0:
             cut = _front_cut(
                 [
@@ -1627,6 +2144,16 @@ def _page_layout(
                 ],
                 ph,
             )
+            front_marks = {
+                _mark(ch)
+                for w in raw
+                if w["y1"] <= cut
+                and not _in_rects(
+                    (w["x0"] + w["x1"]) / 2, (w["y0"] + w["y1"]) / 2, caption_rects
+                )
+                for ch in w["t"]
+                if ch in _MARKS
+            }
             raw = [
                 w
                 for w in raw
@@ -1729,6 +2256,19 @@ def _page_layout(
                 None,
             )
 
+        # A table of contents is not translated: the headings it lists are, where they stand.
+        # A running head is no entry, by where it stands as well as its words: a monograph's
+        # heads repeat its chapter titles ("INTRODUCTION"), and so does its contents.
+        heads = {
+            j
+            for j, ln in enumerate(lines)
+            if _norm_header(ln["text"]) in (headers or ())
+            and (ln["top"] < ph * 0.12 or ln["bottom"] > ph * 0.90)
+        }
+        toc = _toc_lines(lines, words, doc.page_count, title_rects, heads, page)
+        if toc:
+            lines = [ln for j, ln in enumerate(lines) if j not in toc]
+
         # Drop running heads and page numbers, by their text, not by height alone. A line repeated
         # across pages (`headers`) goes when it is in the page's top or bottom band, or inside a
         # model furniture box wherever that is; a bare page number ("12", "1:4", "xii"), a lone
@@ -1796,6 +2336,28 @@ def _page_layout(
                 ln["aside"] = "caption"
             else:
                 ln["aside"] = None
+
+        # Page 0's footnotes whose mark an author or the title carries ("Ann Lee∗" + "∗Equal
+        # contribution", "Bo Li†" + "†Work done at ...") are author notes: front matter, like
+        # the lines above the Abstract. A footnote runs from its mark to the next one, within
+        # its PDF block. A footnote marked from the text ("... GPUs.¹" + "¹Code: ...") stays.
+        # Their words go after the e-mail rule below, which judges the whole footnote block.
+        note_words: set[int] = set()
+        if front_marks:
+            cur, blk = False, None
+            for ln in lines:
+                if ln["aside"] != "foot":
+                    continue
+                first = words[ln["widx"][0]]["t"]
+                if _marked_note(first):
+                    cur = _mark(first[0]) in front_marks
+                elif ln["key"][0] != blk or _numbered_note(
+                    [raw[g] for g in ln["widx"]]
+                ):
+                    cur = False
+                blk = ln["key"][0]
+                if cur:
+                    note_words.update(ln["widx"])
 
         # Merge a lone section-number line ("1", "2.2") into the title that follows, so it reads
         # "1 Introduction" / "2.1 Denoising ...". Many papers typeset the number as a separate
@@ -1945,6 +2507,11 @@ def _page_layout(
                     and _EMAIL.search(" ".join(words[g]["t"] for g in p["widx"]))
                 )
             ]
+            paras = [
+                {**p, "widx": [g for g in p["widx"] if g not in note_words]}
+                for p in paras
+            ]
+            paras = [p for p in paras if p["widx"]]
 
         # An appendix or supplement may open on a cover that repeats page 0's front matter
         # (title, authors, affiliations). Page 0 drops those lines, so a later paragraph made
@@ -1960,6 +2527,11 @@ def _page_layout(
             ]
 
         # 3) Split each paragraph into sentences (equations and headings are kept whole).
+        numbered = set()
+        for ln in lines:
+            r = None if ln["heading"] or ln.get("math") else _line_item(ln, words)
+            if r and r[1] is not None:
+                numbered.add(r)
         sentences = []
         for pid, para in enumerate(paras):
             if para.get("equation"):
@@ -1982,20 +2554,73 @@ def _page_layout(
                         sentences[-1]["eqno"] = para["eqno"]
                 continue
             text, local = _join_words(para["widx"], words)
+            hard: frozenset[int] = frozenset()
+            whole: list[tuple[int, int]] = []
             if para["heading"]:
                 # one title, one segment: the splitter cut "A.1. Pre-training" after "A.1."
                 split = [(0, len(text), text.strip(), [g for *_, g in local])]
             else:
+                # a list item or an algorithm step that opens a line starts a sentence: a
+                # colon lead-in ("... as follows:" + "1. ...") and steps with no period of
+                # their own ("1: repeat" + "2: sample a batch", or the same with no line
+                # numbers) were read as one sentence
+                if not para.get("caption"):
+                    plines = [
+                        lines[li]
+                        for li in dict.fromkeys(line_of[g] for g in para["widx"])
+                    ]
+                    at = {g: a for a, _, g in local}
+                    items = _item_starts(plines, words, numbered)
+                    pseudo = _pseudo_starts(plines, words)
+                    starts = items + pseudo
+                    if para.get("aside"):
+                        # a footnote paragraph may hold several footnotes: each mark starts
+                        # one, so a number no longer ends the footnote before it ("... all
+                        # tasks 3" + "After each batch ...")
+                        starts += [
+                            ln["widx"][0]
+                            for ln in plines[1:]
+                            if _marked_note(words[ln["widx"][0]]["t"])
+                            or _numbered_note([raw[g] for g in ln["widx"]])
+                        ]
+                    hard = frozenset(at[g] for g in starts if g in at)
+                    # an algorithm step's own row is one step: the segmenter cut inside it
+                    # ("Require: f(θ):" + "Stochastic objective ...", "9: //" + "For
+                    # clarity, ..."); not the row of its caption ("Algorithm 1 ...") or the
+                    # text after it
+                    steps = _pseudo_starts(plines, words, steps_only=True) + [
+                        g
+                        for g in items
+                        if (_line_item(lines[line_of[g]], words) or ("",))[0] == "colon"
+                    ]
+                    span = {g: (a, b) for a, b, g in local}
+                    for g in steps:
+                        ln = lines[line_of[g]]
+                        if g not in span or words[g]["t"] == "Algorithm":
+                            continue
+                        end = max(
+                            span[w][1]
+                            for o in plines
+                            if abs(o["cy"] - ln["cy"]) < ln["size"] / 2
+                            for w in o["widx"]
+                            if w in span and span[w][0] >= span[g][0]
+                        )
+                        stop = min((c for c in hard if c > span[g][0]), default=end)
+                        whole.append((span[g][0], min(end, stop)))
                 split = [
                     (s, e, st, [g for (a, b, g) in local if a < e and b > s])
-                    for s, e, st in _split_sentences(text)
+                    for s, e, st in _split_sentences(text, hard, tuple(whole))
                 ]
             near_eq = any(
                 paras[q].get("equation")
                 for q in (pid - 1, pid + 1)
                 if 0 <= q < len(paras)
             )
-            context = 2 if any(len(ix) >= 5 for *_, ix in split) else int(near_eq)
+            # a list or an algorithm keeps the short pieces its items and steps cut it into
+            # (a lead-in "We study:", a step "repeat"): read whole, they were one sentence
+            context = (
+                2 if hard or any(len(ix) >= 5 for *_, ix in split) else int(near_eq)
+            )
             # Inline sub/superscripts, marked for the translator only ("tex"): "text" stays the
             # plain PDF text that splitting, stitching and quote lookup work on.
             marks = {}
@@ -2003,8 +2628,20 @@ def _page_layout(
                 body = statistics.median(raw[g]["size"] for g in para["widx"])
                 marks = _script_roles(para["widx"], words, raw, line_of, body)
             for s, e, st, idxs in split:
-                # headings/labels are always kept (shown as titles); body uses the filter
-                if idxs and (para["heading"] or _keep_sentence(st, len(idxs), context)):
+                # headings/labels are always kept (shown as titles), and so are list items
+                # and algorithm steps ("5: end for"); body uses the filter. A footnote that
+                # is only a link has nothing to translate.
+                if (
+                    idxs
+                    and not (
+                        para.get("aside") and not para.get("caption") and _link_only(st)
+                    )
+                    and (
+                        para["heading"]
+                        or (_lstrip_at(text, s) in hard and len(idxs) > 1)
+                        or _keep_sentence(st, len(idxs), context)
+                    )
+                ):
                     heights = [words[g]["y1"] - words[g]["y0"] for g in idxs]
                     size = round(statistics.median(heights), 1) if heights else 0
                     sentences.append(
