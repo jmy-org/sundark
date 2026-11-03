@@ -571,13 +571,17 @@ def _continues_ellipsis(t: str, text: str, span: tuple[int, int]) -> bool:
 
 
 def _merge_fragments(
-    raw: list[tuple[int, int]], text: str
+    raw: list[tuple[int, int]],
+    text: str,
+    hard: frozenset[int] = frozenset(),
 ) -> list[tuple[int, int, str]]:
     """Merge lone section numbers, trailing paper-abbreviations, and over-split fragments into
     the sentence they belong to. An over-split continuation is a fragment that starts lowercase
     (spaced inline math), or - while the running text is not yet a complete sentence - one that
     starts with a binary math operator ("...z" + "= (z_1, ..., z_n).") or an inline author-year
-    citation ("...(FiLM)" + "Perez et al. (2018) ...")."""
+    citation ("...(FiLM)" + "Perez et al. (2018) ..."). A fragment that starts at a `hard`
+    offset (a list item or an algorithm step, see _item_starts) is never merged into the one
+    before it, and a lone mark or bracket left right before one ends the sentence before it."""
     out: list[tuple[int, int, str]] = []
     i = 0
     while i < len(raw):
@@ -585,6 +589,7 @@ def _merge_fragments(
         t = text[s:e].strip()
         while (
             i + 1 < len(raw)
+            and _lstrip_at(text, raw[i + 1][0]) not in hard
             and (
                 re.fullmatch(r"\d+(\.\d+)*\.?", t)
                 or _ABBR_TAIL.search(t)
@@ -643,7 +648,21 @@ def _merge_fragments(
             i += 1
             e = raw[i][1]
             t = text[s:e].strip()
-        out.append((s, e, t))
+        if (
+            len(t.split()) == 1
+            and not t[:1].isalpha()
+            and out
+            and i + 1 < len(raw)
+            and _lstrip_at(text, raw[i + 1][0]) in hard
+            and _lstrip_at(text, s) not in hard
+        ):
+            # a mark or a bracket left before an item ends the sentence before it: a footnote
+            # mark ("... data. §" + "2. ..."), an answer ("Did you ...? [Yes]" + "3. ..."); a
+            # word stays, it may lead into the item ("Then" + "(i) ...")
+            ps = out[-1][0]
+            out[-1] = (ps, e, text[ps:e].strip())
+        else:
+            out.append((s, e, t))
         i += 1
     return out
 
@@ -719,9 +738,129 @@ def _split_on_markers(raw: list[tuple[int, int]], text: str) -> list[tuple[int, 
     return out
 
 
-def _split_sentences(text: str) -> list[tuple[int, int, str]]:
+# A list item or an algorithm step at the start of a line: "1.", "2)", "(3)", "(a)", "b)",
+# "(iv)", a bullet, or an algorithm line number ("12:").
+_ITEM_MARK = re.compile(
+    r"(\d{1,2})\.|\(?(\d{1,2})\)|\(?([A-Za-z])\)|\((i|ii|iii|iv|v|vi|vii|viii|ix|x)\)"
+    r"|(\d{1,3}):|[" + _BULLET_CHARS + "]"
+)
+
+
+def _item_kind(tok: str) -> tuple[str, int | None] | None:
+    """The (kind, number) of a line-opening item marker, or None. Kinds: dot "1.", paren "(1)"
+    and colon "1:" (an algorithm step) with their number; alpha "(a)", roman "(ii)" and a
+    bullet (its own kind) have none, since a letter is no evidence of a list (_item_starts)."""
+    m = _ITEM_MARK.fullmatch(tok)
+    if not m:
+        return None
+    dot, paren, alpha, roman, colon = m.groups()
+    if dot or paren or colon:
+        kind = "dot" if dot else "paren" if paren else "colon"
+        return kind, int(dot or paren or colon)
+    return ("alpha" if alpha else "roman" if roman else tok), None
+
+
+def _line_item(ln: dict, words: list[dict]) -> tuple[str, int | None] | None:
+    """The item marker that opens line `ln` (see _item_kind). A marker alone on its line is
+    not one ("(5)" is as often an equation number, "(B)" an answer), except an algorithm line
+    number, which PDFs often set apart from its step ("4:" | "x ← y")."""
+    mk = _item_kind(words[ln["widx"][0]]["t"])
+    if mk is not None and mk[0] != "colon" and len(ln["widx"]) == 1:
+        return None
+    return mk
+
+
+# A line that ends on a capitalized reference word: the number opening the next line is what
+# it refers to ("... shown in Figure" + "3. We then ..."). Not "step" or "line": a step ends
+# on them ("3: take a gradient step" + "4: until converged").
+_REF_TAIL = re.compile(
+    r"\b(?:Figure|Section|Equation|Appendix|Algorithm|Theorem|Lemma|Corollary|Proposition"
+    r"|Definition|Chapter)\s*$"
+)
+# A word after "(3)" that goes on from an equation number, not one that opens an item.
+_REF_NEXT = re.compile(r"and|or|to|into|is|are|gives?|yields?|impl(?:y|ies)|holds?")
+
+
+def _item_starts(
+    lines: list[dict], words: list[dict], numbered: set[tuple]
+) -> list[int]:
+    """Word indices where a list item or an algorithm step opens a line of a paragraph
+    (`lines`, in order), so a new sentence starts there. The marker alone could be prose
+    wrapped onto a new line ("... the batch size was" + "8. The model ..."), so it also needs
+    evidence that a list is laid out: the line before it ends with a colon, or, for a number,
+    another line of the page opens with the next or previous number of the same kind ("3:"
+    after "2:"; `numbered` holds the page's line-opening readings). A letter has no such
+    evidence: "(a)" and "(b)" also open lines as panel references ("... as shown in panel" +
+    "(b) and ..."). Nor is a marker after "Eq.", "Table" or "Figure" an item: it is a
+    reference; nor a "3)" that closes a parenthesis the line before opened ("... (ideally" +
+    "3) as ..."), a number after a word broken at the line's end ("top-" + "5. We ..."), an
+    equation number the text goes on from ("Substituting into" + "(3) and (4) gives ..."),
+    or a number no higher than an item before it in the paragraph: a list counts up, and
+    "... go to step" + "2. Otherwise ..." in item 3 refers back."""
+    out = []
+    last: dict[str, int] = {}  # the number of the paragraph's last item of each kind
+    for k, ln in enumerate(lines):
+        mk = _line_item(ln, words)
+        prev = lines[k - 1]["text"] if k else ""
+        if (
+            mk is None
+            or _ENUM_ABBR.search(prev)
+            or _REF_TAIL.search(prev)
+            or prev.rstrip().endswith("-")
+            or (
+                words[ln["widx"][0]]["t"][0] != "("
+                and mk[0] in ("paren", "alpha")
+                and prev.count("(") > prev.count(")")
+            )
+            or (
+                mk[0] == "paren"
+                and len(ln["widx"]) > 1
+                and _REF_NEXT.fullmatch(words[ln["widx"][1]]["t"])
+            )
+        ):
+            continue
+        kind, n = mk
+        if n is not None and n <= last.get(kind, 0):
+            continue  # a list counts up: "2." after item 3 refers back ("go to step" + "2.")
+        near = kind in ("dot", "paren", "colon") and (
+            (kind, n - 1) in numbered or (kind, n + 1) in numbered
+        )
+        if near or prev.rstrip().endswith(":"):
+            out.append(ln["widx"][0])
+            if n is not None:
+                last[kind] = n
+    return out
+
+
+def _lstrip_at(text: str, i: int) -> int:
+    """The offset of the first non-space character at or after `i`."""
+    while i < len(text) and text[i].isspace():
+        i += 1
+    return i
+
+
+def _split_at(
+    raw: list[tuple[int, int]], text: str, cuts: frozenset[int]
+) -> list[tuple[int, int]]:
+    """Split sentence ranges at each offset in `cuts` that falls inside one."""
+    out: list[tuple[int, int]] = []
+    for s, e in raw:
+        last = s
+        for p in sorted(p for p in cuts if s < p < e):
+            if text[last:p].strip():
+                out.append((last, p))
+                last = p
+        out.append((last, e))
+    return out
+
+
+def _split_sentences(
+    text: str,
+    hard: frozenset[int] = frozenset(),
+) -> list[tuple[int, int, str]]:
     """Split into sentences, returning (start, end, text). Uses pysbd (handles abbreviations,
-    decimals, citations, URLs) with a regex fallback, then merges paper-specific leftovers."""
+    decimals, citations, URLs) with a regex fallback, then merges paper-specific leftovers.
+    `hard` holds offsets where a sentence always starts (list items, algorithm steps)."""
     raw = None
     nlp = _spacy_segmenter()
     if nlp is not None:
@@ -742,16 +881,18 @@ def _split_sentences(text: str) -> list[tuple[int, int, str]]:
             if m.group().strip()
         ]
     raw = _mend_word_splits(raw, text)
-    return _merge_fragments(_split_on_markers(_split_on_bullets(raw, text), text), text)
+    raw = _split_on_markers(_split_on_bullets(raw, text), text)
+    return _merge_fragments(_split_at(raw, text, hard), text, hard)
 
 
 def _keep_sentence(text: str, word_count: int, context: int = 0) -> bool:
     """Keep prose and section headings; drop figure/diagram labels and scattered tokens
     (short fragments with no sentence punctuation, e.g. 'Conv1D', 'Cross Attention').
     `context` rescues short prose that this filter would drop. 2: the paragraph also holds a
-    full sentence, so a fragment with any word (two letters in a row) is kept - a lead-in cut
-    off by a display equation ('Then we have'), a list intro ('We show that:'), a page tail
-    ('In addition, high-'). 1: the paragraph sits next to a display equation, so a fragment
+    full sentence, or is a list or an algorithm cut at its items and steps, so a fragment with
+    any word (two letters in a row) is kept - a lead-in cut off by a display equation ('Then
+    we have'), a list intro ('We show that:'), a step ('repeat'), a page tail ('In addition,
+    high-'). 1: the paragraph sits next to a display equation, so a fragment
     with a lowercase word is kept ('where', 'we get'). Figure labels form paragraphs of their
     own, away from equations, and are still dropped."""
     if word_count >= 5:
@@ -2268,6 +2409,11 @@ def _page_layout(
             ]
 
         # 3) Split each paragraph into sentences (equations and headings are kept whole).
+        numbered = set()
+        for ln in lines:
+            r = None if ln["heading"] or ln.get("math") else _line_item(ln, words)
+            if r and r[1] is not None:
+                numbered.add(r)
         sentences = []
         for pid, para in enumerate(paras):
             if para.get("equation"):
@@ -2290,20 +2436,36 @@ def _page_layout(
                         sentences[-1]["eqno"] = para["eqno"]
                 continue
             text, local = _join_words(para["widx"], words)
+            hard: frozenset[int] = frozenset()
             if para["heading"]:
                 # one title, one segment: the splitter cut "A.1. Pre-training" after "A.1."
                 split = [(0, len(text), text.strip(), [g for *_, g in local])]
             else:
+                # a list item or an algorithm step that opens a line starts a sentence: a
+                # colon lead-in ("... as follows:" + "1. ...") and steps with no period of
+                # their own ("1: repeat" + "2: sample a batch") were read as one sentence
+                if not para.get("caption"):
+                    plines = [
+                        lines[li]
+                        for li in dict.fromkeys(line_of[g] for g in para["widx"])
+                    ]
+                    at = {g: a for a, _, g in local}
+                    starts = _item_starts(plines, words, numbered)
+                    hard = frozenset(at[g] for g in starts if g in at)
                 split = [
                     (s, e, st, [g for (a, b, g) in local if a < e and b > s])
-                    for s, e, st in _split_sentences(text)
+                    for s, e, st in _split_sentences(text, hard)
                 ]
             near_eq = any(
                 paras[q].get("equation")
                 for q in (pid - 1, pid + 1)
                 if 0 <= q < len(paras)
             )
-            context = 2 if any(len(ix) >= 5 for *_, ix in split) else int(near_eq)
+            # a list or an algorithm keeps the short pieces its items and steps cut it into
+            # (a lead-in "We study:", a step "repeat"): read whole, they were one sentence
+            context = (
+                2 if hard or any(len(ix) >= 5 for *_, ix in split) else int(near_eq)
+            )
             # Inline sub/superscripts, marked for the translator only ("tex"): "text" stays the
             # plain PDF text that splitting, stitching and quote lookup work on.
             marks = {}
@@ -2311,8 +2473,13 @@ def _page_layout(
                 body = statistics.median(raw[g]["size"] for g in para["widx"])
                 marks = _script_roles(para["widx"], words, raw, line_of, body)
             for s, e, st, idxs in split:
-                # headings/labels are always kept (shown as titles); body uses the filter
-                if idxs and (para["heading"] or _keep_sentence(st, len(idxs), context)):
+                # headings/labels are always kept (shown as titles), and so are list items
+                # and algorithm steps ("5: end for"); body uses the filter
+                if idxs and (
+                    para["heading"]
+                    or (_lstrip_at(text, s) in hard and len(idxs) > 1)
+                    or _keep_sentence(st, len(idxs), context)
+                ):
                     heights = [words[g]["y1"] - words[g]["y0"] for g in idxs]
                     size = round(statistics.median(heights), 1) if heights else 0
                     sentences.append(

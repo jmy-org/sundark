@@ -14,7 +14,9 @@ Cases are taken from real papers in the evaluation corpus and from reported bugs
 """
 
 import unittest
+from unittest.mock import patch
 
+import pymupdf
 from spacy import util as spacy_util
 
 from app import pdf_utils as pu
@@ -640,6 +642,175 @@ class SpacedEllipsisTests(unittest.TestCase):
             self._merged(t, ["4 2.2"]),
             ["2.1 Setup . . . . . . .", "4 2.2 Results . . . . . . 5"],
         )
+
+
+def item_starts(*lines: str, numbered=()) -> list[str]:
+    """The markers `_item_starts` finds in a paragraph of `lines`, given the page's
+    line-opening (kind, number) readings `numbered`."""
+    words, ls = [], []
+    for text in lines:
+        ls.append({"widx": [], "text": text})
+        for t in text.split():
+            ls[-1]["widx"].append(len(words))
+            words.append({"t": t})
+    return [words[g]["t"] for g in pu._item_starts(ls, words, set(numbered))]
+
+
+class LineItemTests(unittest.TestCase):
+    """A list item or an algorithm step that opens a line starts a sentence, given evidence
+    that a list is laid out there: a colon before it, or the next or previous number."""
+
+    def test_a_colon_or_a_neighbouring_number_is_evidence(self):
+        self.assertEqual(
+            item_starts("We take two steps:", "1. Train the model"), ["1."]
+        )
+        steps = {("colon", 1), ("colon", 2)}
+        self.assertEqual(
+            item_starts("1: repeat", "2: sample a batch", numbered=steps), ["1:", "2:"]
+        )
+
+    def test_a_marker_alone_is_prose(self):
+        # a sentence-final number wrapped onto a new line
+        self.assertEqual(item_starts("The batch size was", "8. The model is small"), [])
+        # a panel reference: letters are no evidence of a list
+        self.assertEqual(item_starts("as shown in panel", "(b) and the curve"), [])
+        # the end of a parenthesis the line before opened
+        near = {("paren", 2), ("paren", 4)}
+        self.assertEqual(
+            item_starts("as small (ideally", "3) as possible", numbered=near), []
+        )
+        # an equation or table reference, though the numbers around it open lines
+        near = {("paren", 1), ("paren", 3)}
+        self.assertEqual(
+            item_starts("follows from Eq.", "(2) and holds", numbered=near), []
+        )
+
+    def test_a_broken_word_or_an_equation_the_text_goes_on_from_is_no_item(self):
+        self.assertEqual(
+            item_starts(
+                "compare it with the top-", "5. We then train", numbered={("dot", 4)}
+            ),
+            [],
+        )
+        self.assertEqual(
+            item_starts(
+                "Substituting into", "(3) and (4) gives it", numbered={("paren", 2)}
+            ),
+            [],
+        )
+
+    def test_a_number_that_does_not_count_up_refers_back(self):
+        # a list counts up: "2." after item 3 is the step it sends the reader back to
+        self.assertEqual(
+            item_starts(
+                "1. Sample a batch from the data",
+                "2. Take a gradient step on it",
+                "3. If the loss is high, go to step",
+                "2. Otherwise stop the training",
+                numbered={("dot", 1), ("dot", 2), ("dot", 3)},
+            ),
+            ["1.", "2.", "3."],
+        )
+
+    def test_an_equation_number_alone_on_its_line_is_not_an_item(self):
+        self.assertIsNone(pu._line_item({"widx": [0]}, [{"t": "(5)"}]))
+        self.assertEqual(
+            pu._line_item({"widx": [0, 1]}, [{"t": "(5)"}, {"t": "We"}]), ("paren", 5)
+        )
+
+
+# Only when the model is already installed: loading it here must not trigger a download.
+@unittest.skipUnless(
+    spacy_util.is_package("en_core_web_sm"), "spaCy model not installed"
+)
+class LineItemSplitTests(unittest.TestCase):
+    def test_an_item_offset_always_starts_a_sentence(self):
+        t = "We take two steps: 1. Train the model on the data 2. Test it on new data"
+        hard = frozenset(t.index(m) for m in ("1. Train", "2. Test"))
+        self.assertEqual(
+            [st for *_, st in pu._split_sentences(t, hard)],
+            [
+                "We take two steps:",
+                "1. Train the model on the data",
+                "2. Test it on new data",
+            ],
+        )
+
+    def test_a_footnote_mark_before_an_item_ends_the_item_before(self):
+        t = "The data is public. § 2. Test it on new data"
+        hard = frozenset([t.index("2. Test")])
+        self.assertEqual(
+            [st for *_, st in pu._split_sentences(t, hard)],
+            ["The data is public. §", "2. Test it on new data"],
+        )
+
+    def test_a_step_number_apart_from_its_step_is_not_a_sentence(self):
+        doc = pymupdf.open()
+        doc.new_page(width=595, height=842)
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((50, 100), "3: take a gradient step", fontsize=10)
+        p.insert_text((50, 160), "4:", fontsize=10)
+        p.insert_text((50, 220), "5: until converged", fontsize=10)
+        data = doc.tobytes()
+        doc.close()
+        with patch.object(pu.layout_model, "detect_page", return_value=[]):
+            texts = [s["text"] for s in pu._page_layout(data, 1)["sentences"]]
+        self.assertEqual(texts, ["3: take a gradient step", "5: until converged"])
+
+    def test_list_items_and_algorithm_steps_on_a_page(self):
+        doc = pymupdf.open()
+        doc.new_page(width=595, height=842)
+        p = doc.new_page(width=595, height=842)
+        lines = [
+            (50, 100, "We study the model in the following two settings:"),
+            (60, 114, "1. Training on the full dataset with all of its"),
+            (72, 126, "labels available to the learner"),
+            (60, 140, "2. Training on half of the data"),
+            (50, 240, "Algorithm 1 Training"),
+            (50, 254, "1: repeat"),
+            (50, 266, "2: sample a batch from the data"),
+            (50, 278, "3: take a gradient step"),
+            (50, 290, "4: until converged"),
+            (50, 400, "The model was trained with a batch size of"),
+            (50, 412, "8. The results are listed in the table below."),
+        ]
+        for x, y, text in lines:
+            p.insert_text((x, y), text, fontsize=10)
+        data = doc.tobytes()
+        doc.close()
+        with patch.object(pu.layout_model, "detect_page", return_value=[]):
+            texts = [s["text"] for s in pu._page_layout(data, 1)["sentences"]]
+        self.assertEqual(
+            texts,
+            [
+                "We study the model in the following two settings:",
+                "1. Training on the full dataset with all of its labels available to the "
+                "learner",
+                "2. Training on half of the data",
+                "Algorithm 1 Training",
+                "1: repeat",  # a short step is kept
+                "2: sample a batch from the data",
+                "3: take a gradient step",
+                "4: until converged",
+                "The model was trained with a batch size of 8.",  # a wrapped number
+                "The results are listed in the table below.",
+            ],
+        )
+
+    def test_the_short_pieces_of_a_list_or_an_algorithm_are_kept(self):
+        # read whole, each was one sentence long enough to keep; cut at its items and steps,
+        # a lead-in and a one-word step are pieces of a list, no figure labels
+        for lines in (["We consider:", "1. Speed", "2. Memory"],):
+            doc = pymupdf.open()
+            doc.new_page(width=595, height=842)
+            p = doc.new_page(width=595, height=842)
+            for k, text in enumerate(lines):
+                p.insert_text((50, 100 + 12 * k), text, fontsize=10)
+            data = doc.tobytes()
+            doc.close()
+            with patch.object(pu.layout_model, "detect_page", return_value=[]):
+                texts = [s["text"] for s in pu._page_layout(data, 1)["sentences"]]
+            self.assertEqual(texts, lines)
 
 
 # Only when the model is already installed: loading it here must not trigger a download.

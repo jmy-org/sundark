@@ -268,13 +268,34 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   period, so it needs its own rule (`_continues_ellipsis`): the text goes on when the next
   fragment opens with punctuation, a closing bracket or quote, or an operator, and starts
   anew after a page number (a table of contents' dot leader) or a capitalized word. Over 36
-  papers this rejoined 89 cuts in 12 of them. Enumeration runs ("a) ... b) ... c)", "(1) ..., (2) ...") are split into
-  items by `_split_on_markers`; "Eqn.(1)" references and two-part subfigure phrases
-  ("show (a) X and (b) Y") are left whole. Short prose that `_keep_sentence` would drop
-  as a label (a lead-in before a display equation, "Then we have") is kept by
-  paragraph context. These rules were measured on 25 papers with no word lost or
-  duplicated. A sentence segmenter swap (Stanza, SaT) was measured and rejected: none
-  reliably splits comma-joined lists, and both are much slower (Stanza ran 8x slower
+  papers this rejoined 89 cuts in 12 of them. Enumeration runs ("a) ... b) ... c)", "(1)
+  ..., (2) ...") are split into items by `_split_on_markers`; "Eqn.(1)" references and
+  two-part subfigure phrases ("show (a) X and (b) Y") are left whole. A list item or an
+  algorithm step that opens a line starts a sentence (`_item_starts`): "1.", "(1)", "a)", a
+  bullet, or a line number "12:", when the line before ends with a colon or, for a number,
+  another line of the page opens with the next or previous number of the same kind. Without
+  that a lead-in absorbed the first item ("... as follows: 1. ..."), and steps with no
+  period of their own ran together ("1: repeat 2: sample ..."). A letter is no evidence
+  ("(b)" also opens a line as a panel reference), and neither is a marker after
+  "Eq."/"Table"/"Figure" or after a word broken at the line's end ("top-" + "5."), a "3)"
+  that closes an open parenthesis, an equation number the text goes on from ("(3) and (4)
+  gives"), or a marker alone on its line ("(5)" is as often an equation number), except a
+  line number, which PDFs set apart from its step. Such items are kept however short ("5:
+  end for"), but not a bare marker, and so are the short pieces they cut a paragraph into (a
+  lead-in "We consider:", a step "repeat"): read whole, the paragraph was one sentence long
+  enough to keep, and cut, `_keep_sentence` dropped its lead-in as a label ("We consider:" +
+  "1. Speed" + "2. Memory"). Over 89 papers this split 175 list items and 133 steps (8
+  papers' algorithms) with no word lost, shared or stitched differently, and over 22 papers
+  kept out of the tuning 21 items and 26 steps, all of them right. The neighbouring number
+  may sit anywhere on the page: asking for it in the same paragraph, or in the same column,
+  lost right splits (an algorithm's comment line starts a paragraph of its own) and fixed
+  none, so a wrapped "3." on a page with a list of "2." and "4." would still split. A list
+  counts up, though: a number no higher than an item before it in its paragraph is no item
+  ("3. If not converged, go to step" + "2. Otherwise ..." refers back). Short prose that
+  `_keep_sentence` would drop as a label (a lead-in before a display equation, "Then we
+  have") is kept by paragraph context. These rules were measured on 25 papers with no word
+  lost or duplicated. A sentence segmenter swap (Stanza, SaT) was measured and rejected:
+  none reliably splits comma-joined lists, and both are much slower (Stanza ran 8x slower
   than spaCy on real per-paragraph calls).
 - **Word boxes come from the glyphs.** `_words_with_style()` builds each word's box from its
   own glyphs (`rawdict`). Do not go back to splitting a span by character count: a justified
