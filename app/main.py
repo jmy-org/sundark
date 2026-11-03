@@ -386,8 +386,9 @@ _layout_lock = asyncio.Lock()
 # short fragment. v12: page 0 drops a footnote with an e-mail address, the authors' contact
 # block. v13: a line under both a furniture box and a body box goes by the more confident
 # box. v14: a spaced ellipsis ("x 1 , . . . , x n") no longer ends a sentence. v15: a table of
-# contents is dropped, and so is a page-0 footnote whose mark an author carries; a list item or
-# an algorithm step that opens a line starts a sentence, with or without a line number.)
+# contents is dropped, and so are a page-0 footnote whose mark an author carries and a footnote
+# that is only a link; a list item or an algorithm step that opens a line starts a sentence,
+# with or without a line number.)
 _LAYOUT_VERSION = 15
 
 

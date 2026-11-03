@@ -1192,6 +1192,28 @@ _ABSTRACT_RE = re.compile(r"(?:Abstract|ABSTRACT)(?:[.:—–-].*)?")
 # An e-mail domain ("x@mit.edu", "{a, b} @mit.edu"); not "mAP@0.5" or "Recall@1".
 _EMAIL = re.compile(r"@ ?[A-Za-z][\w-]*(?:\.[A-Za-z][\w-]*)+")
 
+# A link: a URL with its scheme or "www.", a host with a path ("hf.co/x", "github.com/x"), or a
+# bare host on a common domain ("example.org"). A scheme cut off by a space ("https: //...")
+# leaves "https:" behind, which counts as part of the link.
+_URL = re.compile(
+    r"(?:https?://|www\.)\S+|\bhttps?:|\b[\w-]+(?:\.[\w-]+)*\.[A-Za-z][\w-]*/\S*"
+    r"|\b[\w-]+(?:\.[\w-]+)*\.(?:com|org|net|io|ai|edu|gov|fr|de|cn|uk|co)\b"
+)
+
+
+def _link_only(text: str) -> bool:
+    """A footnote sentence that is only a link, perhaps with its number and a short label
+    ("1 Code: https://...", "3 Code release: https://...", "5. hf.co/..."): with the links
+    out, two words or fewer are left. Its translation would be the same link; one with prose
+    ("1 The code is available at https://...") is translated."""
+    if not _URL.search(text):
+        return False
+    rest = _URL.sub(" ", text)
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]{3}", rest):
+        return False  # Chinese or Japanese prose has no spaces to count words by
+    return len([w for w in rest.split() if re.search(r"[^\W\d_]{2}", w)]) <= 2
+
+
 # Footnote mark symbols. Numbers are left out: an affiliation number on an author ("Ann Lee¹")
 # and the first footnote of the text ("... GPUs.¹" + "¹Code is at ...") share "1".
 _MARKS = "*∗⋆†‡§¶‖#"
@@ -2545,6 +2567,16 @@ def _page_layout(
                     items = _item_starts(plines, words, numbered)
                     pseudo = _pseudo_starts(plines, words)
                     starts = items + pseudo
+                    if para.get("aside"):
+                        # a footnote paragraph may hold several footnotes: each mark starts
+                        # one, so a number no longer ends the footnote before it ("... all
+                        # tasks 3" + "After each batch ...")
+                        starts += [
+                            ln["widx"][0]
+                            for ln in plines[1:]
+                            if _marked_note(words[ln["widx"][0]]["t"])
+                            or _numbered_note([raw[g] for g in ln["widx"]])
+                        ]
                     hard = frozenset(at[g] for g in starts if g in at)
                     # an algorithm step's own row is one step: the segmenter cut inside it
                     # ("Require: f(θ):" + "Stochastic objective ...", "9: //" + "For
@@ -2591,11 +2623,18 @@ def _page_layout(
                 marks = _script_roles(para["widx"], words, raw, line_of, body)
             for s, e, st, idxs in split:
                 # headings/labels are always kept (shown as titles), and so are list items
-                # and algorithm steps ("5: end for"); body uses the filter
-                if idxs and (
-                    para["heading"]
-                    or (_lstrip_at(text, s) in hard and len(idxs) > 1)
-                    or _keep_sentence(st, len(idxs), context)
+                # and algorithm steps ("5: end for"); body uses the filter. A footnote that
+                # is only a link has nothing to translate.
+                if (
+                    idxs
+                    and not (
+                        para.get("aside") and not para.get("caption") and _link_only(st)
+                    )
+                    and (
+                        para["heading"]
+                        or (_lstrip_at(text, s) in hard and len(idxs) > 1)
+                        or _keep_sentence(st, len(idxs), context)
+                    )
                 ):
                     heights = [words[g]["y1"] - words[g]["y0"] for g in idxs]
                     size = round(statistics.median(heights), 1) if heights else 0

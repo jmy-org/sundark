@@ -326,6 +326,72 @@ class FurnitureTests(unittest.TestCase):
         self.assertEqual(sentences[0]["text"], "3 Preliminaries")
         self.assertTrue(sentences[0]["heading"])
 
+    def test_a_footnote_that_is_only_a_link_is_not_translated(self):
+        # its translation would be the same link; a footnote with prose, and a link in the
+        # text, are still read
+        lines = [(50, 90, "The model is released, see https://example.com/model.", 10)]
+        lines += [(50, 104, f"Left {TEXT}.", 10)]
+        lines += [(50, 760, "1 Code: https://example.com/code", 8)]
+        lines += [(50, 800, "2 The data is available at https://example.com/data.", 8)]
+        foot = {"role": "furniture", "x0": 45, "y0": 750, "x1": 400, "y1": 805}
+        texts = [s["text"] for s in self._layout(lines, [foot])]
+        self.assertNotIn("1 Code: https://example.com/code", texts)
+        self.assertIn("2 The data is available at https://example.com/data.", texts)
+        self.assertIn("The model is released, see https://example.com/model.", texts)
+        for text in (
+            "1 Project page: https://example.com/x",
+            "5. hf.co/x",
+            "6. example.org",
+        ):
+            self.assertTrue(pdf_utils._link_only(text), text)
+        for text in ("1 Code is at https://example.com/x", "Accuracy 0.5/1.0 here"):
+            self.assertFalse(pdf_utils._link_only(text), text)
+
+    def test_each_footnote_mark_starts_a_sentence(self):
+        # a footnote paragraph can hold several footnotes: the next one's number used to end
+        # the one before it ("... version one 3" + "After each ..."); a section sign before a
+        # number is a reference, no mark
+        doc = pymupdf.open()
+        doc.new_page(width=595, height=842)
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((50, 90), f"Left {TEXT}.", fontsize=10)
+        font = pymupdf.Font("helv")
+        tw = pymupdf.TextWriter(p.rect)
+        tw.append(
+            (50, 740),
+            "2 Seven benchmark tasks, all of version one",
+            font=font,
+            fontsize=8,
+        )
+        tw.append((50, 750), "3", font=font, fontsize=5)
+        tw.append(
+            (53, 750),
+            "After each batch, the step size is adjusted.",
+            font=font,
+            fontsize=8,
+        )
+        tw.append(
+            (50, 760),
+            "4 For other choices, see the discussion in",
+            font=font,
+            fontsize=8,
+        )
+        tw.append((50, 770), "§4.2 and the appendix.", font=font, fontsize=8)
+        tw.write_text(p)
+        data = doc.tobytes()
+        doc.close()
+        foot = [{"role": "furniture", "x0": 45, "y0": 730, "x1": 400, "y1": 775}]
+        with patch.object(pdf_utils.layout_model, "detect_page", return_value=foot):
+            texts = [s["text"] for s in pdf_utils._page_layout(data, 1)["sentences"]]
+        self.assertEqual(
+            texts[1:],
+            [
+                "2 Seven benchmark tasks, all of version one",
+                "3 After each batch, the step size is adjusted.",
+                "4 For other choices, see the discussion in §4.2 and the appendix.",
+            ],
+        )
+
     def test_page_numbers_and_a_sideways_stamp_in_furniture_go(self):
         lines = [(50, 300, TEXT, 10), (290, 820 - 40, "12", 10)]
         boxes = [

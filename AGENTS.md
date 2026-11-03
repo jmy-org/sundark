@@ -399,6 +399,19 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   whatever it says (funding, "A preliminary version appeared in ..."), as the contact block
   does; the Acknowledgements section is translated. A venue notice, or a note with no mark,
   is still translated. Over 89 papers this dropped author notes in 13 and nothing else.
+- **Footnotes are read one by one; a link alone is not translated.** A footnote paragraph
+  may hold several footnotes, and the next one's number used to end the one before it ("...
+  all tasks 3" | "After each batch ..."): each line that opens with a mark symbol or with a
+  number or a letter set smaller than the rest of its line starts a sentence (a word at the
+  line's size is none, a larger symbol beside it or not). A sign before a number ("§4.2") or
+  of the text ("#tokens", "‖x‖") is no mark. A footnote sentence that is only a link
+  (`_link_only`: two words or fewer once the links are out, "1 Code: https://...", "5.
+  hf.co/...") is not translated, since its translation would be the same link; one with
+  prose ("1 The code is available at https://...") is, and so is Chinese or Japanese prose,
+  which has no spaces to count words by. Over 89 papers that dropped 433 words on 105 pages,
+  all links, labels and footnote numbers. Footnotes as a whole stay: they are 1% of the
+  words, most of them say something (a definition, a caveat), and the model's furniture
+  boxes they come from also hold text that is no footnote (a dialogue example in mid-page).
 - **A table of contents is not translated.** `_toc_lines()` finds it on each page by its
   entries: a row that ends in a page number after a dot leader or a wide gap, or a number on
   a line of its own beside a title (the nearest line to its left; a row of numbers, such as
