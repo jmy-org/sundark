@@ -134,8 +134,10 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   `AIError` if the model drifts (an out-of-order index, or too many/too few lines — a merged or
   renumbered line would otherwise shift every later segment), and the server numbers results by
   arrival (`{"i": len(collected)}`). A drifted stream therefore errors instead of being shown or
-  cached. A failed batch falls back to the source text for its range so it cannot stall the
-  frontier. Every AI call is bounded by a per-backend semaphore in `app/ai.py`
+  cached. A list item's or an algorithm step's own marker ("3:", "2.", "(a)") is put back when
+  the model drops it as if it were the prompt's numbering (`ai._keep_marker`). A failed
+  batch falls back to the source text for its range so it cannot stall the frontier.
+  Every AI call is bounded by a per-backend semaphore in `app/ai.py`
   sized by the same concurrency setting, which also covers summary/anatomy. A rate limit
   (`RateLimitError`, HTTP 429, or a stream line with `rate_limited`) stops the remaining
   batches and leaves source text; the user lowers concurrency in Settings if it repeats. The server stays generic (it

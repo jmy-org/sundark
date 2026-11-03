@@ -86,6 +86,31 @@ class AiTests(unittest.IsolatedAsyncioTestCase):
         out = [x async for x in ai.translate_stream(["a", "b", "c"], "Korean")]
         self.assertEqual(out, ["가", "나", "다"])
 
+    async def test_a_step_keeps_its_own_marker(self):
+        # the prompt numbers each segment, and the model dropped a step's own "1:" as if it
+        # were that numbering; a marker the translation has of its own is left alone
+        fake = FakeBackend(
+            text='["x를 입력이라 하자", "(가) 첫째"]',
+            deltas=["1\tx를 입력이라 하자\n2\t반복한다\n3\t(가) 첫째\n"],
+        )
+        self.use(fake)
+        segs = ["1: Let x be the input", "repeat", "(a) the first"]
+        out = [x async for x in ai.translate_stream(segs, "Korean")]
+        self.assertEqual(out, ["1: x를 입력이라 하자", "반복한다", "(가) 첫째"])
+        out = await ai.translate_segments([segs[0], segs[2]], "Korean")
+        self.assertEqual(out, ["1: x를 입력이라 하자", "(가) 첫째"])
+
+    def test_a_marker_the_translation_kept_is_not_doubled(self):
+        for src, tr in [
+            ("a) the first", "a) 첫째"),
+            ("a) the first", "가) 첫째"),
+            ("ii) the second", "ii) 둘째"),
+            ("(a) the first", "a) 첫째"),
+            ("3. Train it", "3. 학습한다"),
+        ]:
+            self.assertEqual(ai._keep_marker(src, tr), tr, src)
+        self.assertEqual(ai._keep_marker("● an item", "항목"), "● 항목")
+
     async def test_review_undoes_doubled_latex_escapes(self):
         # the model escaped every backslash twice inside the JSON string, a line break too
         body = r"관측 \\(O_t\\)" + "\n\n" + r"$$A = \\alpha\\left(x\\right) \\\\ y$$"
