@@ -394,24 +394,38 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   cut into sentences: a wrapped title came out as two headings, and the splitter cut
   "A.1. Pre-training" after "A.1." (58 such headings over 31 papers). A section and its
   first subsection right below it have a box each, so they stay apart.
-- **Page 0 drops its front matter, above the Abstract heading.** The heading is a word
-  that opens its line and reads "Abstract"/"ABSTRACT", alone or followed by punctuation
-  ("Abstract—We ...", `_ABSTRACT_RE`); "abstracting" in 2411.14499's introduction (which
-  has no Abstract heading) cut away its abstract and introduction. Without the heading
-  the cut is 22% down the page. A figure caption above the Abstract (SAM's teaser) is kept.
-  Its footnote with an e-mail address (`_EMAIL`) goes too: that is the authors' contact
-  block (affiliations, "Correspondence to: ..."), the same front matter set at the foot of
-  the page. Over 32 papers all 10 such footnotes were one; content footnotes carry no
-  address. So does a footnote whose mark an author carries ("Ann Lee∗" + "∗Equal
-  contribution", "Bo Li†" + "†Work done at ..."): an author note, from its mark to the next
-  footnote (a mark or a small number) in its PDF block, taken out after the e-mail rule has
-  judged the whole block. Only mark symbols count (`_MARKS`, "∗" and "*" as one): an
-  affiliation number ("Lee¹") and the text's first footnote ("¹Code is at ...") share "1",
-  and counting numbers took three content footnotes with them. A mark in a caption kept
-  above the Abstract is no author's. A note a mark ties to an author or the title goes
-  whatever it says (funding, "A preliminary version appeared in ..."), as the contact block
-  does; the Acknowledgements section is translated. A venue notice, or a note with no mark,
-  is still translated. Over 89 papers this dropped author notes in 13 and nothing else.
+- **Page 0 drops its front matter, above the Abstract heading.** The heading is a word that
+  opens its line and reads "Abstract"/"ABSTRACT", alone or followed by punctuation
+  ("Abstract—We ...", `_ABSTRACT_RE`), or the pieces small or spaced capitals come in ("A
+  BSTRACT", "A B S T R A C T"); "abstracting" in a paper's introduction (which has no
+  Abstract heading) cut away its abstract and introduction. Without the heading the front
+  matter ends where running text starts (`_front_cut`): the first of two lines close
+  together that hold six words or more, most of them lowercase (`_prose`: a title, names and
+  affiliations are mostly capitalized, an abstract is not), with the lines of its PDF block
+  right above it in its size (a first line "The Simple Modular Framework for Safe Robot
+  ..."). Lines are read as the page shows them (`_text_rows`): an old PDF gives every word,
+  or a word's pieces, a line of its own, with boxes of no height. A page with no running
+  text is a cover (title, authors, a teaser figure, the abstract on the next page), and all
+  of it but its captions goes. A paper may start on page 1 (`_first_page`): when page 0 has
+  no Abstract heading and page 1 has one, alone on its line or run in after punctuation (not
+  "Abstract syntax trees are ...", nor a contents entry "Abstract . . . 1"), page 0 is a
+  cover, a publisher's notice or a summary page, and the rules below for page 0's front
+  matter and footnotes apply to page 1 too. The fixed cut 22% down the page this replaced
+  kept the end of a long author list and cut off an abstract set higher. A figure caption
+  above the Abstract (a teaser figure) is kept. Its footnote with an e-mail address
+  (`_EMAIL`) goes too: that is the authors' contact block (affiliations, "Correspondence to:
+  ..."), the same front matter set at the foot of the page. Over 32 papers all 10 such
+  footnotes were one; content footnotes carry no address. So does a footnote whose mark an
+  author carries ("Ann Lee∗" + "∗Equal contribution", "Bo Li†" + "†Work done at ..."): an
+  author note, from its mark to the next footnote (a mark or a small number) in its PDF
+  block, taken out after the e-mail rule has judged the whole block. Only mark symbols count
+  (`_MARKS`, "∗" and "*" as one): an affiliation number ("Lee¹") and the text's first
+  footnote ("¹Code is at ...") share "1", and counting numbers took three content footnotes
+  with them. A mark in a caption kept above the Abstract is no author's. A note a mark ties
+  to an author or the title goes whatever it says (funding, "A preliminary version appeared
+  in ..."), as the contact block does; the Acknowledgements section is translated. A venue
+  notice, or a note with no mark, is still translated. Over 89 papers this dropped author
+  notes in 13 and nothing else.
 - **Footnotes are read one by one; a link alone is not translated.** A footnote paragraph
   may hold several footnotes, and the next one's number used to end the one before it ("...
   all tasks 3" | "After each batch ..."): each line that opens with a mark symbol or with a

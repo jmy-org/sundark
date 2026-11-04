@@ -114,23 +114,141 @@ class AppendixCoverTests(unittest.TestCase):
         )
         doc.close()
 
+    def test_a_covers_figure_labels_are_no_front_matter(self):
+        # a cover with no Abstract: its teaser figure's label names the method, and so does
+        # a later section heading, which stays
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((150, 80), "Toy Models are Policies", fontsize=14)
+        p.insert_text((150, 110), "Ann Lee  Bo Li", fontsize=10)
+        p.insert_text((250, 400), "ToyPolicy", fontsize=6)
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((50, 80), "Abstract", fontsize=12)
+        p.insert_text((50, 100), TEXT, fontsize=10)
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((50, 100), "3 ToyPolicy", fontsize=12)
+        p.insert_text((50, 120), TEXT, fontsize=10)
+        data = doc.tobytes()
+        doc.close()
+        sentences = _layout(data, 2, {2: [title(88, 104)]})
+        self.assertEqual(_headings(sentences), ["3 ToyPolicy"])
+
+
+def _words(*lines, size: float = 10.0) -> list[dict]:
+    """Words for `_front_cut`: (y, text) lines of a page, each in a PDF block of its own unless
+    given as (y, text, block); words 6pt apart from x=50."""
+    out = []
+    for n, (y, text, *block) in enumerate(lines):
+        for i, t in enumerate(text.split()):
+            out.append(
+                {
+                    "t": t,
+                    "x0": 50 + 40 * i,
+                    "x1": 84 + 40 * i,
+                    "y0": y,
+                    "y1": y + 10,
+                    "line": (block[0] if block else n, n),
+                    "size": size,
+                }
+            )
+    return out
+
+
+ABSTRACT = (
+    "we study how a model learns from data and show that it works well",
+    "on every task we try and that it needs much less data than before",
+)
+
 
 class FirstPageTests(unittest.TestCase):
     def test_the_abstract_heading_is_a_word_that_opens_its_line(self):
-        def words(*lines):
-            return [
-                {"t": t, "y0": y, "line": (n, 0)}
-                for n, (y, text) in enumerate(lines)
-                for t in text.split()
-            ]
-
-        # 2411.14499 has no Abstract heading; "abstracting" in its introduction is not one
-        prose = words((300, "early work focused on abstracting the world"))
-        self.assertEqual(pdf_utils._front_cut(prose, 800), 800 * 0.22)
+        # a paper with no Abstract heading: "abstracting" in its introduction is not one
+        prose = _words((300, "early work focused on abstracting the world"))
+        self.assertNotEqual(pdf_utils._front_cut(prose, 800), 300)
         self.assertEqual(
-            pdf_utils._front_cut(words((250, "Abstract—We study")), 800), 250
+            pdf_utils._front_cut(_words((250, "Abstract—We study")), 800), 250
         )
-        self.assertEqual(pdf_utils._front_cut(words((250, "ABSTRACT")), 800), 250)
+        self.assertEqual(pdf_utils._front_cut(_words((250, "ABSTRACT")), 800), 250)
+        # small or spaced capitals come in pieces
+        self.assertEqual(pdf_utils._front_cut(_words((250, "A BSTRACT")), 800), 250)
+        self.assertEqual(
+            pdf_utils._front_cut(_words((250, "A B S T R A C T")), 800), 250
+        )
+        self.assertNotEqual(
+            pdf_utils._front_cut(_words((250, "A Better Model")), 800), 250
+        )
+
+    def test_without_a_heading_the_front_matter_ends_where_running_text_starts(self):
+        # a long author list runs below the 22% that used to be the cut
+        page = _words(
+            (60, "Toy Models are Policies"),
+            (120, "Ann Lee  Bo Li  Cy Park  Di Wu  Ed Kim"),
+            (180, "Fay Ng  Gus Ho  Hal Ito  Ivy Ma  Jo Yu"),
+            (200, "Example Lab, Example City, Country"),
+            (230, ABSTRACT[0]),
+            (244, ABSTRACT[1]),
+        )
+        self.assertEqual(pdf_utils._front_cut(page, 800), 230)
+        # one line of running text is not enough (a short note under the authors)
+        self.assertEqual(
+            pdf_utils._front_cut(page[: -len(ABSTRACT[1].split())], 800), 800
+        )
+
+    def test_a_capitalized_first_line_goes_with_its_paragraph(self):
+        page = _words(
+            (120, "Ann Lee  Bo Li", 0),
+            (
+                216,
+                "The Simple Modular Framework for Safe Robot Operations",
+                1,
+            ),
+            (230, ABSTRACT[0], 1),
+            (244, ABSTRACT[1], 1),
+        )
+        self.assertEqual(pdf_utils._front_cut(page, 800), 216)
+
+    def test_a_page_without_running_text_is_a_cover(self):
+        # title, authors and a teaser figure; the abstract is on the next page
+        page = _words((60, "Toy Models are Policies"), (120, "Ann Lee  Bo Li"))
+        self.assertEqual(pdf_utils._front_cut(page, 800), 800)
+
+    def test_text_rows_join_pieces_of_a_line_but_not_two_columns(self):
+        # an old PDF gives every word a line of its own; two columns stay apart
+        pieces = [
+            {"t": t, "x0": x, "x1": x + 30, "y0": 100, "y1": 110, "line": (0, i)}
+            for i, (t, x) in enumerate([("Dep", 50), ("artment", 82), ("of", 114)])
+        ]
+        right = {"t": "Results", "x0": 320, "x1": 360, "y0": 100, "y1": 110}
+        lines = {w["line"]: [w] for w in pieces} | {(1, 0): [right | {"line": (1, 0)}]}
+        rows = pdf_utils._text_rows(lines)
+        self.assertEqual(
+            [[w["t"] for w in r["words"]] for r in rows],
+            [["Dep", "artment", "of"], ["Results"]],
+        )
+
+    def test_a_cover_page_keeps_only_its_captions(self):
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((60, 80), "Toy Models are Policies", fontsize=16)
+        for i, y in enumerate((120, 135, 150, 165, 180, 195, 210, 225)):
+            p.insert_text((60, y), f"Ann Lee{i}  Bo Li{i}  Cy Park{i}", fontsize=9)
+        p.insert_text((60, 240), "Example Lab  † Project Leads", fontsize=9)
+        p.insert_text(
+            (60, 650), "Figure 1: Overview. We predict video and action.", fontsize=9
+        )
+        p.insert_text(
+            (60, 790), "© 2026 Example Corp. All rights reserved.", fontsize=8
+        )
+        data = doc.tobytes()
+        doc.close()
+        regions = [
+            {"role": "caption", "x0": 55, "y0": 640, "x1": 550, "y1": 655},
+            {"role": "furniture", "x0": 55, "y0": 780, "x1": 400, "y1": 795},
+        ]
+        text = " ".join(s["text"] for s in _layout(data, 0, {0: regions}))
+        self.assertIn("We predict video and action.", text)
+        for gone in ("Ann Lee", "Cy Park7", "Project Leads", "All rights reserved"):
+            self.assertNotIn(gone, text)
 
     def test_a_caption_above_the_abstract_is_kept(self):
         # SAM: a teaser figure and its caption sit above the Abstract
@@ -178,6 +296,44 @@ class FirstPageTests(unittest.TestCase):
             pdf_utils._EMAIL.findall("mAP@0.5 and Recall@1, {a, b} @mit.edu"),
             ["@mit.edu"],
         )
+
+    def _two_pages(self, first: str, second: list[tuple[float, str]]) -> bytes:
+        doc = pymupdf.open()
+        doc.new_page(width=595, height=842).insert_text((50, 60), first, fontsize=9)
+        p = doc.new_page(width=595, height=842)
+        for y, text in second:
+            p.insert_text((50, y), text, fontsize=10)
+        data = doc.tobytes()
+        doc.close()
+        return data
+
+    def test_a_paper_after_a_notice_page_starts_on_the_next_page(self):
+        # page 0 holds a publisher's notice; the title, authors and Abstract are on page 1
+        data = self._two_pages(
+            "This work has been submitted for possible publication.",
+            [
+                (80, "A Model for Learning from Data"),
+                (110, "Ann Lee, Bo Li, and Cy Park, Member, IEEE"),
+                (150, "Abstract. We study how a model learns from data."),
+                (170, TEXT),
+            ],
+        )
+        self.assertEqual(pdf_utils._first_page(data), 1)
+        text = " ".join(s["text"] for s in _layout(data, 1, {}))
+        self.assertIn(TEXT, text)
+        self.assertNotIn("Ann Lee", text)
+        # a sentence that opens with the word is no Abstract heading
+        data = self._two_pages(
+            "This work has been submitted for possible publication.",
+            [(80, "Abstract syntax trees are what the parser builds from code.")],
+        )
+        self.assertEqual(pdf_utils._first_page(data), 0)
+        # nor is a contents entry
+        data = self._two_pages(
+            "Final Project Report",
+            [(80, "Abstract . . . . . . . . 1"), (95, "1 Introduction . . . . . . 2")],
+        )
+        self.assertEqual(pdf_utils._first_page(data), 0)
 
     def _notes_page(self, notes: str, below: str = "") -> str:
         """Page 0's text with an author line marked "*" and "†", and `notes` (one PDF block,

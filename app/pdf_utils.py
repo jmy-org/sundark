@@ -1250,15 +1250,145 @@ def _marked_note(t: str) -> bool:
     )
 
 
+def _prose(ts: list[str]) -> bool:
+    """A line of running text: six words or more, most of them lowercase. A title, a list of
+    names or an affiliation is mostly capitalized ("Ann Lee, Bo Li", "School of Informatics,
+    University of Edinburgh"); an abstract is not."""
+    alpha = [t for t in ts if t[:1].isalpha()]
+    return len(alpha) >= 6 and sum(t[0].islower() for t in alpha) >= 0.6 * len(alpha)
+
+
 def _front_cut(words: list[dict], height: float) -> float:
     """Where page 0's front matter (title, authors, affiliations) ends: the top of the Abstract
-    heading (the first word of its line), else 22% down the page. `words` carry t, y0, line."""
-    prev = None
+    heading (the first word of its line; "A BSTRACT" and "A B S T R A C T" in small or spaced
+    capitals too), else the top of the first two lines of running text (`_prose`), else the
+    page's foot: the abstract is on a later page. Lines are read as the page shows them
+    (`_text_rows`): an old PDF may give every word a line of its own. A paragraph's first line
+    may be mostly capitalized ("The Simple Modular Framework for Safe Robot ..."), so the
+    lines of its PDF block right above it in its size go with it. `words` carry t, x0, y0, x1,
+    y1, line (block, line), `size` when known, and `skip` for a word of a title or a caption,
+    which is no running text."""
+    lines: dict[tuple, list[dict]] = {}
     for w in words:
-        if w["line"] != prev and _ABSTRACT_RE.fullmatch(w["t"]):
-            return w["y0"]
-        prev = w["line"]
-    return height * 0.22
+        lines.setdefault(w["line"], []).append(w)
+    top = _abstract_top(lines)
+    if top is not None:
+        return top
+    rows = _text_rows(lines)
+    prose = [
+        r
+        for r in rows
+        if not any(w.get("skip") for w in r["words"])
+        and _prose([w["t"] for w in r["words"]])
+    ]
+    for r, n in zip(prose, prose[1:]):
+        y0, h = r["y0"], r["h"]
+        if n["y0"] - y0 < 3 * h + 2:
+            for a in sorted(rows, key=lambda a: -a["y1"]):
+                if a["y1"] > y0 + 1 or not a["blocks"] & r["blocks"]:
+                    continue
+                if y0 - a["y1"] > h or abs(a["size"] - r["size"]) > 0.5:
+                    break
+                y0 = a["y0"]
+            return y0
+    return height
+
+
+def _abstract_top(lines: dict[tuple, list[dict]], strict: bool = False) -> float | None:
+    """The top of the first line (words with t, y0) that opens with the Abstract heading, in
+    pieces or not ("A BSTRACT"); `strict`, only a line that is the heading alone or runs on
+    after punctuation ("Abstract—We ..."), not one that opens a sentence ("Abstract syntax
+    trees are ...") or a contents entry ("Abstract . . . . 1")."""
+    for ws in lines.values():
+        text = " ".join(w["t"] for w in ws)
+        if strict and (re.search(r"\.\s?\.\s?\.", text) or text[-1:].isdigit()):
+            continue
+        s = ""
+        for i, w in enumerate(ws[:8]):
+            s += w["t"]
+            if _ABSTRACT_RE.fullmatch(s):
+                if not strict or i == len(ws) - 1 or not s.isalpha():
+                    return ws[0]["y0"]
+                break
+            if not "ABSTRACT".startswith(s.upper()):
+                break
+    return None
+
+
+@functools.lru_cache(maxsize=2)
+def _first_page(pdf_bytes: bytes) -> int:
+    """The page the paper starts on: page 1 when page 0 has no Abstract heading and page 1
+    has one (a cover, a publisher's notice or a summary page before it), else page 0. The
+    front matter rules of page 0 then apply to page 1 too."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        if doc.page_count < 2:
+            return 0
+        heads = []
+        for n in (0, 1):
+            lines: dict[tuple, list[dict]] = {}
+            for w in doc[n].get_text("words"):
+                lines.setdefault((w[5], w[6]), []).append({"t": w[4], "y0": w[1]})
+            heads.append(_abstract_top(lines, strict=n == 1) is not None)
+        return 1 if heads == [False, True] else 0
+    finally:
+        doc.close()
+
+
+def _text_rows(lines: dict[tuple, list[dict]]) -> list[dict]:
+    """The PDF lines (words with x0, y0, x1, y1, line, `size` when known) as the page shows
+    them, top to bottom: lines on one row that follow on without a column's gap are one
+    ({words, y0, y1, h, size, blocks}). An old PDF may give every word, or a word's pieces, a
+    line of its own ("Dep artment of Computer S ien e"), and its boxes no height; text in two
+    columns stays apart. `h` is a line's height, at least its size and 4pt."""
+
+    def height(ws):
+        h = max(w["y1"] for w in ws) - min(w["y0"] for w in ws)
+        return max(h, statistics.median(w.get("size", 0) for w in ws), 4.0)
+
+    units = sorted(
+        (
+            (
+                (min(w["y0"] for w in ws) + max(w["y1"] for w in ws)) / 2,
+                height(ws),
+                ws,
+            )
+            for ws in lines.values()
+        ),
+        key=lambda u: u[0],
+    )
+    grouped: list[list] = []
+    for u in units:
+        if grouped and abs(u[0] - grouped[-1][0][0]) <= 0.4 * min(
+            u[1], grouped[-1][0][1]
+        ):
+            grouped[-1].append(u)
+        else:
+            grouped.append([u])
+    rows = []
+    for g in grouped:
+        g.sort(key=lambda u: min(w["x0"] for w in u[2]))
+        segs = [[g[0]]]
+        for u in g[1:]:
+            right = max(w["x1"] for v in segs[-1] for w in v[2])
+            if min(w["x0"] for w in u[2]) - right > 2 * u[1]:
+                segs.append([u])
+            else:
+                segs[-1].append(u)
+        for seg in segs:
+            ws = [w for u in seg for w in u[2]]
+            rows.append(
+                {
+                    "words": ws,
+                    "y0": min(w["y0"] for w in ws),
+                    "y1": max(w["y1"] for w in ws),
+                    "h": height(ws),
+                    "size": statistics.median(w.get("size", 0) for w in ws),
+                    "blocks": {w["line"][0] for w in ws},
+                }
+            )
+    rows.sort(key=lambda r: r["y0"])
+    return rows
 
 
 # A row of a list of symbols opens with its symbol ("α  the learning rate . . . 12", "x  an
@@ -1490,15 +1620,27 @@ def _toc_lines(
 
 
 def _front_matter(page) -> set[str]:
-    """The letters (`_letters`) of each line of page 0 above the cut (`_front_cut`)."""
+    """The letters (`_letters`) of each line of page 0 above the cut (`_front_cut`), and with
+    no Abstract heading above 22% of the page at most: without the layout model's boxes the
+    text of a figure is read too, and a cover's figure labels ("ToyPolicy") would match a
+    later heading."""
     words = [
-        {"y0": w[1], "y1": w[3], "t": w[4], "line": (w[5], w[6])}
+        {
+            "x0": w[0],
+            "y0": w[1],
+            "x1": w[2],
+            "y1": w[3],
+            "t": w[4],
+            "line": (w[5], w[6]),
+        }
         for w in page.get_text("words")
     ]
     cut = _front_cut(words, page.rect.height)
     lines: dict[tuple, list[dict]] = {}
     for w in words:
         lines.setdefault(w["line"], []).append(w)
+    if _abstract_top(lines) is None:
+        cut = min(cut, page.rect.height * 0.22)
     out = set()
     for ws in lines.values():
         t = _letters(" ".join(w["t"] for w in ws))
@@ -2135,11 +2277,26 @@ def _page_layout(
         raw = [w for w in styled if not _drop(w)]
         # On page 1, drop everything above the Abstract (title, authors, affiliations), except a
         # figure caption: a teaser figure above the Abstract (SAM) has a caption to translate.
+        # A paper that starts on the next page (`_first_page`) has its front matter there.
+        first = page_index < 2 and page_index in (0, _first_page(pdf_bytes))
         front_marks: set[str] = set()
-        if page_index == 0:
+        if first:
             cut = _front_cut(
                 [
-                    {"t": w["t"], "y0": w["y0"], "line": (w["bno"], w["lno"])}
+                    {
+                        "t": w["t"],
+                        "x0": w["x0"],
+                        "y0": w["y0"],
+                        "x1": w["x1"],
+                        "y1": w["y1"],
+                        "line": (w["bno"], w["lno"]),
+                        "size": w["size"],
+                        "skip": _in_rects(
+                            (w["x0"] + w["x1"]) / 2,
+                            (w["y0"] + w["y1"]) / 2,
+                            title_rects + caption_rects,
+                        ),
+                    }
                     for w in raw
                 ],
                 ph,
@@ -2497,7 +2654,7 @@ def _page_layout(
         # foot of the page. Over 32 papers, all 10 such footnotes were one (one also held a
         # funding note, which goes with it); content footnotes (a definition, a URL) carry no
         # address.
-        if page_index == 0:
+        if first:
             paras = [
                 p
                 for p in paras

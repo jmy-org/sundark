@@ -388,8 +388,12 @@ _layout_lock = asyncio.Lock()
 # box. v14: a spaced ellipsis ("x 1 , . . . , x n") no longer ends a sentence. v15: a table of
 # contents is dropped, and so are a page-0 footnote whose mark an author carries and a footnote
 # that is only a link; a list item or an algorithm step that opens a line starts a sentence,
-# with or without a line number; a symbol after a range ("k = 1 . . . K") goes on.)
-_LAYOUT_VERSION = 15
+# with or without a line number; a symbol after a range ("k = 1 . . . K") goes on. v16: the
+# first page's front matter ends at an Abstract heading in spaced capitals too, else where
+# running text starts (a page without it is a cover), and a paper may start on page 1;
+# copyright notices, the paper's own citation, author notes and a report's list of authors
+# go.)
+_LAYOUT_VERSION = 16
 
 
 def _page_layout_cached(doc_id: str, page: int) -> dict:
