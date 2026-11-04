@@ -425,7 +425,43 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   to an author or the title goes whatever it says (funding, "A preliminary version appeared
   in ..."), as the contact block does; the Acknowledgements section is translated. A venue
   notice, or a note with no mark, is still translated. Over 89 papers this dropped author
-  notes in 13 and nothing else.
+  notes in 13 and nothing else. A footnote sentence on the authors with no mark or address
+  goes too (`_AUTHOR_NOTE`: "Ann Lee and Bo Li are with the Department of ...",
+  "(Corresponding author: Ann Lee.)", "... contributed equally", "Ann Lee is a PhD student
+  ...", "Authors' Contact Information: ..."; not a data statement, "available from the
+  corresponding author"), on page 0 or 1, by its sentence, as content footnotes and a
+  funding note may share its PDF block; a PDF block the model typed as text that holds an
+  address or such a note and is no running text goes whole, and so does a short one (25
+  words or fewer) with an address that asks to be contacted ("Corresponding authors can be
+  contacted at ...") ("E-mail: {a}@sjtu.edu.cn", "Authors' Contact Information: Ann Lee,
+  a@b.edu, ...", "Primary contact for the report: ..."), by blocks because a paragraph may
+  run from it into the next column's text.
+- **Publisher notices, the paper's own citation and a report's list of authors are not
+  translated.** On pages 0 and 1, a copyright or licence notice (`_NOTICE`: "© 2026 ...",
+  "Copyright held by the owner/author(s).", "All rights reserved.", "licensed under a
+  Creative Commons ...", "Copyright may be transferred without notice", "Permission to make
+  digital or hard copies ...", "Personal use of this material is permitted"; a word broken
+  at a line's end, "Copy-" + "right", read whole; not "the copyright of the data", nor
+  "(developed by the MathWorks ©)") goes: the footnote lines of its PDF block (the PDF may
+  put the other column's text in that block: an IEEE "©2019 IEEE" line took a column of text
+  with it), a PDF block of 40 words or fewer or set smaller than the page's text (a block
+  the model typed as a title too), a notice line set smaller than the rest of its block (a
+  footer the PDF put in a column's block), or a paragraph that opens with one. So does the
+  paper's own citation: a paragraph that holds the document's title (`_title_from_fonts`)
+  and a year and is no running text ("ACM Reference Format:" + "Ann Lee and Bo Li. 2025.
+  <title>. In Proceedings of ..."), with a heading right above it that ends in a colon; an
+  abstract may hold the title and a year too ("This technical report revisits <title> ...
+  (Lee et al., 2015)"), and taking it lost that abstract. On any page, a heading
+  "Authors"/"Contributors"/"Core Contributors" (`_AUTHORS_HEADING`) goes with the lists
+  below it that are no running text, up to the next heading or a paragraph of running text.
+  Over 998 arXiv papers (300 technical reports, the rest across fields and years since 2007,
+  scored against each paper's author list and abstract), these rules and the first-page cut
+  above took the papers with authors' names left on pages 0 and 1 from 122 to 3 and the
+  notices and contact lines from 270 to 13, read 47 abstracts more fully and lost none. Laid
+  out whole, 156 of them (3,236 pages) changed on no later page but one, a report's list of
+  authors. Known limits: a column of affiliations set beside the abstract keeps the lines
+  that lie beside it, and a list of contributors that runs on past its page is translated
+  there.
 - **Footnotes are read one by one; a link alone is not translated.** A footnote paragraph
   may hold several footnotes, and the next one's number used to end the one before it ("...
   all tasks 3" | "After each batch ..."): each line that opens with a mark symbol or with a

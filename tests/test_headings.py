@@ -250,6 +250,74 @@ class FirstPageTests(unittest.TestCase):
         for gone in ("Ann Lee", "Cy Park7", "Project Leads", "All rights reserved"):
             self.assertNotIn(gone, text)
 
+    def test_a_notice_and_the_papers_own_citation_are_front_matter(self):
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((150, 80), "A Model for Learning from Data", fontsize=14)
+        p.insert_text((50, 150), "Abstract", fontsize=12)
+        p.insert_text((50, 170), TEXT, fontsize=10)
+        p.insert_text(
+            (50, 190), "We call it A Model for Learning from Data in 2025.", fontsize=10
+        )
+        p.insert_text((50, 300), "ACM Reference Format:", fontsize=10)
+        p.insert_text(
+            (50, 315),
+            "Ann Lee and Bo Li. 2025. A Model for Learning from Data. In Proceedings",
+            fontsize=8,
+        )
+        p.insert_text(
+            (50, 326), "of the ACM Conference. ACM, New York, NY, USA.", fontsize=8
+        )
+        p.insert_text((50, 760), "1 We call the controller a policy.", fontsize=8)
+        p.insert_text((50, 790), "This work is licensed under a Creative", fontsize=8)
+        p.insert_text((50, 800), "Commons Attribution 4.0 License.", fontsize=8)
+        p.insert_text((50, 810), "KDD ’25, Toronto, Canada © 2025", fontsize=8)
+        data = doc.tobytes()
+        doc.close()
+        regions = [
+            {"role": "title", "x0": 45, "y0": 290, "x1": 300, "y1": 303},
+            {"role": "furniture", "x0": 45, "y0": 750, "x1": 400, "y1": 765},
+            {"role": "furniture", "x0": 45, "y0": 780, "x1": 400, "y1": 815},
+        ]
+        sentences = _layout(data, 0, {0: regions})
+        text = " ".join(s["text"] for s in sentences)
+        self.assertIn(TEXT, text)
+        # an abstract that names the paper is no citation of it
+        self.assertIn("We call it A Model for Learning from Data in 2025.", text)
+        self.assertIn("We call the controller a policy.", text)
+        for gone in ("ACM Reference Format", "Ann Lee", "New York", "Creative", "KDD"):
+            self.assertNotIn(gone, text)
+
+    def test_a_contact_block_typed_as_text_is_front_matter(self):
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((150, 80), "A Model for Learning from Data", fontsize=14)
+        p.insert_text((50, 150), "Abstract", fontsize=12)
+        p.insert_text((50, 170), TEXT, fontsize=10)
+        p.insert_text(
+            (50, 400),
+            "Authors' Contact Information: Ann Lee, ann@example.com, Example University,",
+            fontsize=8,
+        )
+        p.insert_text(
+            (50, 410),
+            "Example City, Country; Bo Li, bo@example.com, Example Lab.",
+            fontsize=8,
+        )
+        p.insert_text(
+            (50, 500),
+            "Write to data@example.com to get the full data set we use here.",
+            fontsize=10,
+        )
+        data = doc.tobytes()
+        doc.close()
+        text = " ".join(s["text"] for s in _layout(data, 0, {}))
+        self.assertIn(TEXT, text)
+        self.assertNotIn("Example University", text)
+        self.assertNotIn("bo@example.com", text)
+        # running text that gives an address is read
+        self.assertIn("to get the full data set we use here.", text)
+
     def test_a_caption_above_the_abstract_is_kept(self):
         # SAM: a teaser figure and its caption sit above the Abstract
         doc = pymupdf.open()
@@ -334,6 +402,139 @@ class FirstPageTests(unittest.TestCase):
             [(80, "Abstract . . . . . . . . 1"), (95, "1 Introduction . . . . . . 2")],
         )
         self.assertEqual(pdf_utils._first_page(data), 0)
+
+    def test_a_footnote_on_the_authors_is_front_matter(self):
+        # an IEEE-style footnote with no address: who is with which department, and who
+        # corresponds, go; the funding note beside them and a content footnote are read
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((150, 80), "A Model for Learning from Data", fontsize=14)
+        p.insert_text((50, 150), "Abstract", fontsize=12)
+        p.insert_text((50, 170), TEXT, fontsize=10)
+        p.insert_text((50, 750), "1 We call the controller a policy.", fontsize=8)
+        p.insert_text(
+            (50, 780), "This work was supported by the Example Foundation.", fontsize=8
+        )
+        p.insert_text(
+            (50, 790),
+            "(Corresponding author: Ann Lee.) Ann Lee and Bo Li are",
+            fontsize=8,
+        )
+        p.insert_text(
+            (50, 800), "with the Department of Physics, Example University.", fontsize=8
+        )
+        data = doc.tobytes()
+        doc.close()
+        foot = [{"role": "furniture", "x0": 45, "y0": 740, "x1": 400, "y1": 805}]
+        text = " ".join(s["text"] for s in _layout(data, 0, {0: foot}))
+        self.assertIn(TEXT, text)
+        self.assertIn("We call the controller a policy.", text)
+        self.assertIn("supported by the Example Foundation.", text)
+        self.assertNotIn("Corresponding author", text)
+        self.assertNotIn("Department of Physics", text)
+
+    def test_a_reports_list_of_authors_is_not_translated(self):
+        doc = pymupdf.open()
+        doc.new_page(width=595, height=842)
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((50, 80), "Authors", fontsize=12)
+        p.insert_text(
+            (50, 100), "Ann Lee, Example University; Bo Li, Example Lab;", fontsize=10
+        )
+        p.insert_text(
+            (50, 112), "Cy Park, Example Institute; Di Wu, Example Corp.", fontsize=10
+        )
+        p.insert_text(
+            (50, 130),
+            "All of the authors took part in the study we report here.",
+            fontsize=10,
+        )
+        p.insert_text((50, 170), "1 Introduction", fontsize=12)
+        p.insert_text((50, 190), TEXT, fontsize=10)
+        data = doc.tobytes()
+        doc.close()
+        heads = {1: [title(70, 84), title(160, 174)]}
+        sentences = _layout(data, 1, heads)
+        text = " ".join(s["text"] for s in sentences)
+        self.assertEqual(_headings(sentences), ["1 Introduction"])
+        self.assertNotIn("Ann Lee", text)
+        self.assertIn("took part in the study we report here.", text)
+        self.assertIn(TEXT, text)
+
+    def test_notices(self):
+        notice = pdf_utils._NOTICE.search
+        for t in (
+            "© 2026 Example Corp. All rights reserved.",
+            "©2019 IEEE",
+            "c ⃝ Copyright owned by the author(s) under the terms of the licence.",
+            "Copyright may be transferred without notice.",
+            "Copyright 2022 by the author(s).",
+            "This work is licensed under a Creative Commons Attribution 4.0 License.",
+            "Permission to make digital or hard copies of all or part of this work ...",
+            "Personal use of this material is permitted.",
+        ):
+            self.assertTrue(notice(t), t)
+        for t in (
+            "It runs in MATLAB (developed by the MathWorks ©) or Octave.",
+            "Such data is scarce due to copyright restrictions.",
+        ):
+            self.assertFalse(notice(t), t)
+        note = pdf_utils._AUTHOR_NOTE.search
+        for t in (
+            "Authors' Contact Information: Ann Lee, Example University.",
+            "Ann Lee is a PhD student at Example University.",
+            "This report was written by Ann Lee and Bo Li with equal contributions.",
+        ):
+            self.assertTrue(note(t), t)
+        # a data statement is no note on the authors
+        self.assertFalse(note("The data are available from the corresponding author."))
+
+    def test_more_notices_and_contacts(self):
+        # a notice broken at a line's end ("Copy-" + "right"), a short request to be
+        # contacted that reads as text, and an author note in a footnote on page 1
+        doc = pymupdf.open()
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((150, 80), "A Model for Learning from Data", fontsize=14)
+        p.insert_text((50, 150), "Abstract", fontsize=12)
+        p.insert_text((50, 170), TEXT, fontsize=10)
+        p.insert_text(
+            (50, 400),
+            "Corresponding authors can be contacted at team@example.org",
+            fontsize=8,
+        )
+        p.insert_text((50, 750), "1 We call the controller a policy.", fontsize=8)
+        p.insert_text(
+            (50, 790), "Proceedings of the Example Conference, 2022. Copy-", fontsize=8
+        )
+        p.insert_text((50, 800), "right 2022 by the author(s).", fontsize=8)
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((50, 100), TEXT, fontsize=10)
+        p.insert_text(
+            (50, 790),
+            "*This report was written by Ann Lee and Bo Li with equal",
+            fontsize=8,
+        )
+        p.insert_text(
+            (50, 800), "contributions. We thank Example Lab for its help.", fontsize=8
+        )
+        data = doc.tobytes()
+        doc.close()
+        foot = {
+            0: [
+                {"role": "furniture", "x0": 45, "y0": 740, "x1": 400, "y1": 755},
+                {"role": "furniture", "x0": 45, "y0": 780, "x1": 400, "y1": 805},
+            ],
+            1: [{"role": "furniture", "x0": 45, "y0": 780, "x1": 400, "y1": 805}],
+        }
+        text = " ".join(s["text"] for s in _layout(data, 0, foot))
+        self.assertIn(TEXT, text)
+        self.assertIn("We call the controller a policy.", text)
+        self.assertNotIn("team@example.org", text)
+        self.assertNotIn("by the author(s)", text)
+        text = " ".join(s["text"] for s in _layout(data, 1, foot))
+        self.assertIn(TEXT, text)
+        self.assertNotIn("equal contributions", text)
+        self.assertIn("We thank Example Lab for its help.", text)
 
     def _notes_page(self, notes: str, below: str = "") -> str:
         """Page 0's text with an author line marked "*" and "†", and `notes` (one PDF block,
