@@ -68,10 +68,10 @@ class PaperStoreTests(unittest.TestCase):
         )
 
     def test_paper_cache_id_is_shared_by_one_paper(self):
-        cid = store.paper_cache_id("arxiv:2506.09762")
+        cid = store.paper_cache_id("arxiv:0000.00001")
         store.cache_put(cid, "brief_Korean_x", {"brief": "G"})
         self.assertEqual(
-            store.cache_get(store.paper_cache_id("arxiv:2506.09762"), "brief_Korean_x"),
+            store.cache_get(store.paper_cache_id("arxiv:0000.00001"), "brief_Korean_x"),
             {"brief": "G"},
         )
-        self.assertNotEqual(cid, store.paper_cache_id("arxiv:2506.09763"))
+        self.assertNotEqual(cid, store.paper_cache_id("arxiv:0000.00002"))

@@ -1,9 +1,9 @@
 """End matter (the reference list) is skipped in READING order, and nothing else is.
 
-Diffusion Policy p13: an end-matter heading sits half-way down the RIGHT column, and the left
-column below that height ("Related Work" end, "Limitations and Future Work") was dropped with it.
-On p16 the appendix title "A" + "Diffusion Policy Implementation Details" comes as two lines; the
-title line starts 0.04pt above the "A" line and was dropped as end matter. Acknowledgements are
+In one paper an end-matter heading sits half-way down the RIGHT column, and the left column
+below that height ("Related Work" end, "Limitations and Future Work") was dropped with it.
+Later its appendix title "A" + "Implementation Details" comes as two lines; the title line
+starts 0.04pt above the "A" line and was dropped as end matter. Acknowledgements are
 translated: the range starts at the References heading only."""
 
 import json
@@ -76,14 +76,14 @@ class PartlyCoveredLineTests(unittest.TestCase):
         return " ".join(s["text"] for s in lay["sentences"])
 
     def test_a_box_over_the_end_of_a_line_keeps_the_line(self):
-        # 2212.00794 p5: the table box reaches over the right part of the caption line
+        # the table box reaches over the right part of the caption line
         table = {"role": "table", "x0": 120, "y0": 280, "x1": 545, "y1": 310}
         self.assertIn(
             "Here the results are on the COCO test split.", self._layout([table])
         )
 
     def test_a_box_over_the_start_of_a_line_drops_the_line(self):
-        # 2510.02387 p7: a prompt template in a table box; only its line starts are inside
+        # a prompt template in a table box; only its line starts are inside
         table = {"role": "table", "x0": 40, "y0": 315, "x1": 140, "y1": 340}
         text = self._layout([table])
         self.assertNotIn("assert statement", text)
@@ -98,7 +98,7 @@ class EndMatterTests(unittest.TestCase):
         self.assertNotIn("A cited paper", page1)
 
     def test_a_full_width_caption_above_both_columns_is_kept(self):
-        # 2610.04009 p8: a table caption across both columns, References down the left column
+        # a table caption across both columns, References down the left column
         doc = pymupdf.open()
         doc.new_page(width=595, height=842)
         p = doc.new_page(width=595, height=842)
@@ -203,7 +203,7 @@ class RangeTests(unittest.TestCase):
         self.assertNotIn("A cited paper", page1)
 
     def test_a_prose_line_that_starts_with_reference_does_not_start_it(self):
-        # 2610.02200 p4 lost ten pages from "reference of 17,135 actions." on
+        # a paper lost ten pages from "reference of 17,135 actions." on
         data = _doc(
             [(50, 90, "It uses fewer actions than the human", 10)]
             + [(50, 102, "reference of 17,135 actions.", 10)]
@@ -221,7 +221,7 @@ class RangeTests(unittest.TestCase):
         self.assertIsNone(pdf_utils.end_matter_range(data))
 
     def test_an_appendix_letter_set_small_ends_the_range_over_smaller_references(self):
-        # 3DGS: "A" at 10pt over 7pt references (an 11pt floor skipped its appendix)
+        # "A" at 10pt over 7pt references (an 11pt floor skipped its appendix)
         data = _doc(
             [(50, 90, "References", 10)] + _refs(110, 20, size=7),
             _refs(90, 10, size=7)
@@ -234,7 +234,7 @@ class RangeTests(unittest.TestCase):
         self.assertNotIn("A cited paper", page2)
 
     def test_a_page_that_is_not_a_reference_list_ends_the_range(self):
-        # the Transformer paper's "Attention Visualizations" pages after its references
+        # a paper's pages of figures after its references, under a title with no letter
         caption = (
             "Figure 3: An example of the attention mechanism following dependencies."
         )
@@ -273,8 +273,8 @@ class FurnitureTests(unittest.TestCase):
         return _one_page(lines, regions, turned)
 
     def test_a_footnote_is_kept_and_read_after_the_text_it_sits_in(self):
-        # 1512.03385 p2: a footnote at the foot of the left column split the sentence that runs
-        # on to the top of the right column
+        # a footnote at the foot of the left column split the sentence that runs on to the
+        # top of the right column
         lines = [(50, 90 + 14 * k, f"Left {k} {TEXT}.", 10) for k in range(5)]
         lines += [(50, 160, "The model is trained on the", 10)]
         lines += [(50, 780, "1 The code is available online.", 8)]
@@ -399,28 +399,28 @@ class FurnitureTests(unittest.TestCase):
             {"role": "furniture", "x0": 46, "y0": 400, "x1": 70, "y1": 700},
         ]
         sentences = self._layout(
-            lines, boxes, turned=[(60, 650, "arXiv:2610.00001v1 [cs.LG]")]
+            lines, boxes, turned=[(60, 650, "arXiv:0000.00001v1 [cs.LG]")]
         )
         self.assertEqual([s["text"] for s in sentences], [TEXT])
 
     def test_running_heads_match_by_their_letters(self):
         self.assertEqual(
-            pdf_utils._norm_header("1:2 • Kerbl et al."),
-            pdf_utils._norm_header("• Kerbl et al."),
+            pdf_utils._norm_header("1:2 • Lee et al."),
+            pdf_utils._norm_header("• Lee et al."),
         )
 
     def test_a_caption_inside_a_table_box_is_kept(self):
-        # ResNet p5: the table box swallowed "Table 5. Error rates ..." and no caption box came
+        # the table box swallowed "Table 5. Error rates ..." and no caption box came
         lines = [
             (60, 300, "method top-1 top-5", 9),
-            (60, 312, "ResNet 3.57 1.2", 9),
+            (60, 312, "Ours 3.57 1.2", 9),
             (60, 340, "Table 5. Error rates of ensembles on the test set.", 10),
         ]
         table = {"role": "table", "x0": 50, "y0": 285, "x1": 545, "y1": 345}
         sentences = self._layout(lines, [table])
         texts = " ".join(s["text"] for s in sentences)
         self.assertIn("Error rates of ensembles on the test set.", texts)
-        self.assertNotIn("ResNet 3.57", texts)
+        self.assertNotIn("Ours 3.57", texts)
         self.assertTrue(all(s.get("caption") for s in sentences))
 
 
@@ -428,7 +428,7 @@ class CaptionTests(unittest.TestCase):
     """Figure/table captions are read after the page's text, like footnotes."""
 
     def test_a_caption_does_not_split_or_stick_to_a_sentence_across_columns(self):
-        # Planck p29: "Parameter constraints from the galaxy auto- Fig. 20." | "and cross-..."
+        # "Parameter constraints from the galaxy auto- Fig. 20." | "and cross-..."
         lines = [(50, 90 + 14 * k, f"Left {k} {TEXT}.", 10) for k in range(5)]
         lines += [(50, 160, "The model is trained on the", 10)]
         lines += [(320, 90, "Figure 2: Overview of the method.", 9)]
@@ -443,7 +443,7 @@ class CaptionTests(unittest.TestCase):
         self.assertTrue(sentences[-1]["aside"] and sentences[-1]["caption"])
 
     def test_a_caption_box_over_its_first_line_takes_the_whole_caption(self):
-        # 2506.09985 p33: the box covered one line, and the caption came out in two pieces
+        # the box covered one line, and the caption came out in two pieces
         lines = [(50, 90, TEXT + ".", 10)]
         lines += [
             (
@@ -461,7 +461,7 @@ class CaptionTests(unittest.TestCase):
         )
 
     def test_two_captions_do_not_join(self):
-        # 2102.09672 p14: "Figure 20. 200 sampling steps ..." + "Figure 21. 400 sampling ..."
+        # "Figure 20. 200 sampling steps ..." + "Figure 21. 400 sampling ..."
         lines = [(50, 300, "Figure 20. Samples at 200 steps", 9)]
         lines += [(50, 330, "Figure 21. Samples at 400 steps", 9)]
         caps = [

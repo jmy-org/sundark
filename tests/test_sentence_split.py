@@ -5,7 +5,7 @@ On top of the segmenter:
   comma/"and"-joined lists and markerless items stay glued. `_split_on_markers` breaks a
   qualifying enumeration run itself, while leaving references and short subfigure phrases intact.
 - Over-splits: the segmenter also breaks mid-sentence - at an inline math operator, a citation
-  ("(FiLM)" | "Perez et al. (2018)", "VGG nets" | "[41] but"), a capital math symbol, a
+  ("(FiGS)" | "Lee et al. (2018)", "earlier nets" | "[41] but"), a capital math symbol, a
   parenthesis, closing punctuation, or inside a word. `_mend_word_splits` and `_merge_fragments`
   rejoin those, but never across a finished sentence.
 - Short prose that the label filter dropped (a lead-in before a display equation) is kept by
@@ -71,7 +71,7 @@ POSITIVES = [
     (
         "Policy Representations. a) Explicit policy with different action representations. "
         "b) Implicit policy learns an energy function that minimizes the energy landscape "
-        "c) Diffusion policy refines noise into actions via a learned gradient field.",
+        "c) Our policy refines noise into actions via a learned gradient field.",
         ["a)", "b)", "c)"],
     ),
     (
@@ -92,7 +92,7 @@ POSITIVES = [
         ["(A)", "(B)", "(C)"],
     ),
     (
-        "ReDex follows a three-stage pipeline: (1) train a proprioception-only policy in "
+        "ToyBot follows a three-stage pipeline: (1) train a proprioception-only policy in "
         "simulation, (2) collect real-world corrections, and (3) train a force-conditioned policy.",
         ["(1)", "(2)", "(3)"],
     ),
@@ -184,7 +184,7 @@ class InlineMergeTests(unittest.TestCase):
         self.assertEqual(len(merge_at(t, cuts)), 3)
 
     def test_a_fragment_ending_on_an_operator_rejoins(self):
-        # NeRF and Adam with CMEX10 decoded: the segmenter broke right after "∑" and after "<".
+        # Two papers with CMEX10 decoded: the segmenter broke right after "∑" and after "<".
         t = "weights as w i = w i / ∑ Nc j =1 w j produces a constant PDF."
         self.assertEqual(len(merge_at(t, [t.index("Nc")])), 1)
         t = "we have that | m t / √ v t | < 1 therefore | Δ t | < α ."
@@ -206,26 +206,26 @@ class InlineMergeTests(unittest.TestCase):
 
     def test_citation_tail_rejoins(self):
         t = (
-            "we examine convolutional neural networks (CNNs) Ronneberger et al. ( 2015 ) "
-            "and Transformers Vaswani et al. ( 2017 ), and compare them."
+            "we examine convolutional neural networks (CNNs) Kim et al. ( 2015 ) "
+            "and Transformers Lee et al. ( 2017 ), and compare them."
         )
-        self.assertEqual(len(merge_at(t, [t.index("Ronneberger")])), 1)
+        self.assertEqual(len(merge_at(t, [t.index("Kim")])), 1)
         # both citations split off: still one sentence
-        cuts = [t.index("Ronneberger"), t.index("Vaswani")]
+        cuts = [t.index("Kim"), t.index("Lee")]
         self.assertEqual(len(merge_at(t, cuts)), 1)
 
     def test_second_real_citation_example_rejoins(self):
         t = (
-            "with Feature-wise Linear Modulation (FiLM) Perez et al. ( 2018 ) as well as "
+            "with Feature-wise Gated Scaling (FiGS) Lee et al. ( 2018 ) as well as "
             "denoising iteration k , shown in Fig 2 (b)."
         )
-        self.assertEqual(len(merge_at(t, [t.index("Perez")])), 1)
+        self.assertEqual(len(merge_at(t, [t.index("Lee")])), 1)
 
     def test_citation_split_again_after_et_al_rejoins(self):
         # The year is in the NEXT fragment; the citation check looks past the fragment end and
         # _ABBR_TAIL then joins "et al." to the year.
-        t = "with modulation (FiLM) Perez et al. ( 2018 ) as well as denoising iteration k ."
-        cuts = [t.index("Perez"), t.index("( 2018")]
+        t = "with modulation (FiGS) Lee et al. ( 2018 ) as well as denoising iteration k ."
+        cuts = [t.index("Lee"), t.index("( 2018")]
         self.assertEqual(len(merge_at(t, cuts)), 1)
 
     def test_citation_does_not_cross_a_finished_sentence(self):
@@ -236,14 +236,14 @@ class InlineMergeTests(unittest.TestCase):
         # A curly closing quote, a footnote mark, or a spaced ". )" still ends the sentence.
         for t, author in (
             (
-                "We call this “learning to learn.” Finn et al. ( 2017 ) proposed MAML.",
-                "Finn",
+                "We call this “learning to learn.” Kim et al. ( 2017 ) proposed ToyMeta.",
+                "Kim",
             ),
             (
-                "The code is publicly available.1 Ho et al. ( 2020 ) proposed DDPM.",
-                "Ho ",
+                "The code is publicly available.1 Lee et al. ( 2020 ) proposed ToyNet.",
+                "Lee ",
             ),
-            ("Results improve ( see Appendix A . ) Ho et al. ( 2020 ) agree.", "Ho "),
+            ("Results improve ( see Appendix A . ) Lee et al. ( 2020 ) agree.", "Lee "),
         ):
             self.assertEqual(len(merge_at(t, [t.index(author)])), 2, t)
 
@@ -255,7 +255,7 @@ class InlineMergeTests(unittest.TestCase):
 
     def test_citation_helper(self):
         for c in (
-            "Perez et al. ( 2018 ) as well",
+            "Lee et al. ( 2018 ) as well",
             "Smith and Jones (2020) show",
             "Müller et al. ( 2020a , b ) show",
         ):
@@ -299,9 +299,9 @@ class PageStitchTests(unittest.TestCase):
     """_stitch_idx decides, for BOTH the forward and the backward pass, which sentence at the top
     of the next page continues the previous page's last sentence."""
 
-    FILM = "with Feature-wise Linear Modulation (FiLM)"
-    PEREZ = (
-        "Perez et al. ( 2018 ) as well as denoising iteration k , shown in Fig 2 (b)."
+    ACRONYM = "with Feature-wise Gated Scaling (FiGS)"
+    CITATION = (
+        "Lee et al. ( 2018 ) as well as denoising iteration k , shown in Fig 2 (b)."
     )
 
     def test_lowercase_continuation_still_stitches(self):
@@ -310,25 +310,27 @@ class PageStitchTests(unittest.TestCase):
         self.assertEqual(_stitch_idx(prev, nxt), 0)
 
     def test_citation_after_a_page_break_stitches(self):
-        self.assertEqual(_stitch_idx(page(self.FILM), page(self.PEREZ)), 0)
+        self.assertEqual(_stitch_idx(page(self.ACRONYM), page(self.CITATION)), 0)
         # a display equation at the top of the next page is skipped
-        nxt = page(("z = f ( x )", "equation"), self.PEREZ)
-        self.assertEqual(_stitch_idx(page(self.FILM), nxt), 1)
+        nxt = page(("z = f ( x )", "equation"), self.CITATION)
+        self.assertEqual(_stitch_idx(page(self.ACRONYM), nxt), 1)
 
     def test_finished_or_colon_tail_does_not_stitch_a_citation(self):
-        nxt = page("Perez et al. ( 2018 ) proposed FiLM.")
+        nxt = page("Lee et al. ( 2018 ) proposed FiGS.")
         self.assertIsNone(_stitch_idx(page("This ends the paragraph."), nxt))
         self.assertIsNone(
             _stitch_idx(page("The objective is defined as follows:"), nxt)
         )
 
     def test_heading_or_non_citation_start_does_not_stitch(self):
-        prev = page(self.FILM)
-        self.assertIsNone(_stitch_idx(prev, page(("3 Method", "heading"), self.PEREZ)))
+        prev = page(self.ACRONYM)
+        self.assertIsNone(
+            _stitch_idx(prev, page(("3 Method", "heading"), self.CITATION))
+        )
         self.assertIsNone(_stitch_idx(prev, page("Figure 3: Overview of the method.")))
 
     def test_tail_open(self):
-        self.assertTrue(_tail_open(page(self.FILM)))
+        self.assertTrue(_tail_open(page(self.ACRONYM)))
         self.assertFalse(_tail_open(page("Done.")))
         self.assertFalse(_tail_open(page("as follows:")))
         self.assertFalse(_tail_open(page(("1 Introduction", "heading"))))
@@ -336,18 +338,18 @@ class PageStitchTests(unittest.TestCase):
 
 class InWordBoundaryTests(unittest.TestCase):
     def test_punctuation_tail_is_merged(self):
-        # Diffusion Policy p3: spaCy cut ');' -> the word was highlighted with two sentences
-        t = "actively studied Ho et al. ( 2020 ); Nichol and Dhariwal ( 2021 )."
-        self.assertEqual(len(mend(t, t.index("; Nichol"))), 1)
-        # NeRF p23: 'Table 5:' cut before the colon
+        # spaCy cut ');' -> the word was highlighted with two sentences
+        t = "actively studied Lee et al. ( 2020 ); Park and Kimura ( 2021 )."
+        self.assertEqual(len(mend(t, t.index("; Park"))), 1)
+        # 'Table 5:' cut before the colon
         t = "Table 5: Per-scene quantitative results from our real image dataset."
         self.assertEqual(len(mend(t, t.index(": Per"))), 1)
-        # 2609.26280 p12: a dotted Java name is one token
+        # a dotted Java name is one token
         t = "• Ljavax.crypto.Cipher — API used for cryptographic operations;"
         self.assertEqual(len(mend(t, t.index("Cipher"))), 1)
 
     def test_sentence_final_tail_moves_the_boundary_to_the_word_end(self):
-        # Planck p8: cut between ')' and '.' of '065).'
+        # cut between ')' and '.' of '065).'
         t = "entirely, 1 . 180 ± 0 . 065). Switching to spectrum-based corrections."
         self.assertEqual(
             mend(t, t.index(". Switching")),
@@ -358,7 +360,7 @@ class InWordBoundaryTests(unittest.TestCase):
         )
 
     def test_glued_sentences_stay_split(self):
-        # 2609.26280 p10: the PDF lost the space - a real boundary inside one word
+        # the PDF lost the space - a real boundary inside one word
         t = "bit flips increases.The model starts at 0.9137 accuracy."
         self.assertEqual(len(mend(t, t.index("The model"))), 2)
 
@@ -369,13 +371,13 @@ class InWordBoundaryTests(unittest.TestCase):
 
 class BracketContinuationTests(unittest.TestCase):
     def test_citation_and_interval_rejoin(self):
-        # ResNet p0, Perelman p4
-        t = "deeper than VGG nets [41] but still having lower complexity."
+        # a citation, and an interval
+        t = "deeper than earlier nets [41] but still having lower complexity."
         self.assertEqual(n_at(t, "[41]"), 1)
         t = "Suppose that the gradient flow for F m exists for t ∈ [0 , T ] ."
         self.assertEqual(n_at(t, "[0 ,"), 1)
-        # the subject before a citation is no longer cut off (and dropped): ResNet p7
-        t = "We adopt Faster R-CNN [32] as the detection method."
+        # the subject before a citation is no longer cut off (and dropped)
+        t = "We adopt ToyDet [32] as the detection method."
         self.assertEqual(n_at(t, "[32]"), 1)
 
     def test_not_across_a_finished_sentence(self):
@@ -385,10 +387,10 @@ class BracketContinuationTests(unittest.TestCase):
 
 class ParenContinuationTests(unittest.TestCase):
     def test_non_marker_paren_rejoins(self):
-        # Perelman p9, ResNet p6
+        # math, and a figure reference
         t = "a sequence of metric balls B k = B ( p k , r k ) at times t k ."
         self.assertEqual(n_at(t, "( p k"), 1)
-        t = "Fig. 6 (middle) shows the behaviors of ResNets."
+        t = "Fig. 6 (middle) shows the behaviors of deep nets."
         self.assertEqual(n_at(t, "(middle)"), 1)
 
     def test_list_markers_and_finished_sentences_stay_split(self):
@@ -400,12 +402,12 @@ class ParenContinuationTests(unittest.TestCase):
 
 class ClosingPunctuationContinuationTests(unittest.TestCase):
     def test_closing_or_connective_punctuation_rejoins(self):
-        t = "In his seminal paper , Hamilton proved that this equation has a solution."
-        self.assertEqual(n_at(t, ", Hamilton"), 1)  # Perelman p0
+        t = "In his seminal paper , Lee proved that this equation has a solution."
+        self.assertEqual(n_at(t, ", Lee"), 1)
         t = "the minimizer f is 2 △ f −|∇ f | 2 + R = const."
-        self.assertEqual(n_at(t, "| 2"), 1)  # Perelman p7
+        self.assertEqual(n_at(t, "| 2"), 1)
         t = "position t , and p e expert e ’s predicted distribution."
-        self.assertEqual(n_at(t, "’s"), 1)  # 2609.37899 p2
+        self.assertEqual(n_at(t, "’s"), 1)
 
     def test_not_across_a_finished_sentence(self):
         t = "The result was clear. ; this fragment is odd"
@@ -414,28 +416,28 @@ class ClosingPunctuationContinuationTests(unittest.TestCase):
 
 class CommaSemicolonEndTests(unittest.TestCase):
     def test_citation_list_and_math_list_rejoin(self):
-        t = "standard sirens ( Holz & Hughes 2005 ; Abbott et al. 2017 ; Chen 2018 )."
-        self.assertEqual(n_at(t, "Abbott"), 1)  # Planck p27
-        t = "architecture ( LeCun et al. , 1998 ; Krizhevsky et al. , 2012 )."
-        self.assertEqual(n_at(t, "Krizhevsky"), 1)  # 2007.06559 p0
+        t = "standard sirens ( Lee & Park 2005 ; Kim et al. 2017 ; Chen 2018 )."
+        self.assertEqual(n_at(t, "Kim"), 1)
+        t = "architecture ( Lee et al. , 1998 ; Park et al. , 2012 )."
+        self.assertEqual(n_at(t, "Park"), 1)
         t = "GPU-hours sum work across devices, H = s P i g i τ i / 3600 ."
-        self.assertEqual(n_at(t, "H ="), 1)  # 2609.37899 p27
+        self.assertEqual(n_at(t, "H ="), 1)
 
     def test_list_items_after_a_semicolon_or_comma_stay_split(self):
         t = "zero-padding shortcuts are used; (B) projection shortcuts are used"
-        self.assertEqual(n_at(t, "(B)"), 2)  # ResNet p3
+        self.assertEqual(n_at(t, "(B)"), 2)
         t = "on the complex unit circle, • F is the unitary discrete Fourier transform"
-        self.assertEqual(n_at(t, "•"), 2)  # Halko p26
+        self.assertEqual(n_at(t, "•"), 2)
 
 
 class CapitalMathSymbolTests(unittest.TestCase):
     def test_capital_symbol_rejoins(self):
         t = "we can estimate the residual error ∥ A − QQ ∗ A ∥ ."
-        self.assertEqual(n_at(t, "A −"), 1)  # Halko p4
+        self.assertEqual(n_at(t, "A −"), 1)
         t = "inversely proportional to a (scaled) L 2 norm of their gradients."
-        self.assertEqual(n_at(t, "L 2"), 1)  # Adam p7
+        self.assertEqual(n_at(t, "L 2"), 1)
         t = "the error term is of size O ( y 2 max R 2 (log N ) 4 k )."
-        self.assertEqual(n_at(t, "O ("), 1)  # 1311.4600 p9
+        self.assertEqual(n_at(t, "O ("), 1)
 
     def test_words_and_finished_sentences_stay_split(self):
         t = "the images are sorted A 2D map is then built."  # article before a number
@@ -448,10 +450,10 @@ class CapitalMathSymbolTests(unittest.TestCase):
 
 class HyphenCompoundEndTests(unittest.TestCase):
     def test_compound_split_at_a_line_break_rejoins(self):
-        t = "a five-rung pretraining ladder on LIBERO- Long alone, with four runs."
-        self.assertEqual(n_at(t, "Long"), 1)  # 2610.04009 p5
-        t = "GPT- 5.6 Sol with VISTA substantially outperforms baselines."
-        self.assertEqual(n_at(t, "5.6"), 1)  # 2610.02200 p1
+        t = "a five-rung pretraining ladder on BENCH- Long alone, with four runs."
+        self.assertEqual(n_at(t, "Long"), 1)
+        t = "the top- 5 error of our model is lower than every baseline."
+        self.assertEqual(n_at(t, "5 error"), 1)
 
     def test_spaced_dash_is_not_a_compound(self):
         t = "the first item - Second item starts here"
@@ -460,10 +462,10 @@ class HyphenCompoundEndTests(unittest.TestCase):
 
 class SpacedAbbreviationTests(unittest.TestCase):
     def test_spaced_et_al_and_vs_hold_the_next_fragment(self):
-        t = "novel-view synthesis [Flynn et al . 2016; Zhou et al . 2016]."
-        self.assertEqual(n_at(t, "2016; Z"), 1)  # 3DGS p1
+        t = "novel-view synthesis [Lee et al . 2016; Kim et al . 2016]."
+        self.assertEqual(n_at(t, "2016; K"), 1)
         t = "Identity vs . Projection Shortcuts."
-        self.assertEqual(n_at(t, "Projection"), 1)  # ResNet p5 (run-in heading)
+        self.assertEqual(n_at(t, "Projection"), 1)  # a run-in heading
 
     def test_ordinary_spaced_period_still_ends_a_sentence(self):
         t = "This is the end . Then we stop."
@@ -473,52 +475,52 @@ class SpacedAbbreviationTests(unittest.TestCase):
 class BareListMarkerTests(unittest.TestCase):
     def test_letter_marker_joins_its_item(self):
         t = "we consider two options: (A) The shortcut still performs identity mapping."
-        segs = merge_at(t, [t.index("(A)"), t.index("The shortcut")])  # ResNet p3
+        segs = merge_at(t, [t.index("(A)"), t.index("The shortcut")])
         self.assertEqual(segs[-1], "(A) The shortcut still performs identity mapping.")
 
     def test_number_or_marker_followed_by_marker_stays(self):
         t = "(21) At fixed model size, more shards make each expert cheaper."
-        self.assertEqual(n_at(t, "At fixed"), 2)  # an equation number, 2609.37899 p25
+        self.assertEqual(n_at(t, "At fixed"), 2)  # an equation number
         t = "(a) (c) Graph measures vs. neural network performance."
-        self.assertEqual(n_at(t, "(c)"), 2)  # 2007.06559 p5 subfigure labels
+        self.assertEqual(n_at(t, "(c)"), 2)  # subfigure labels
 
 
 class ShortColonLabelTests(unittest.TestCase):
     def test_label_joins_the_sentence_after_it(self):
         t = "Right: Each cell in the mask is one block."
-        self.assertEqual(n_at(t, "Each"), 1)  # 2610.04009 p2
+        self.assertEqual(n_at(t, "Each"), 1)
         t = "Figure 13: Ablation studies of our data engine stages."
-        self.assertEqual(n_at(t, "Ablation"), 1)  # SAM p11
+        self.assertEqual(n_at(t, "Ablation"), 1)
 
     def test_list_intro_and_long_clauses_stay_split(self):
-        t = "We ask: 1) Can ReDex improve the real-world policy?"
-        self.assertEqual(n_at(t, "1)"), 2)  # 2610.07525 p3
-        t = "We consider the following external data sets: Planck and BAO."
-        self.assertEqual(n_at(t, "Planck"), 2)
+        t = "We ask: 1) Can ToyBot improve the real-world policy?"
+        self.assertEqual(n_at(t, "1)"), 2)
+        t = "We consider the following external data sets: CMB and BAO."
+        self.assertEqual(n_at(t, "CMB"), 2)
 
 
 class KeepProseByContextTests(unittest.TestCase):
     def test_short_prose_is_kept_in_context(self):
-        # Halko/1311.4600: a lead-in cut off by a display equation
+        # a lead-in cut off by a display equation
         self.assertFalse(pu._keep_sentence("Then we have", 3))
         self.assertTrue(pu._keep_sentence("Then we have", 3, 2))
         self.assertTrue(pu._keep_sentence("Then we have", 3, 1))
         # a one-word lead-in only inside a prose paragraph
         self.assertFalse(pu._keep_sentence("Then", 1, 1))
         self.assertTrue(pu._keep_sentence("Then", 1, 2))
-        # a page tail that wraps to the next page (ResNet p1)
+        # a page tail that wraps to the next page
         self.assertTrue(pu._keep_sentence("In addition, high-", 3, 2))
         self.assertTrue(pu._keep_sentence("• Ljavax.crypto.Cipher", 2, 2))
 
     def test_labels_and_numbers_are_still_dropped(self):
-        self.assertFalse(pu._keep_sentence("PSNR ↑", 2, 1))  # NeRF table header
+        self.assertFalse(pu._keep_sentence("PSNR ↑", 2, 1))  # a table header
         self.assertFalse(pu._keep_sentence("Cross Attention", 2, 0))
         self.assertFalse(pu._keep_sentence("(1.1)", 1, 2))  # equation number
 
 
 class HyphenPageTailTests(unittest.TestCase):
     def test_hyphenated_page_tail_stitches(self):
-        prev = page("We then use RoI pooling to extract fea-")  # 1812.05038 p1
+        prev = page("We then use RoI pooling to extract fea-")
         self.assertTrue(pu._tail_unfinished(prev))
         nxt = page("tures for all person detections at each time-step.", "Next one.")
         self.assertEqual(pu._stitch_idx(prev, nxt), 0)
@@ -530,7 +532,7 @@ class HyphenPageTailTests(unittest.TestCase):
 class ParenIsNotAListMarkerTests(unittest.TestCase):
     def test_closing_paren_of_math_is_not_a_marker(self):
         t = "We claim that R ( z , 0) /R ( z k , 0) is bounded, and R ( y , 0) is too."
-        self.assertEqual(pu._enum_candidates(t), [])  # Perelman p30
+        self.assertEqual(pu._enum_candidates(t), [])
 
     def test_real_items_are_still_found(self):
         t = "We show that: 1) Our nets are easy to optimize; 2) Our nets gain accuracy."
@@ -543,9 +545,9 @@ class DegreeSignIsNotABulletTests(unittest.TestCase):
 
     def test_degree_and_composition_signs(self):
         t = "measured to an accuracy of approximately 1 ◦ and the efficiencies to 1 %"
-        self.assertEqual(len(self.whole(t)), 1)  # Planck p4
+        self.assertEqual(len(self.whole(t)), 1)
         t = "formulating F Θ as a composition F Θ = F ′ Θ ◦ γ , one learned"
-        self.assertEqual(len(self.whole(t)), 1)  # NeRF p6
+        self.assertEqual(len(self.whole(t)), 1)
 
     def test_bullets_after_a_clause_still_split(self):
         self.assertEqual(len(self.whole("Two parts: ◦ First item. ◦ Second item.")), 3)
@@ -556,8 +558,8 @@ class DegreeSignIsNotABulletTests(unittest.TestCase):
 
 class CaptionAwareStitchTests(unittest.TestCase):
     def test_caption_and_mid_paragraph_fragments_are_skipped(self):
-        # NeRF p17: a caption piece and a mid-paragraph lowercase fragment precede the
-        # continuation, which opens its own paragraph
+        # a caption piece and a mid-paragraph lowercase fragment precede the continuation,
+        # which opens its own paragraph
         nxt = {
             "sentences": [
                 {
@@ -595,9 +597,9 @@ class CaptionAwareStitchTests(unittest.TestCase):
 class NonAsciiLowercaseContinuationTests(unittest.TestCase):
     def test_greek_and_ligature_starts_rejoin_an_unfinished_fragment(self):
         t = "moderate tensions at about the 2 . 5 σ level."
-        self.assertEqual(n_at(t, "σ level"), 1)  # Planck p2
+        self.assertEqual(n_at(t, "σ level"), 1)
         t = "a complete solution to the Ricci ﬂow whenever the curvatures stay bounded."
-        self.assertEqual(n_at(t, "ﬂow"), 1)  # Perelman p1
+        self.assertEqual(n_at(t, "ﬂow"), 1)
 
     def test_not_across_a_finished_sentence(self):
         t = "The noise is small. σ is the noise level."
@@ -990,10 +992,10 @@ class LineItemSplitTests(unittest.TestCase):
 class EndToEndNoSharedWordTests(unittest.TestCase):
     """With the real segmenter: no boundary inside a word, citation list kept whole."""
 
-    def test_diffusion_policy_citation_list(self):
+    def test_an_author_year_citation_list(self):
         t = (
-            "The noise schedule has been actively studied Ho et al. ( 2020 ); Nichol and "
-            "Dhariwal ( 2021 ). The next sentence starts here."
+            "The noise schedule has been actively studied Lee et al. ( 2020 ); Park and "
+            "Kimura ( 2021 ). The next sentence starts here."
         )
         segs = pu._split_sentences(t)
         for s, _e, _st in segs:

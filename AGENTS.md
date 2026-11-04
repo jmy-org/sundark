@@ -216,11 +216,11 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   and `layout()` removes them, so they are not translated. The threshold is a
   third of the sampled pages, because headers often alternate between even/odd
   pages — do not raise it back to a half. Lines match by their letters only
-  (`_norm_header`): the page number moves ("1:2 • Kerbl et al." vs "1:4" and "• Kerbl et
-  al." as two lines). A repeated line goes in the top 12% / bottom 10% of the page (where
+  (`_norm_header`): the page number moves ("1:2 • Lee et al." vs "1:4" and "• Lee et al."
+  as two lines). A repeated line goes in the top 12% / bottom 10% of the page (where
   it is also counted) or inside a model `furniture` box. Not by height alone: the
   model's furniture ("abandon") class also holds footnotes and now and then a heading it
-  mistook ("D. Combining Lhybrid and Lvlb Models"), so a furniture box drops only
+  mistook ("D. Combining the Two Training Losses"), so a furniture box drops only
   repeated lines, bare page numbers ("12", "1:4", "xii", a lone symbol) and text set
   sideways (the arXiv stamp along the first page's edge). A line under both a furniture
   box and a text box: a title or caption box wins, and a body box wins only when it is at
@@ -230,11 +230,11 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   of a furniture box) and captions are *asides*: their paragraphs are built apart and
   placed at the end of the page, captions first, flagged `aside`. A caption is a model
   `figure_caption`/`table_caption` box, taken as its whole PDF block (a box over the first
-  line only split 2506.09985's captions), or a caption rescued from a table box (below); an
+  line only split one paper's captions), or a caption rescued from a table box (below); an
   equation number such as "(5.7)" is a model caption too (`formula_caption`) and stays in
   place, or lead-ins lose it and adjacent equations merge. In reading order an aside sits
   between the halves of a sentence that runs from the foot of one column to the top of the
-  next: a footnote split it (1512.03385 p2), and a caption label stuck to it ("... the
+  next: a footnote split it, and a caption label stuck to it ("... the
   galaxy auto- Fig. 20."); placing them after the text made 75 sentences whole over 31
   papers. Captions never join footnotes, and a line opening with a caption label starts a
   new caption. Asides also hid the page's real last sentence from cross-page stitching, so
@@ -259,16 +259,16 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   model `caption` box are skipped and do not count toward the scan limit. A tail
   ending in a hyphenated word ("fea-" | "tures") is rejoined, and a tail left open on
   ")" or an acronym is stitched when the next page's first prose sentence starts with
-  an author-year citation ("...(FiLM)" | "Perez et al. (2018) as well as ...").
-  Known limit: when the real continuation starts uppercase ("the 34-layer" | "ResNet
+  an author-year citation ("...(FiGS)" | "Lee et al. (2018) as well as ...").
+  Known limit: when the real continuation starts uppercase ("the 34-layer" | "Network
   reduces ..."), the rule can pick a later lowercase paragraph instead.
   `_page_layout()` is the per-page core; `layout()` is the stitching wrapper that also
   peeks at the neighbours.
 - **Over-split sentences are rejoined; list items are split.** spaCy breaks sentences
   mid-way: at an inline math operator ("...z" | "= (z_1, ..., z_n)"), a citation
-  ("...(CNNs)" | "Ronneberger et al. (2015) ...", "VGG nets" | "[41] but"), a capital
+  ("...(CNNs)" | "Kim et al. (2015) ...", "earlier nets" | "[41] but"), a capital
   math symbol ("... σ 2" | "I is ..."), a parenthesis, closing punctuation
-  (", Hamilton proved"), a line-broken compound ("LIBERO-" | "Long"), a spaced
+  (", Lee proved"), a line-broken compound ("BENCH-" | "Long"), a spaced
   abbreviation ("et al ."), or inside a PDF word ("( 2020 );", which then belonged to
   two sentences and was highlighted with both), or right after a standalone math operator
   ("w_i / ∑" | "Nc j =1 ..."). `_mend_word_splits` and
@@ -370,18 +370,18 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   inside it. Acknowledgements, funding and the like are translated.
   - It starts at a References heading (`_REF_RE`): the WHOLE line, capitalized, so a
     line of prose that starts with the word does not ("reference of 17,135 actions."
-    cost 2610.02200 ten pages; a figure label "reference" cost 2610.10489 its Methods),
+    cost one paper ten pages; a figure label "reference" cost another its Methods),
     and only if a reference list follows (`_BIB_RE`: a tenth of the lines or more carry
     a year, "[12]", arXiv/doi/a URL, "et al", "Proceedings", "pp. 12"; every reference
     page of 31 papers has a quarter or more).
   - It ends at the first appendix/supplementary heading after it, which must stand out
-    from the list: its median size + 1pt (11pt always does; 3DGS sets "A" at 10pt over
+    from the list: its median size + 1pt (11pt always does; one paper sets "A" at 10pt over
     7pt references). It also ends at the top of the first page that is not a reference
-    list, whatever that page's headings (the Transformer paper's "Attention
-    Visualizations"), so a missed appendix heading costs at most the rest of one page.
+    list, whatever that page's headings (one paper's figure appendix, titled
+    with no letter), so a missed appendix heading costs at most the rest of one page.
   - The ends compare in READING order (`_before`): on a two-column page the whole left
     column is read before the right one, so a right-column heading does not drop the
-    left column's foot (Diffusion Policy lost "Limitations and Future Work" that way),
+    left column's foot (a paper lost its "Limitations and Future Work" that way),
     and a word takes its LINE's column, so a caption across both columns stays whole.
     Both ends allow 2pt: an appendix title split into lines ("A" + "Implementation
     Details") is kept whole.
@@ -508,7 +508,7 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
 - **An appendix cover's copy of the front matter is dropped.** Page 0 drops everything
   above the Abstract (title, authors, affiliations; `_front_cut`). An appendix or
   supplement often opens on a cover that repeats those lines, and the model may type its
-  author line as a title (2007.06559: four author "headings"). On a later page, a
+  author line as a title (one paper: four author "headings"). On a later page, a
   paragraph made only of lines that repeat page 0's front matter is dropped
   (`_front_matter`, compared by letters only, since the copies differ in spacing,
   affiliation digits and quotes). A cover title that adds words ("Appendix for ...")

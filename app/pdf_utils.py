@@ -48,8 +48,8 @@ def title_of(pdf_bytes: bytes) -> str:
 def _title_from_fonts(page) -> str:
     """Extract the title as the largest-font text line(s) in the top of page 1.
 
-    This gives properly spaced text (e.g. 'Diffusion Policy: Visuomotor Policy
-    Learning via Action Diffusion') instead of the space-stripped metadata title.
+    This gives properly spaced text (e.g. 'A Model for Learning from Data: Policies
+    via Action Sampling') instead of the space-stripped metadata title.
     A line's size is the size most of its characters are set in: a math symbol set larger
     than the rest of its line, taken as the line's size, left out the title's next line.
     Lines on one row are read left to right (a small-caps title comes word by word, a short
@@ -173,7 +173,7 @@ _BULLET_CHARS = "•◦▪▫●○‣⁃∙"
 
 # Enumeration item markers ("a)", "(a)", "(A)", "1)", "(1)", "(i)", "(ii)"...). A sentence
 # segmenter only splits a list when its items end in terminal punctuation, so a comma/"and"-joined
-# list ("(1) x, (2) y, and (3) z") stays glued and a markerless item ("...landscape c) Diffusion")
+# list ("(1) x, (2) y, and (3) z") stays glued and a markerless item ("...landscape c) Our")
 # never breaks. We split such runs ourselves, conservatively (see _split_on_markers).
 _ROMAN = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
 _ENUM_RE = re.compile(r"(\()?([A-Za-z]{1,4}|\d{1,2})\)")
@@ -395,7 +395,7 @@ def _split_on_bullets(raw: list[tuple[int, int]], text: str) -> list[tuple[int, 
 
 def _mend_word_splits(raw: list[tuple[int, int]], text: str) -> list[tuple[int, int]]:
     """Undo a boundary the segmenter put INSIDE a PDF word. spaCy splits punctuation off, so it
-    can end a sentence inside a word like ');' in 'Ho et al. ( 2020 ); Nichol and ...' or '5:'
+    can end a sentence inside a word like ');' in 'Lee et al. ( 2020 ); Park and ...' or '5:'
     in 'Table 5: Per-scene ...': the word then maps to BOTH sentences (highlighted twice) and
     the next fragment opens with ';' or ':'. Such a boundary is not a sentence end, so the two
     fragments are merged - unless the rest of the word is sentence-final punctuation ('065).'),
@@ -473,7 +473,7 @@ def _starts_math_cont(text: str, span: tuple[int, int]) -> bool:
     return frag[:1] in _MATH_CONT_START and not _LIST_LABEL.match(frag)
 
 
-# An inline author-year citation ("Ronneberger et al. (2015)", "Perez et al. (2018)",
+# An inline author-year citation ("Kim et al. (2015)", "Lee et al. (2018)",
 # "Smith and Jones (2020)", "Müller (2014)") confuses the segmenter, which starts a new sentence
 # at the author name. Following an unfinished fragment, it is a continuation and is merged back.
 # A name followed by a parenthesized 19xx/20xx year is what makes this specific; a capitalized
@@ -545,7 +545,7 @@ def _starts_paren(text: str, span: tuple[int, int]) -> bool:
     return frag[:1] == "(" and not (m and _is_enum_label(m.group(2)))
 
 
-# Closing or connective punctuation never opens a sentence: '; Nichol ...', ', Hamilton
+# Closing or connective punctuation never opens a sentence: '; Park ...', ', Lee
 # proved', ': Per-scene results', '| 2 ) dm', '’s predicted', ') 3 He'.
 _CLOSE_START = frozenset(",;:.)]}%|’′″")
 
@@ -586,7 +586,7 @@ def _merge_fragments(
     the sentence they belong to. An over-split continuation is a fragment that starts lowercase
     (spaced inline math), or - while the running text is not yet a complete sentence - one that
     starts with a binary math operator ("...z" + "= (z_1, ..., z_n).") or an inline author-year
-    citation ("...(FiLM)" + "Perez et al. (2018) ..."). A fragment that starts at a `hard`
+    citation ("...(FiGS)" + "Lee et al. (2018) ..."). A fragment that starts at a `hard`
     offset (a list item or an algorithm step, see _item_starts) is never merged into the one
     before it, and a lone mark or bracket left right before one ends the sentence before it.
     A fragment that starts inside a `whole` span (an algorithm step's own row) is merged."""
@@ -622,13 +622,13 @@ def _merge_fragments(
                 # the NEXT fragment starts lowercase -> it continues this sentence
                 or _starts_lower_frag(text, raw[i + 1])
                 # this fragment ends inside a hyphenated compound split by a line break
-                # ("LIBERO-" + "Long", "GPT-" + "5.6 Sol", "base-" + "Λ CDM")
+                # ("BENCH-" + "Long", "top-" + "5 error", "base-" + "Λ CDM")
                 or re.search(r"[^\W_]-$", t)
                 # ... or inside a spaced ellipsis the list goes on after ("{ x 1 , . ." +
                 # ". , x n }")
                 or _continues_ellipsis(t, text, raw[i + 1])
-                # a sentence never ends on ',' or ';' ("( Holz & Hughes 2005 ;" + "Abbott et
-                # al. 2017", "In his seminal paper ," + "Hamilton proved") or on a standalone
+                # a sentence never ends on ',' or ';' ("( Lee & Park 2005 ;" + "Kim et
+                # al. 2017", "In his seminal paper ," + "Lee proved") or on a standalone
                 # math operator (_MATH_OPEN_END) - but an enumeration item or bullet after it
                 # stays split
                 or (
@@ -638,7 +638,7 @@ def _merge_fragments(
                     not in _BULLET_CHARS
                 )
                 # the NEXT fragment starts with a math operator ("= 64", "− 1") or an inline
-                # citation ("Perez et al. (2018)") while this one is not a finished sentence ->
+                # citation ("Lee et al. (2018)") while this one is not a finished sentence ->
                 # the segmenter broke mid-sentence
                 or (
                     not _ends_sentence(t)
@@ -1179,8 +1179,8 @@ def _words_with_style(page) -> list[dict]:
 
 def _norm_header(text: str) -> str:
     """Normalize a line for running-header matching: its letters only (`_letters`). The page
-    number varies, and so does how it is attached: "1:2 • Kerbl et al." on one page, "1:4" and
-    "• Kerbl et al." as two lines on another."""
+    number varies, and so does how it is attached: "1:2 • Lee et al." on one page, "1:4" and
+    "• Lee et al." as two lines on another."""
     return _letters(text)
 
 
@@ -1191,8 +1191,8 @@ def _letters(text: str) -> str:
 
 
 # The Abstract heading: "Abstract", "ABSTRACT", "Abstract.", "Abstract:", or run in
-# ("Abstract—We ..."). Not "abstracting" in the introduction: 2411.14499 has no Abstract
-# heading, and cutting there dropped its abstract and the start of its introduction.
+# ("Abstract—We ..."). Not "abstracting" in the introduction: in a paper with no Abstract
+# heading, cutting there dropped its abstract and the start of its introduction.
 _ABSTRACT_RE = re.compile(r"(?:Abstract|ABSTRACT)(?:[.:—–-].*)?")
 
 # An e-mail domain ("x@mit.edu", "{a, b} @mit.edu"); not "mAP@0.5" or "Recall@1".
@@ -1721,7 +1721,7 @@ def running_headers(pdf_bytes: bytes) -> set[str]:
                         line.get("bbox", (0, 0, 0, 0))[1],
                         line.get("bbox", (0, 0, 0, 0))[3],
                     )
-                    # the bands layout() drops a running head in (3DGS's footer ends at 90.3%)
+                    # the bands layout() drops a running head in (one footer ends at 90.3%)
                     if y0 < h * 0.12:
                         top[norm] = top.get(norm, 0) + 1
                     elif y1 > h * 0.90:
@@ -1739,8 +1739,8 @@ def running_headers(pdf_bytes: bytes) -> set[str]:
 # The references heading, alone on its line: "References", "REFERENCES", "7 References",
 # "References and Notes", "Bibliography". Matched at any readable size. Acknowledgements,
 # funding and the like are translated. A line of prose that starts with the word is not the
-# heading: "reference of 17,135 actions." cost 2610.02200 ten pages of results, and a figure
-# label "reference" cost 2610.10489 its Methods.
+# heading: "reference of 17,135 actions." cost one paper ten pages of results, and a figure
+# label "reference" cost another its Methods.
 _REF_RE = re.compile(
     r"(?:\d+\.?\s+|[IVX]+\.\s+)?"
     r"(?:R ?(?i:eferences?(?:\s+and\s+notes)?)|B(?i:ibliography))\s*[.:]?"
@@ -1757,7 +1757,7 @@ _BIB_RE = re.compile(
 # The words in any case ("APPENDIX A", "Supplementary Material"); the letter forms stay
 # uppercase, so a lowercase line ("a note on ...") is not taken for a section letter.
 _APPENDIX_RE = re.compile(r"^((?i:appendix|supplementary)\b|[A-Z]\.?\s+[A-Z]|[A-Z]$)")
-# A page number ("12", "1:4" in ACM's "1:4 • Kerbl et al.", "xii") or a line without a letter
+# A page number ("12", "1:4" in ACM's "1:4 • Lee et al.", "xii") or a line without a letter
 # or digit ("•", "□").
 _PAGE_NUMBER = re.compile(r"\W*|\d+(?:[:.–-]\d+)*|[ivxlcdm]+|[IVXLCDM]+")
 # A figure/table caption's label: "Table 5.", "TABLE V:", "Figure 3:", "Fig. 2", "F IG . 1:".
@@ -1880,8 +1880,8 @@ def end_matter_range(
             return None
 
         # Resume point: the first appendix/supplementary heading after the references. It
-        # stands out from the reference list (its median size + 1pt; 11pt always does): 3DGS
-        # and 2411.14499 set the letter "A" at 10pt over 7-8pt references.
+        # stands out from the reference list (its median size + 1pt; 11pt always does): two
+        # papers set the letter "A" at 10pt over 7-8pt references.
         sizes = [
             sz
             for t, sz, y, x in headings(start[0])
@@ -1904,8 +1904,8 @@ def end_matter_range(
                 end = first(pno, found)
                 break
         # A whole page that is not a reference list ends the range at its top, whatever its
-        # headings: the Transformer paper's attention visualizations (an appendix titled
-        # "Attention Visualizations") were skipped to the end of the document.
+        # headings: one paper's figure appendix (titled with no letter) was skipped to the end
+        # of the document.
         for pno in range(start[0] + 1, end[0] if end else n):
             lines = text_lines(pno)
             if lines and not bibliographic(lines):
@@ -2002,7 +2002,7 @@ def _continuation_idx(page: dict, max_scan: int = 16) -> int | None:
 def _tail_open(page: dict) -> bool:
     """True when a page's last sentence is prose that does not end a sentence at all (no .!? and
     no closing colon). Wider than _tail_unfinished: it also admits a tail closing on ')' or an
-    uppercase acronym ("...Modulation (FiLM)"), which may only be stitched to a citation."""
+    uppercase acronym ("...Scaling (FiGS)"), which may only be stitched to a citation."""
     j = _tail_idx(page)
     if j is None:
         return False
@@ -2017,7 +2017,7 @@ def _stitch_idx(prev: dict, nxt: dict) -> int | None:
     """Index of the sentence on `nxt` that continues the last sentence of `prev`, or None. Used by
     BOTH the forward and the backward pass, so the two pages always agree. Besides the lowercase
     continuation (_tail_unfinished + _continuation_idx), a sentence the page break cut right before
-    an inline author-year citation ("...Modulation (FiLM)" | "Perez et al. (2018) as well as ...")
+    an inline author-year citation ("...Scaling (FiGS)" | "Lee et al. (2018) as well as ...")
     is joined: the next page's FIRST prose sentence (no float caption skipped) must start with
     such a citation, which a new sentence practically never does after an open tail."""
     if _tail_unfinished(prev):
@@ -2308,7 +2308,7 @@ def _page_layout(
 
         raw = [w for w in styled if not _drop(w)]
         # On page 1, drop everything above the Abstract (title, authors, affiliations), except a
-        # figure caption: a teaser figure above the Abstract (SAM) has a caption to translate.
+        # figure caption: a teaser figure above the Abstract has a caption to translate.
         # A paper that starts on the next page (`_first_page`) has its front matter there.
         first = page_index < 2 and page_index in (0, _first_page(pdf_bytes))
         front_marks: set[str] = set()
@@ -2620,9 +2620,10 @@ def _page_layout(
                     last_title = None
                     continue
                 if ln["heading"]:
-                    # A wrapped title ("5 OPTIMIZATION WITH ADAPTIVE DENSITY" + "CONTROL OF 3D
-                    # GAUSSIANS") is one heading: its lines share a title box. A section and its
-                    # first subsection right below it have a box each.
+                    # A wrapped title ("5 OPTIMIZATION WITH ADAPTIVE LEARNING" + "RATE
+                    # CONTROL FOR SPARSE MODELS") is one heading: its lines share a title
+                    # box. A section and its first subsection right below it have a box
+                    # each.
                     if ln["title"] is not None and ln["title"] == last_title:
                         paras[-1]["widx"].extend(ln["widx"])
                         continue

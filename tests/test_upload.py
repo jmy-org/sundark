@@ -21,9 +21,9 @@ class SaveToLibraryTests(unittest.TestCase):
         return sorted(f.name for f in self.papers.iterdir())
 
     def test_saves_with_original_name(self):
-        main._save_to_library("Attention.pdf", b"DATA")
-        self.assertEqual(self._names(), ["Attention.pdf"])
-        self.assertEqual((self.papers / "Attention.pdf").read_bytes(), b"DATA")
+        main._save_to_library("Learning.pdf", b"DATA")
+        self.assertEqual(self._names(), ["Learning.pdf"])
+        self.assertEqual((self.papers / "Learning.pdf").read_bytes(), b"DATA")
 
     def test_strips_path_components(self):
         main._save_to_library("../../etc/evil.pdf", b"DATA")

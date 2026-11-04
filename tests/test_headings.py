@@ -1,9 +1,9 @@
 """A heading is one model title box, and an appendix cover's copy of the front matter is dropped.
 
-A title wrapped over two lines came out as two headings ("5 OPTIMIZATION WITH ADAPTIVE DENSITY" |
-"CONTROL OF 3D GAUSSIANS"), and the sentence splitter cut "A.1. Pre-training" after "A.1.". The
-appendix of 2007.06559 opens on a cover that repeats the paper's title and author line; the model
-typed the author line as a title, so the authors became four headings."""
+A title wrapped over two lines came out as two headings ("5 OPTIMIZATION WITH ADAPTIVE LEARNING" |
+"RATE CONTROL FOR SPARSE MODELS"), and the sentence splitter cut "A.1. Pre-training" after
+"A.1.". One paper's appendix opens on a cover that repeats the paper's title and author line; the
+model typed the author line as a title, so the authors became four headings."""
 
 import unittest
 from unittest.mock import patch
@@ -37,8 +37,8 @@ class TitleBoxTests(unittest.TestCase):
         doc = pymupdf.open()
         doc.new_page(width=595, height=842)
         p = doc.new_page(width=595, height=842)
-        p.insert_text((50, 100), "5 Optimization with Adaptive Density", fontsize=12)
-        p.insert_text((50, 116), "Control of 3D Gaussians", fontsize=12)
+        p.insert_text((50, 100), "5 Optimization with Adaptive Learning", fontsize=12)
+        p.insert_text((50, 116), "Rate Control for Sparse Models", fontsize=12)
         p.insert_text((50, 150), TEXT, fontsize=10)
         p.insert_text((50, 200), "6 Experiments", fontsize=12)
         p.insert_text((50, 220), "6.1 Setup", fontsize=11)
@@ -54,7 +54,7 @@ class TitleBoxTests(unittest.TestCase):
         self.assertEqual(
             _headings(sentences),
             [
-                "5 Optimization with Adaptive Density Control of 3D Gaussians",
+                "5 Optimization with Adaptive Learning Rate Control for Sparse Models",
                 "6 Experiments",  # a section and its first subsection: a box each
                 "6.1 Setup",
                 "A.1. Pre-training",  # not cut after "A.1."
@@ -67,21 +67,19 @@ class AppendixCoverTests(unittest.TestCase):
     def setUp(self):
         doc = pymupdf.open()
         p = doc.new_page(width=595, height=842)
-        p.insert_text((150, 80), "Graph Structure of Neural Networks", fontsize=14)
-        p.insert_text((150, 110), "Jiaxuan You 1 Jure Leskovec 1", fontsize=10)
+        p.insert_text((150, 80), "Graph Shapes of Toy Networks", fontsize=14)
+        p.insert_text((150, 110), "Ann Lee 1 Bo Park 1", fontsize=10)
         p.insert_text((50, 150), "Abstract", fontsize=12)
         p.insert_text((50, 170), TEXT, fontsize=10)
         p = doc.new_page(width=595, height=842)
         p.insert_text((50, 100), TEXT, fontsize=10)
         p = doc.new_page(width=595, height=842)  # the appendix cover
         p.insert_text((200, 80), "Appendix for", fontsize=14)
-        p.insert_text((150, 98), '"Graph Structure of Neural Networks"', fontsize=14)
-        p.insert_text((150, 130), "Jiaxuan You 1 Jure Leskovec 1", fontsize=10)
+        p.insert_text((150, 98), '"Graph Shapes of Toy Networks"', fontsize=14)
+        p.insert_text((150, 130), "Ann Lee 1 Bo Park 1", fontsize=10)
         p.insert_text((50, 170), "1. Details for Generating Graphs", fontsize=12)
-        p.insert_text(
-            (50, 190), "Here we give details on how Jure Leskovec", fontsize=10
-        )
-        p.insert_text((50, 202), "and Jiaxuan You generate the graphs.", fontsize=10)
+        p.insert_text((50, 190), "Here we give details on how Bo Park", fontsize=10)
+        p.insert_text((50, 202), "and Ann Lee generate the graphs.", fontsize=10)
         self.data = doc.tobytes()
         doc.close()
         self.cover = {2: [title(65, 103), title(120, 134), title(158, 174)]}
@@ -91,26 +89,26 @@ class AppendixCoverTests(unittest.TestCase):
         self.assertEqual(
             _headings(sentences),
             [
-                'Appendix for "Graph Structure of Neural Networks"',
+                'Appendix for "Graph Shapes of Toy Networks"',
                 "1. Details for Generating Graphs",
             ],
         )
         text = " ".join(s["text"] for s in sentences)
-        self.assertNotIn("Jiaxuan You 1", text)
+        self.assertNotIn("Ann Lee 1", text)
         # a sentence that names the authors is not a copy of the author line
-        self.assertIn("how Jure Leskovec and Jiaxuan You generate the graphs.", text)
+        self.assertIn("how Bo Park and Ann Lee generate the graphs.", text)
 
     def test_page_zero_still_drops_its_front_matter_by_position(self):
         text = " ".join(s["text"] for s in _layout(self.data, 0, {}))
-        self.assertNotIn("Graph Structure", text)
-        self.assertNotIn("Jiaxuan", text)
+        self.assertNotIn("Graph Shapes", text)
+        self.assertNotIn("Ann Lee", text)
         self.assertIn(TEXT, text)
 
     def test_front_matter_is_the_lines_above_the_abstract(self):
         doc = pymupdf.open(stream=self.data, filetype="pdf")
         self.assertEqual(
             pdf_utils._front_matter(doc[0]),
-            {"graphstructureofneuralnetworks", "jiaxuanyoujureleskovec"},
+            {"graphshapesoftoynetworks", "annleebopark"},
         )
         doc.close()
 
@@ -319,10 +317,10 @@ class FirstPageTests(unittest.TestCase):
         self.assertIn("to get the full data set we use here.", text)
 
     def test_a_caption_above_the_abstract_is_kept(self):
-        # SAM: a teaser figure and its caption sit above the Abstract
+        # a teaser figure and its caption sit above the Abstract
         doc = pymupdf.open()
         p = doc.new_page(width=595, height=842)
-        p.insert_text((150, 80), "Segment Anything", fontsize=14)
+        p.insert_text((150, 80), "A Toy Segmenter", fontsize=14)
         p.insert_text(
             (50, 300), "Figure 1: We build a model for segmentation.", fontsize=9
         )
@@ -333,7 +331,7 @@ class FirstPageTests(unittest.TestCase):
         cap = {"role": "caption", "x0": 45, "y0": 290, "x1": 550, "y1": 305}
         text = " ".join(s["text"] for s in _layout(data, 0, {0: [cap]}))
         self.assertIn("We build a model for segmentation.", text)
-        self.assertNotIn("Segment Anything", text)
+        self.assertNotIn("A Toy Segmenter", text)
         self.assertIn(TEXT, text)
 
     def test_a_footnote_with_an_e_mail_address_is_front_matter(self):

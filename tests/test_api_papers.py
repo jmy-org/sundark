@@ -10,16 +10,14 @@ from fastapi.testclient import TestClient
 from app import main, settings, store
 from tests.pdfgen import make_pdf
 
-TITLE = (
-    "Two-Dimensional Melting From Liquid-Hexatic Coexistence to Continuous Transitions"
-)
+TITLE = "A Simple Model of Hard Disks From Dense Packing to Free Flow"
 RECORD = {
     "title": TITLE,
-    "authors": ["S. Kapfer", "W. Krauth"],
+    "authors": ["A. Lee", "B. Li"],
     "year": 2015,
     "source": "crossref",
 }
-PAGE = f"PHYSICAL REVIEW LETTERS\n{TITLE}\nS. Kapfer and W. Krauth\nDOI: 10.1103/PhysRevLett.114.035702"
+PAGE = f"PHYSICAL REVIEW LETTERS\n{TITLE}\nA. Lee and B. Li\nDOI: 10.0000/Example.Letter.00001"
 
 
 class PaperApiTests(unittest.TestCase):
@@ -61,23 +59,23 @@ class PaperApiTests(unittest.TestCase):
     def test_doi_paper_gets_record_title_and_byline(self):
         with patch("app.main.biblio.lookup", new=AsyncMock(return_value=RECORD)):
             meta = self.upload(make_pdf([PAGE]))
-        self.assertEqual(meta["paper_id"], "doi:10.1103/physrevlett.114.035702")
+        self.assertEqual(meta["paper_id"], "doi:10.0000/example.letter.00001")
         self.assertEqual(meta["title"], TITLE)
-        self.assertEqual(meta["byline"], "S. Kapfer, W. Krauth (2015)")
+        self.assertEqual(meta["byline"], "A. Lee, B. Li (2015)")
 
     def test_doi_from_a_citation_is_rejected(self):
-        other = {**RECORD, "title": "Deep residual learning for image recognition"}
+        other = {**RECORD, "title": "Fast sorting of images with small models"}
         with patch("app.main.biblio.lookup", new=AsyncMock(return_value=other)):
             meta = self.upload(make_pdf([PAGE]))
         self.assertEqual(meta["paper_id"], f"file:{meta['doc_id']}")
-        self.assertIsNone(store.paper_get("doi:10.1103/physrevlett.114.035702"))
+        self.assertIsNone(store.paper_get("doi:10.0000/example.letter.00001"))
         self.assertEqual(meta["byline"], "")
 
     def test_offline_open_uses_pdf_title_then_fills_record_later(self):
         pdf = make_pdf([PAGE])
         with patch("app.main.biblio.lookup", new=AsyncMock(return_value=None)):
             first = self.upload(pdf)
-        self.assertEqual(first["paper_id"], "doi:10.1103/physrevlett.114.035702")
+        self.assertEqual(first["paper_id"], "doi:10.0000/example.letter.00001")
         self.assertEqual(first["byline"], "")
         with patch(
             "app.main.biblio.lookup", new=AsyncMock(return_value=RECORD)
@@ -134,7 +132,7 @@ class PaperApiTests(unittest.TestCase):
     def test_cached_record_of_a_cited_doi_is_not_inherited(self):
         with patch("app.main.biblio.lookup", new=AsyncMock(return_value=RECORD)):
             self.upload(make_pdf([PAGE]))  # paper P: its record is now cached
-        citing = "A Different Preprint About Hard Disks\nWe build on [1].\n[1] DOI: 10.1103/PhysRevLett.114.035702"
+        citing = "A Different Preprint About Hard Disks\nWe build on [1].\n[1] DOI: 10.0000/Example.Letter.00001"
         with patch("app.main.biblio.lookup", new=AsyncMock(return_value=RECORD)):
             q = self.upload(make_pdf([citing]))
         self.assertEqual(q["paper_id"], f"file:{q['doc_id']}")
@@ -142,7 +140,7 @@ class PaperApiTests(unittest.TestCase):
         self.assertEqual(q["byline"], "")
 
     def test_rejected_doi_falls_back_to_the_arxiv_id(self):
-        page = "arXiv:2506.09762v2 [stat.CO]\nOur Own Preprint Title\n[1] DOI: 10.1103/PhysRevLett.114.035702"
+        page = "arXiv:0000.00001v2 [cs.LG]\nOur Own Preprint Title\n[1] DOI: 10.0000/Example.Letter.00001"
 
         async def lookup(pid):
             return (
@@ -158,7 +156,7 @@ class PaperApiTests(unittest.TestCase):
 
         with patch("app.main.biblio.lookup", new=lookup):
             meta = self.upload(make_pdf([page]))
-        self.assertEqual(meta["paper_id"], "arxiv:2506.09762")
+        self.assertEqual(meta["paper_id"], "arxiv:0000.00001")
 
     def test_chat_read_before_identification_follows_the_paper(self):
         pdf = make_pdf([PAGE])
@@ -175,7 +173,7 @@ class PaperApiTests(unittest.TestCase):
         self.client.get(f"/api/chat/{meta['doc_id']}")  # an old open tab asks first
         with patch("app.main.biblio.lookup", new=AsyncMock(return_value=RECORD)):
             again = self.upload(pdf)
-        self.assertEqual(again["paper_id"], "doi:10.1103/physrevlett.114.035702")
+        self.assertEqual(again["paper_id"], "doi:10.0000/example.letter.00001")
         turns = self.client.get(f"/api/chat/{meta['doc_id']}").json()["turns"]
         self.assertEqual(turns, [{"role": "user", "text": "legacy"}])
 
@@ -183,7 +181,7 @@ class PaperApiTests(unittest.TestCase):
         with patch("app.main.biblio.lookup", new=AsyncMock(return_value=RECORD)):
             self.upload(make_pdf([PAGE]))
         citing = make_pdf(
-            ["Citing Paper Own Title\n[1] DOI: 10.1103/PhysRevLett.114.035702"]
+            ["Citing Paper Own Title\n[1] DOI: 10.0000/Example.Letter.00001"]
         )
         lib = self.root / "lib"
         lib.mkdir()
