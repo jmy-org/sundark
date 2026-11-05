@@ -17,9 +17,10 @@ DOC = {"pages": ["PAPER TEXT"], "meta": {"num_pages": 2, "title": "Fallback Titl
 class ReviewHelperTests(unittest.TestCase):
     def test_slug_kebab_and_fallback(self):
         self.assertEqual(
-            main._slug("Attention Is All You Need", "d1"), "attention-is-all-you-need"
+            main._slug("A Model for Learning from Data", "d1"),
+            "a-model-for-learning-from-data",
         )
-        self.assertEqual(main._slug("ReAlign: v2.0!", "d1"), "realign-v2-0")
+        self.assertEqual(main._slug("ToyRank: v2.0!", "d1"), "toyrank-v2-0")
         self.assertEqual(
             main._slug("한글만", "deadbeef"), "deadbeef"
         )  # no ASCII -> fallback
@@ -41,8 +42,8 @@ class ReviewHelperTests(unittest.TestCase):
 
     def test_frontmatter_shape(self):
         rv = {
-            "title": "ReAlign",
-            "paper_title": "ReAlign: Reranking for RAG",
+            "title": "ToyRank",
+            "paper_title": "ToyRank: Reranking for Search",
             "authors": ["A", "B"],
             "venue": "NeurIPS",
             "year": 2017,
@@ -51,7 +52,7 @@ class ReviewHelperTests(unittest.TestCase):
         }
         fm = main._frontmatter(rv, date="2026-10-12T09:00:00+09:00", has_math=True)
         self.assertTrue(fm.startswith("---\n"))
-        self.assertIn('title: "ReAlign"', fm)
+        self.assertIn('title: "ToyRank"', fm)
         self.assertIn("date: 2026-10-12T09:00:00+09:00", fm)  # unquoted
         self.assertIn("draft: true", fm)
         self.assertIn('authors: ["A", "B"]', fm)
@@ -124,8 +125,8 @@ class ReviewEndpointTests(unittest.TestCase):
             "app.main.ai.review",
             new=AsyncMock(
                 return_value={
-                    "title": "ReAlign Test",
-                    "paper_title": "ReAlign",
+                    "title": "ToyRank Test",
+                    "paper_title": "ToyRank",
                     "authors": [],
                     "venue": "",
                     "year": None,
@@ -144,25 +145,25 @@ class ReviewEndpointTests(unittest.TestCase):
         res = self._run(body)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.headers["content-type"], "application/zip")
-        self.assertIn('filename="realign-test.zip"', res.headers["content-disposition"])
+        self.assertIn('filename="toyrank-test.zip"', res.headers["content-disposition"])
 
         zf = zipfile.ZipFile(io.BytesIO(res.content))
         self.assertEqual(
             set(zf.namelist()),
-            {"realign-test/index.md", "realign-test/fig-p1-1.png"},
+            {"toyrank-test/index.md", "toyrank-test/fig-p1-1.png"},
         )
-        md = zf.read("realign-test/index.md").decode("utf-8")
+        md = zf.read("toyrank-test/index.md").decode("utf-8")
         self.assertIn("![구조](fig-p1-1.png)", md)  # kept
         self.assertNotIn("fig-p9-9", md)  # unknown id stripped so no broken image
-        self.assertIn('title: "ReAlign Test"', md)
+        self.assertIn('title: "ToyRank Test"', md)
         self.assertIn("math: true", md)
-        self.assertEqual(zf.read("realign-test/fig-p1-1.png"), b"PNGDATA")
+        self.assertEqual(zf.read("toyrank-test/fig-p1-1.png"), b"PNGDATA")
 
     def test_no_images_when_body_references_none(self):
         res = self._run("## 세 줄 요약\n> 한 줄.\n")
         self.assertEqual(res.status_code, 200)
         zf = zipfile.ZipFile(io.BytesIO(res.content))
-        self.assertEqual(zf.namelist(), ["realign-test/index.md"])
+        self.assertEqual(zf.namelist(), ["toyrank-test/index.md"])
 
     def _review_kwargs(self):
         rv = AsyncMock(return_value={"title": "T", "body": "본문"})
@@ -197,7 +198,7 @@ class ReviewEndpointTests(unittest.TestCase):
                 ("수식 없음, 가격은 $5.", "false"),
             ):
                 md = zipfile.ZipFile(io.BytesIO(self._run(body).content)).read(
-                    "realign-test/index.md"
+                    "toyrank-test/index.md"
                 )
                 self.assertIn(f"math: {flag}", md.decode("utf-8"), body)
 

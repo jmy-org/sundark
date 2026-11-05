@@ -11,14 +11,14 @@ ITEM = {
     "data": {
         "key": "4SSLMJWN",
         "itemType": "journalArticle",
-        "title": "Massively parallel Monte Carlo",
+        "title": "Fast Sampling of Hard Disks",
         "creators": [
-            {"creatorType": "author", "firstName": "Joshua A.", "lastName": "Anderson"},
-            {"creatorType": "author", "firstName": "Eric", "lastName": "Jankowski"},
+            {"creatorType": "author", "firstName": "Ann C.", "lastName": "Lee"},
+            {"creatorType": "author", "firstName": "Bo", "lastName": "Park"},
             {"creatorType": "editor", "name": "Ed Itor"},
         ],
         "date": "2013-11-01",
-        "DOI": "10.1016/j.jcp.2013.07.023",
+        "DOI": "10.0000/example.zotero.00003",
     },
 }
 NOPDF = {
@@ -38,7 +38,7 @@ CHILDREN = {
             "data": {
                 "itemType": "attachment",
                 "contentType": "application/pdf",
-                "filename": "Anderson 2013.pdf",
+                "filename": "Lee 2013.pdf",
             },
         },
         {
@@ -106,21 +106,21 @@ class ZoteroTests(unittest.TestCase):
         )
 
     def test_items_carry_authors_year_doi_and_pdfs(self):
-        page = zotero.items(collection="R9PK77NC", q="monte", start=0)
+        page = zotero.items(collection="R9PK77NC", q="disks", start=0)
         self.assertEqual(fake_get.last[0], "/collections/R9PK77NC/items/top")
-        self.assertEqual(fake_get.last[1]["q"], "monte")
+        self.assertEqual(fake_get.last[1]["q"], "disks")
         self.assertEqual(page["total"], 2)
         first, book = page["items"]
         self.assertEqual(
             first,
             {
                 "key": "4SSLMJWN",
-                "title": "Massively parallel Monte Carlo",
-                "authors": ["Joshua A. Anderson", "Eric Jankowski"],
+                "title": "Fast Sampling of Hard Disks",
+                "authors": ["Ann C. Lee", "Bo Park"],
                 "year": "2013",
-                "doi": "10.1016/j.jcp.2013.07.023",
+                "doi": "10.0000/example.zotero.00003",
                 "pdfs": [
-                    {"key": "2VJZD3NN", "name": "Anderson 2013.pdf"},
+                    {"key": "2VJZD3NN", "name": "Lee 2013.pdf"},
                     {"key": "SUPP0001", "name": "Supplementary"},
                 ],
             },
@@ -129,16 +129,16 @@ class ZoteroTests(unittest.TestCase):
         self.assertEqual(book["authors"], ["Org"])
 
     def test_item_doi(self):
-        self.assertEqual(zotero.item_doi("4SSLMJWN"), "10.1016/j.jcp.2013.07.023")
+        self.assertEqual(zotero.item_doi("4SSLMJWN"), "10.0000/example.zotero.00003")
 
     def test_pdf_path_follows_the_file_redirect(self):
         with patch(
             "app.zotero._file_location",
-            return_value="file:///Users/x/Zotero/storage/2VJZD3NN/Anderson%20et%20al.%202013.pdf",
+            return_value="file:///Users/x/Zotero/storage/2VJZD3NN/Lee%20et%20al.%202013.pdf",
         ):
             self.assertEqual(
                 zotero.pdf_path("2VJZD3NN"),
-                Path("/Users/x/Zotero/storage/2VJZD3NN/Anderson et al. 2013.pdf"),
+                Path("/Users/x/Zotero/storage/2VJZD3NN/Lee et al. 2013.pdf"),
             )
 
     def test_non_file_location_is_refused(self):

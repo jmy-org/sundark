@@ -216,11 +216,11 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   and `layout()` removes them, so they are not translated. The threshold is a
   third of the sampled pages, because headers often alternate between even/odd
   pages — do not raise it back to a half. Lines match by their letters only
-  (`_norm_header`): the page number moves ("1:2 • Kerbl et al." vs "1:4" and "• Kerbl et
-  al." as two lines). A repeated line goes in the top 12% / bottom 10% of the page (where
+  (`_norm_header`): the page number moves ("1:2 • Lee et al." vs "1:4" and "• Lee et al."
+  as two lines). A repeated line goes in the top 12% / bottom 10% of the page (where
   it is also counted) or inside a model `furniture` box. Not by height alone: the
   model's furniture ("abandon") class also holds footnotes and now and then a heading it
-  mistook ("D. Combining Lhybrid and Lvlb Models"), so a furniture box drops only
+  mistook ("D. Combining the Two Training Losses"), so a furniture box drops only
   repeated lines, bare page numbers ("12", "1:4", "xii", a lone symbol) and text set
   sideways (the arXiv stamp along the first page's edge). A line under both a furniture
   box and a text box: a title or caption box wins, and a body box wins only when it is at
@@ -230,11 +230,11 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   of a furniture box) and captions are *asides*: their paragraphs are built apart and
   placed at the end of the page, captions first, flagged `aside`. A caption is a model
   `figure_caption`/`table_caption` box, taken as its whole PDF block (a box over the first
-  line only split 2506.09985's captions), or a caption rescued from a table box (below); an
+  line only split one paper's captions), or a caption rescued from a table box (below); an
   equation number such as "(5.7)" is a model caption too (`formula_caption`) and stays in
   place, or lead-ins lose it and adjacent equations merge. In reading order an aside sits
   between the halves of a sentence that runs from the foot of one column to the top of the
-  next: a footnote split it (1512.03385 p2), and a caption label stuck to it ("... the
+  next: a footnote split it, and a caption label stuck to it ("... the
   galaxy auto- Fig. 20."); placing them after the text made 75 sentences whole over 31
   papers. Captions never join footnotes, and a line opening with a caption label starts a
   new caption. Asides also hid the page's real last sentence from cross-page stitching, so
@@ -259,16 +259,16 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   model `caption` box are skipped and do not count toward the scan limit. A tail
   ending in a hyphenated word ("fea-" | "tures") is rejoined, and a tail left open on
   ")" or an acronym is stitched when the next page's first prose sentence starts with
-  an author-year citation ("...(FiLM)" | "Perez et al. (2018) as well as ...").
-  Known limit: when the real continuation starts uppercase ("the 34-layer" | "ResNet
+  an author-year citation ("...(FiGS)" | "Lee et al. (2018) as well as ...").
+  Known limit: when the real continuation starts uppercase ("the 34-layer" | "Network
   reduces ..."), the rule can pick a later lowercase paragraph instead.
   `_page_layout()` is the per-page core; `layout()` is the stitching wrapper that also
   peeks at the neighbours.
 - **Over-split sentences are rejoined; list items are split.** spaCy breaks sentences
   mid-way: at an inline math operator ("...z" | "= (z_1, ..., z_n)"), a citation
-  ("...(CNNs)" | "Ronneberger et al. (2015) ...", "VGG nets" | "[41] but"), a capital
+  ("...(CNNs)" | "Kim et al. (2015) ...", "earlier nets" | "[41] but"), a capital
   math symbol ("... σ 2" | "I is ..."), a parenthesis, closing punctuation
-  (", Hamilton proved"), a line-broken compound ("LIBERO-" | "Long"), a spaced
+  (", Lee proved"), a line-broken compound ("BENCH-" | "Long"), a spaced
   abbreviation ("et al ."), or inside a PDF word ("( 2020 );", which then belonged to
   two sentences and was highlighted with both), or right after a standalone math operator
   ("w_i / ∑" | "Nc j =1 ..."). `_mend_word_splits` and
@@ -370,18 +370,18 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   inside it. Acknowledgements, funding and the like are translated.
   - It starts at a References heading (`_REF_RE`): the WHOLE line, capitalized, so a
     line of prose that starts with the word does not ("reference of 17,135 actions."
-    cost 2610.02200 ten pages; a figure label "reference" cost 2610.10489 its Methods),
+    cost one paper ten pages; a figure label "reference" cost another its Methods),
     and only if a reference list follows (`_BIB_RE`: a tenth of the lines or more carry
     a year, "[12]", arXiv/doi/a URL, "et al", "Proceedings", "pp. 12"; every reference
     page of 31 papers has a quarter or more).
   - It ends at the first appendix/supplementary heading after it, which must stand out
-    from the list: its median size + 1pt (11pt always does; 3DGS sets "A" at 10pt over
+    from the list: its median size + 1pt (11pt always does; one paper sets "A" at 10pt over
     7pt references). It also ends at the top of the first page that is not a reference
-    list, whatever that page's headings (the Transformer paper's "Attention
-    Visualizations"), so a missed appendix heading costs at most the rest of one page.
+    list, whatever that page's headings (one paper's figure appendix, titled
+    with no letter), so a missed appendix heading costs at most the rest of one page.
   - The ends compare in READING order (`_before`): on a two-column page the whole left
     column is read before the right one, so a right-column heading does not drop the
-    left column's foot (Diffusion Policy lost "Limitations and Future Work" that way),
+    left column's foot (a paper lost its "Limitations and Future Work" that way),
     and a word takes its LINE's column, so a caption across both columns stays whole.
     Both ends allow 2pt: an appendix title split into lines ("A" + "Implementation
     Details") is kept whole.
@@ -394,24 +394,74 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   cut into sentences: a wrapped title came out as two headings, and the splitter cut
   "A.1. Pre-training" after "A.1." (58 such headings over 31 papers). A section and its
   first subsection right below it have a box each, so they stay apart.
-- **Page 0 drops its front matter, above the Abstract heading.** The heading is a word
-  that opens its line and reads "Abstract"/"ABSTRACT", alone or followed by punctuation
-  ("Abstract—We ...", `_ABSTRACT_RE`); "abstracting" in 2411.14499's introduction (which
-  has no Abstract heading) cut away its abstract and introduction. Without the heading
-  the cut is 22% down the page. A figure caption above the Abstract (SAM's teaser) is kept.
-  Its footnote with an e-mail address (`_EMAIL`) goes too: that is the authors' contact
-  block (affiliations, "Correspondence to: ..."), the same front matter set at the foot of
-  the page. Over 32 papers all 10 such footnotes were one; content footnotes carry no
-  address. So does a footnote whose mark an author carries ("Ann Lee∗" + "∗Equal
-  contribution", "Bo Li†" + "†Work done at ..."): an author note, from its mark to the next
-  footnote (a mark or a small number) in its PDF block, taken out after the e-mail rule has
-  judged the whole block. Only mark symbols count (`_MARKS`, "∗" and "*" as one): an
-  affiliation number ("Lee¹") and the text's first footnote ("¹Code is at ...") share "1",
-  and counting numbers took three content footnotes with them. A mark in a caption kept
-  above the Abstract is no author's. A note a mark ties to an author or the title goes
-  whatever it says (funding, "A preliminary version appeared in ..."), as the contact block
-  does; the Acknowledgements section is translated. A venue notice, or a note with no mark,
-  is still translated. Over 89 papers this dropped author notes in 13 and nothing else.
+- **Page 0 drops its front matter, above the Abstract heading.** The heading is a word that
+  opens its line and reads "Abstract"/"ABSTRACT", alone or followed by punctuation
+  ("Abstract—We ...", `_ABSTRACT_RE`), or the pieces small or spaced capitals come in ("A
+  BSTRACT", "A B S T R A C T"); "abstracting" in a paper's introduction (which has no
+  Abstract heading) cut away its abstract and introduction. Without the heading the front
+  matter ends where running text starts (`_front_cut`): the first of two lines close
+  together that hold six words or more, most of them lowercase (`_prose`: a title, names and
+  affiliations are mostly capitalized, an abstract is not), with the lines of its PDF block
+  right above it in its size (a first line "The Simple Modular Framework for Safe Robot
+  ..."). Lines are read as the page shows them (`_text_rows`): an old PDF gives every word,
+  or a word's pieces, a line of its own, with boxes of no height. A page with no running
+  text is a cover (title, authors, a teaser figure, the abstract on the next page), and all
+  of it but its captions goes. A paper may start on page 1 (`_first_page`): when page 0 has
+  no Abstract heading and page 1 has one, alone on its line or run in after punctuation (not
+  "Abstract syntax trees are ...", nor a contents entry "Abstract . . . 1"), page 0 is a
+  cover, a publisher's notice or a summary page, and the rules below for page 0's front
+  matter and footnotes apply to page 1 too. The fixed cut 22% down the page this replaced
+  kept the end of a long author list and cut off an abstract set higher. A figure caption
+  above the Abstract (a teaser figure) is kept. Its footnote with an e-mail address
+  (`_EMAIL`) goes too: that is the authors' contact block (affiliations, "Correspondence to:
+  ..."), the same front matter set at the foot of the page. Over 32 papers all 10 such
+  footnotes were one; content footnotes carry no address. So does a footnote whose mark an
+  author carries ("Ann Lee∗" + "∗Equal contribution", "Bo Li†" + "†Work done at ..."): an
+  author note, from its mark to the next footnote (a mark or a small number) in its PDF
+  block, taken out after the e-mail rule has judged the whole block. Only mark symbols count
+  (`_MARKS`, "∗" and "*" as one): an affiliation number ("Lee¹") and the text's first
+  footnote ("¹Code is at ...") share "1", and counting numbers took three content footnotes
+  with them. A mark in a caption kept above the Abstract is no author's. A note a mark ties
+  to an author or the title goes whatever it says (funding, "A preliminary version appeared
+  in ..."), as the contact block does; the Acknowledgements section is translated. A venue
+  notice, or a note with no mark, is still translated. Over 89 papers this dropped author
+  notes in 13 and nothing else. A footnote sentence on the authors with no mark or address
+  goes too (`_AUTHOR_NOTE`: "Ann Lee and Bo Li are with the Department of ...",
+  "(Corresponding author: Ann Lee.)", "... contributed equally", "Ann Lee is a PhD student
+  ...", "Authors' Contact Information: ..."; not a data statement, "available from the
+  corresponding author"), on page 0 or 1, by its sentence, as content footnotes and a
+  funding note may share its PDF block; a PDF block the model typed as text that holds an
+  address or such a note and is no running text goes whole, and so does a short one (25
+  words or fewer) with an address that asks to be contacted ("Corresponding authors can be
+  contacted at ...") ("E-mail: {a}@sjtu.edu.cn", "Authors' Contact Information: Ann Lee,
+  a@b.edu, ...", "Primary contact for the report: ..."), by blocks because a paragraph may
+  run from it into the next column's text.
+- **Publisher notices, the paper's own citation and a report's list of authors are not
+  translated.** On pages 0 and 1, a copyright or licence notice (`_NOTICE`: "© 2026 ...",
+  "Copyright held by the owner/author(s).", "All rights reserved.", "licensed under a
+  Creative Commons ...", "Copyright may be transferred without notice", "Permission to make
+  digital or hard copies ...", "Personal use of this material is permitted"; a word broken
+  at a line's end, "Copy-" + "right", read whole; not "the copyright of the data", nor
+  "(developed by the MathWorks ©)") goes: the footnote lines of its PDF block (the PDF may
+  put the other column's text in that block: an IEEE "©2019 IEEE" line took a column of text
+  with it), a PDF block of 40 words or fewer or set smaller than the page's text (a block
+  the model typed as a title too), a notice line set smaller than the rest of its block (a
+  footer the PDF put in a column's block), or a paragraph that opens with one. So does the
+  paper's own citation: a paragraph that holds the document's title (`_title_from_fonts`)
+  and a year and is no running text ("ACM Reference Format:" + "Ann Lee and Bo Li. 2025.
+  <title>. In Proceedings of ..."), with a heading right above it that ends in a colon; an
+  abstract may hold the title and a year too ("This technical report revisits <title> ...
+  (Lee et al., 2015)"), and taking it lost that abstract. On any page, a heading
+  "Authors"/"Contributors"/"Core Contributors" (`_AUTHORS_HEADING`) goes with the lists
+  below it that are no running text, up to the next heading or a paragraph of running text.
+  Over 998 arXiv papers (300 technical reports, the rest across fields and years since 2007,
+  scored against each paper's author list and abstract), these rules and the first-page cut
+  above took the papers with authors' names left on pages 0 and 1 from 122 to 3 and the
+  notices and contact lines from 270 to 13, read 47 abstracts more fully and lost none. Laid
+  out whole, 156 of them (3,236 pages) changed on no later page but one, a report's list of
+  authors. Known limits: a column of affiliations set beside the abstract keeps the lines
+  that lie beside it, and a list of contributors that runs on past its page is translated
+  there.
 - **Footnotes are read one by one; a link alone is not translated.** A footnote paragraph
   may hold several footnotes, and the next one's number used to end the one before it ("...
   all tasks 3" | "After each batch ..."): each line that opens with a mark symbol or with a
@@ -458,7 +508,7 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
 - **An appendix cover's copy of the front matter is dropped.** Page 0 drops everything
   above the Abstract (title, authors, affiliations; `_front_cut`). An appendix or
   supplement often opens on a cover that repeats those lines, and the model may type its
-  author line as a title (2007.06559: four author "headings"). On a later page, a
+  author line as a title (one paper: four author "headings"). On a later page, a
   paragraph made only of lines that repeat page 0's front matter is dropped
   (`_front_matter`, compared by letters only, since the copies differ in spacing,
   affiliation digits and quotes). A cover title that adds words ("Appendix for ...")

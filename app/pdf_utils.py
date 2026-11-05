@@ -48,8 +48,8 @@ def title_of(pdf_bytes: bytes) -> str:
 def _title_from_fonts(page) -> str:
     """Extract the title as the largest-font text line(s) in the top of page 1.
 
-    This gives properly spaced text (e.g. 'Diffusion Policy: Visuomotor Policy
-    Learning via Action Diffusion') instead of the space-stripped metadata title.
+    This gives properly spaced text (e.g. 'A Model for Learning from Data: Policies
+    via Action Sampling') instead of the space-stripped metadata title.
     A line's size is the size most of its characters are set in: a math symbol set larger
     than the rest of its line, taken as the line's size, left out the title's next line.
     Lines on one row are read left to right (a small-caps title comes word by word, a short
@@ -173,7 +173,7 @@ _BULLET_CHARS = "•◦▪▫●○‣⁃∙"
 
 # Enumeration item markers ("a)", "(a)", "(A)", "1)", "(1)", "(i)", "(ii)"...). A sentence
 # segmenter only splits a list when its items end in terminal punctuation, so a comma/"and"-joined
-# list ("(1) x, (2) y, and (3) z") stays glued and a markerless item ("...landscape c) Diffusion")
+# list ("(1) x, (2) y, and (3) z") stays glued and a markerless item ("...landscape c) Our")
 # never breaks. We split such runs ourselves, conservatively (see _split_on_markers).
 _ROMAN = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
 _ENUM_RE = re.compile(r"(\()?([A-Za-z]{1,4}|\d{1,2})\)")
@@ -395,7 +395,7 @@ def _split_on_bullets(raw: list[tuple[int, int]], text: str) -> list[tuple[int, 
 
 def _mend_word_splits(raw: list[tuple[int, int]], text: str) -> list[tuple[int, int]]:
     """Undo a boundary the segmenter put INSIDE a PDF word. spaCy splits punctuation off, so it
-    can end a sentence inside a word like ');' in 'Ho et al. ( 2020 ); Nichol and ...' or '5:'
+    can end a sentence inside a word like ');' in 'Lee et al. ( 2020 ); Park and ...' or '5:'
     in 'Table 5: Per-scene ...': the word then maps to BOTH sentences (highlighted twice) and
     the next fragment opens with ';' or ':'. Such a boundary is not a sentence end, so the two
     fragments are merged - unless the rest of the word is sentence-final punctuation ('065).'),
@@ -473,7 +473,7 @@ def _starts_math_cont(text: str, span: tuple[int, int]) -> bool:
     return frag[:1] in _MATH_CONT_START and not _LIST_LABEL.match(frag)
 
 
-# An inline author-year citation ("Ronneberger et al. (2015)", "Perez et al. (2018)",
+# An inline author-year citation ("Kim et al. (2015)", "Lee et al. (2018)",
 # "Smith and Jones (2020)", "Müller (2014)") confuses the segmenter, which starts a new sentence
 # at the author name. Following an unfinished fragment, it is a continuation and is merged back.
 # A name followed by a parenthesized 19xx/20xx year is what makes this specific; a capitalized
@@ -545,7 +545,7 @@ def _starts_paren(text: str, span: tuple[int, int]) -> bool:
     return frag[:1] == "(" and not (m and _is_enum_label(m.group(2)))
 
 
-# Closing or connective punctuation never opens a sentence: '; Nichol ...', ', Hamilton
+# Closing or connective punctuation never opens a sentence: '; Park ...', ', Lee
 # proved', ': Per-scene results', '| 2 ) dm', '’s predicted', ') 3 He'.
 _CLOSE_START = frozenset(",;:.)]}%|’′″")
 
@@ -586,7 +586,7 @@ def _merge_fragments(
     the sentence they belong to. An over-split continuation is a fragment that starts lowercase
     (spaced inline math), or - while the running text is not yet a complete sentence - one that
     starts with a binary math operator ("...z" + "= (z_1, ..., z_n).") or an inline author-year
-    citation ("...(FiLM)" + "Perez et al. (2018) ..."). A fragment that starts at a `hard`
+    citation ("...(FiGS)" + "Lee et al. (2018) ..."). A fragment that starts at a `hard`
     offset (a list item or an algorithm step, see _item_starts) is never merged into the one
     before it, and a lone mark or bracket left right before one ends the sentence before it.
     A fragment that starts inside a `whole` span (an algorithm step's own row) is merged."""
@@ -622,13 +622,13 @@ def _merge_fragments(
                 # the NEXT fragment starts lowercase -> it continues this sentence
                 or _starts_lower_frag(text, raw[i + 1])
                 # this fragment ends inside a hyphenated compound split by a line break
-                # ("LIBERO-" + "Long", "GPT-" + "5.6 Sol", "base-" + "Λ CDM")
+                # ("BENCH-" + "Long", "top-" + "5 error", "base-" + "Λ CDM")
                 or re.search(r"[^\W_]-$", t)
                 # ... or inside a spaced ellipsis the list goes on after ("{ x 1 , . ." +
                 # ". , x n }")
                 or _continues_ellipsis(t, text, raw[i + 1])
-                # a sentence never ends on ',' or ';' ("( Holz & Hughes 2005 ;" + "Abbott et
-                # al. 2017", "In his seminal paper ," + "Hamilton proved") or on a standalone
+                # a sentence never ends on ',' or ';' ("( Lee & Park 2005 ;" + "Kim et
+                # al. 2017", "In his seminal paper ," + "Lee proved") or on a standalone
                 # math operator (_MATH_OPEN_END) - but an enumeration item or bullet after it
                 # stays split
                 or (
@@ -638,7 +638,7 @@ def _merge_fragments(
                     not in _BULLET_CHARS
                 )
                 # the NEXT fragment starts with a math operator ("= 64", "− 1") or an inline
-                # citation ("Perez et al. (2018)") while this one is not a finished sentence ->
+                # citation ("Lee et al. (2018)") while this one is not a finished sentence ->
                 # the segmenter broke mid-sentence
                 or (
                     not _ends_sentence(t)
@@ -1179,8 +1179,8 @@ def _words_with_style(page) -> list[dict]:
 
 def _norm_header(text: str) -> str:
     """Normalize a line for running-header matching: its letters only (`_letters`). The page
-    number varies, and so does how it is attached: "1:2 • Kerbl et al." on one page, "1:4" and
-    "• Kerbl et al." as two lines on another."""
+    number varies, and so does how it is attached: "1:2 • Lee et al." on one page, "1:4" and
+    "• Lee et al." as two lines on another."""
     return _letters(text)
 
 
@@ -1191,12 +1191,44 @@ def _letters(text: str) -> str:
 
 
 # The Abstract heading: "Abstract", "ABSTRACT", "Abstract.", "Abstract:", or run in
-# ("Abstract—We ..."). Not "abstracting" in the introduction: 2411.14499 has no Abstract
-# heading, and cutting there dropped its abstract and the start of its introduction.
+# ("Abstract—We ..."). Not "abstracting" in the introduction: in a paper with no Abstract
+# heading, cutting there dropped its abstract and the start of its introduction.
 _ABSTRACT_RE = re.compile(r"(?:Abstract|ABSTRACT)(?:[.:—–-].*)?")
 
 # An e-mail domain ("x@mit.edu", "{a, b} @mit.edu"); not "mAP@0.5" or "Recall@1".
 _EMAIL = re.compile(r"@ ?[A-Za-z][\w-]*(?:\.[A-Za-z][\w-]*)+")
+
+# A copyright or licence notice ("© 2026 Example Corp.", "Copyright c⃝ 2019, AAAI", "Copyright held
+# by the owner/author(s).", "All rights reserved.", "This work is licensed under a Creative
+# Commons ...", "Copyright may be transferred without notice"); not the word in prose ("the
+# copyright of the data"), nor a sign after a name ("MATLAB (developed by the MathWorks ©)").
+_NOTICE = re.compile(
+    r"(?:[©ⓒ]|\bc\s*⃝)\s*(?:\d{4}|[^\W\d_])|\bCopyright\s*(?:©|c\s*⃝|\(c\)|\d{4}|"
+    r"(?:held|owned) by|may be transferred)|\bcopyright of this (?:document|paper|article)"
+    r"|\bAll rights reserved\b|\blicensed under (?:a |the )?Creative Commons"
+    r"|\bPermission to make digital or hard copies|\bCopyrights? for (?:third-party )?"
+    r"components|\bPersonal use of this material is permitted|\bRequest permissions from",
+    re.I,
+)
+
+# A note on the authors ("Ann Lee and Bo Li are with the Department of ...", "(Corresponding
+# author: Ann Lee.)", "Ann Lee and Bo Li contributed equally to this work.", "Authors'
+# Contact Information: ...", "Ann Lee is a PhD student ..."), found in an IEEE-style
+# first-page footnote with no address; not a data statement ("available from the
+# corresponding author on request").
+_AUTHOR_NOTE = re.compile(
+    r"\b(?:is|are) (?:also )?with (?:the )?[A-Z]"
+    r"|(?<!from the )(?<!to the )\b[Cc]orresponding [Aa]uthors?\b"
+    r"|\bcontributed equally\b|\b[Ee]qual contribution|\baffiliated with\b"
+    r"|\bAuthors?['’] (?:[Cc]ontact [Ii]nformation|[Aa]ddress)"
+    r"|\bis an? (?:Ph\.? ?D\.?|graduate|doctoral|[Mm]aster['’]?s|undergraduate) student\b"
+)
+
+# The heading of a report's list of authors ("Authors", "Contributors", "Core Contributors").
+_AUTHORS_HEADING = re.compile(
+    r"(?:(?:Core |List of )?(?:Authors?|Contributors)|Author List)(?: and Affiliations)?:?",
+    re.I,
+)
 
 # A link: a URL with its scheme or "www.", a host with a path ("hf.co/x", "github.com/x"), or a
 # bare host on a common domain ("example.org"). A scheme cut off by a space ("https: //...")
@@ -1250,15 +1282,145 @@ def _marked_note(t: str) -> bool:
     )
 
 
+def _prose(ts: list[str]) -> bool:
+    """A line of running text: six words or more, most of them lowercase. A title, a list of
+    names or an affiliation is mostly capitalized ("Ann Lee, Bo Li", "School of Informatics,
+    University of Edinburgh"); an abstract is not."""
+    alpha = [t for t in ts if t[:1].isalpha()]
+    return len(alpha) >= 6 and sum(t[0].islower() for t in alpha) >= 0.6 * len(alpha)
+
+
 def _front_cut(words: list[dict], height: float) -> float:
     """Where page 0's front matter (title, authors, affiliations) ends: the top of the Abstract
-    heading (the first word of its line), else 22% down the page. `words` carry t, y0, line."""
-    prev = None
+    heading (the first word of its line; "A BSTRACT" and "A B S T R A C T" in small or spaced
+    capitals too), else the top of the first two lines of running text (`_prose`), else the
+    page's foot: the abstract is on a later page. Lines are read as the page shows them
+    (`_text_rows`): an old PDF may give every word a line of its own. A paragraph's first line
+    may be mostly capitalized ("The Simple Modular Framework for Safe Robot ..."), so the
+    lines of its PDF block right above it in its size go with it. `words` carry t, x0, y0, x1,
+    y1, line (block, line), `size` when known, and `skip` for a word of a title or a caption,
+    which is no running text."""
+    lines: dict[tuple, list[dict]] = {}
     for w in words:
-        if w["line"] != prev and _ABSTRACT_RE.fullmatch(w["t"]):
-            return w["y0"]
-        prev = w["line"]
-    return height * 0.22
+        lines.setdefault(w["line"], []).append(w)
+    top = _abstract_top(lines)
+    if top is not None:
+        return top
+    rows = _text_rows(lines)
+    prose = [
+        r
+        for r in rows
+        if not any(w.get("skip") for w in r["words"])
+        and _prose([w["t"] for w in r["words"]])
+    ]
+    for r, n in zip(prose, prose[1:]):
+        y0, h = r["y0"], r["h"]
+        if n["y0"] - y0 < 3 * h + 2:
+            for a in sorted(rows, key=lambda a: -a["y1"]):
+                if a["y1"] > y0 + 1 or not a["blocks"] & r["blocks"]:
+                    continue
+                if y0 - a["y1"] > h or abs(a["size"] - r["size"]) > 0.5:
+                    break
+                y0 = a["y0"]
+            return y0
+    return height
+
+
+def _abstract_top(lines: dict[tuple, list[dict]], strict: bool = False) -> float | None:
+    """The top of the first line (words with t, y0) that opens with the Abstract heading, in
+    pieces or not ("A BSTRACT"); `strict`, only a line that is the heading alone or runs on
+    after punctuation ("Abstract—We ..."), not one that opens a sentence ("Abstract syntax
+    trees are ...") or a contents entry ("Abstract . . . . 1")."""
+    for ws in lines.values():
+        text = " ".join(w["t"] for w in ws)
+        if strict and (re.search(r"\.\s?\.\s?\.", text) or text[-1:].isdigit()):
+            continue
+        s = ""
+        for i, w in enumerate(ws[:8]):
+            s += w["t"]
+            if _ABSTRACT_RE.fullmatch(s):
+                if not strict or i == len(ws) - 1 or not s.isalpha():
+                    return ws[0]["y0"]
+                break
+            if not "ABSTRACT".startswith(s.upper()):
+                break
+    return None
+
+
+@functools.lru_cache(maxsize=2)
+def _first_page(pdf_bytes: bytes) -> int:
+    """The page the paper starts on: page 1 when page 0 has no Abstract heading and page 1
+    has one (a cover, a publisher's notice or a summary page before it), else page 0. The
+    front matter rules of page 0 then apply to page 1 too."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        if doc.page_count < 2:
+            return 0
+        heads = []
+        for n in (0, 1):
+            lines: dict[tuple, list[dict]] = {}
+            for w in doc[n].get_text("words"):
+                lines.setdefault((w[5], w[6]), []).append({"t": w[4], "y0": w[1]})
+            heads.append(_abstract_top(lines, strict=n == 1) is not None)
+        return 1 if heads == [False, True] else 0
+    finally:
+        doc.close()
+
+
+def _text_rows(lines: dict[tuple, list[dict]]) -> list[dict]:
+    """The PDF lines (words with x0, y0, x1, y1, line, `size` when known) as the page shows
+    them, top to bottom: lines on one row that follow on without a column's gap are one
+    ({words, y0, y1, h, size, blocks}). An old PDF may give every word, or a word's pieces, a
+    line of its own ("Dep artment of Computer S ien e"), and its boxes no height; text in two
+    columns stays apart. `h` is a line's height, at least its size and 4pt."""
+
+    def height(ws):
+        h = max(w["y1"] for w in ws) - min(w["y0"] for w in ws)
+        return max(h, statistics.median(w.get("size", 0) for w in ws), 4.0)
+
+    units = sorted(
+        (
+            (
+                (min(w["y0"] for w in ws) + max(w["y1"] for w in ws)) / 2,
+                height(ws),
+                ws,
+            )
+            for ws in lines.values()
+        ),
+        key=lambda u: u[0],
+    )
+    grouped: list[list] = []
+    for u in units:
+        if grouped and abs(u[0] - grouped[-1][0][0]) <= 0.4 * min(
+            u[1], grouped[-1][0][1]
+        ):
+            grouped[-1].append(u)
+        else:
+            grouped.append([u])
+    rows = []
+    for g in grouped:
+        g.sort(key=lambda u: min(w["x0"] for w in u[2]))
+        segs = [[g[0]]]
+        for u in g[1:]:
+            right = max(w["x1"] for v in segs[-1] for w in v[2])
+            if min(w["x0"] for w in u[2]) - right > 2 * u[1]:
+                segs.append([u])
+            else:
+                segs[-1].append(u)
+        for seg in segs:
+            ws = [w for u in seg for w in u[2]]
+            rows.append(
+                {
+                    "words": ws,
+                    "y0": min(w["y0"] for w in ws),
+                    "y1": max(w["y1"] for w in ws),
+                    "h": height(ws),
+                    "size": statistics.median(w.get("size", 0) for w in ws),
+                    "blocks": {w["line"][0] for w in ws},
+                }
+            )
+    rows.sort(key=lambda r: r["y0"])
+    return rows
 
 
 # A row of a list of symbols opens with its symbol ("α  the learning rate . . . 12", "x  an
@@ -1490,15 +1652,27 @@ def _toc_lines(
 
 
 def _front_matter(page) -> set[str]:
-    """The letters (`_letters`) of each line of page 0 above the cut (`_front_cut`)."""
+    """The letters (`_letters`) of each line of page 0 above the cut (`_front_cut`), and with
+    no Abstract heading above 22% of the page at most: without the layout model's boxes the
+    text of a figure is read too, and a cover's figure labels ("ToyPolicy") would match a
+    later heading."""
     words = [
-        {"y0": w[1], "y1": w[3], "t": w[4], "line": (w[5], w[6])}
+        {
+            "x0": w[0],
+            "y0": w[1],
+            "x1": w[2],
+            "y1": w[3],
+            "t": w[4],
+            "line": (w[5], w[6]),
+        }
         for w in page.get_text("words")
     ]
     cut = _front_cut(words, page.rect.height)
     lines: dict[tuple, list[dict]] = {}
     for w in words:
         lines.setdefault(w["line"], []).append(w)
+    if _abstract_top(lines) is None:
+        cut = min(cut, page.rect.height * 0.22)
     out = set()
     for ws in lines.values():
         t = _letters(" ".join(w["t"] for w in ws))
@@ -1547,7 +1721,7 @@ def running_headers(pdf_bytes: bytes) -> set[str]:
                         line.get("bbox", (0, 0, 0, 0))[1],
                         line.get("bbox", (0, 0, 0, 0))[3],
                     )
-                    # the bands layout() drops a running head in (3DGS's footer ends at 90.3%)
+                    # the bands layout() drops a running head in (one footer ends at 90.3%)
                     if y0 < h * 0.12:
                         top[norm] = top.get(norm, 0) + 1
                     elif y1 > h * 0.90:
@@ -1565,8 +1739,8 @@ def running_headers(pdf_bytes: bytes) -> set[str]:
 # The references heading, alone on its line: "References", "REFERENCES", "7 References",
 # "References and Notes", "Bibliography". Matched at any readable size. Acknowledgements,
 # funding and the like are translated. A line of prose that starts with the word is not the
-# heading: "reference of 17,135 actions." cost 2610.02200 ten pages of results, and a figure
-# label "reference" cost 2610.10489 its Methods.
+# heading: "reference of 17,135 actions." cost one paper ten pages of results, and a figure
+# label "reference" cost another its Methods.
 _REF_RE = re.compile(
     r"(?:\d+\.?\s+|[IVX]+\.\s+)?"
     r"(?:R ?(?i:eferences?(?:\s+and\s+notes)?)|B(?i:ibliography))\s*[.:]?"
@@ -1583,7 +1757,7 @@ _BIB_RE = re.compile(
 # The words in any case ("APPENDIX A", "Supplementary Material"); the letter forms stay
 # uppercase, so a lowercase line ("a note on ...") is not taken for a section letter.
 _APPENDIX_RE = re.compile(r"^((?i:appendix|supplementary)\b|[A-Z]\.?\s+[A-Z]|[A-Z]$)")
-# A page number ("12", "1:4" in ACM's "1:4 • Kerbl et al.", "xii") or a line without a letter
+# A page number ("12", "1:4" in ACM's "1:4 • Lee et al.", "xii") or a line without a letter
 # or digit ("•", "□").
 _PAGE_NUMBER = re.compile(r"\W*|\d+(?:[:.–-]\d+)*|[ivxlcdm]+|[IVXLCDM]+")
 # A figure/table caption's label: "Table 5.", "TABLE V:", "Figure 3:", "Fig. 2", "F IG . 1:".
@@ -1706,8 +1880,8 @@ def end_matter_range(
             return None
 
         # Resume point: the first appendix/supplementary heading after the references. It
-        # stands out from the reference list (its median size + 1pt; 11pt always does): 3DGS
-        # and 2411.14499 set the letter "A" at 10pt over 7-8pt references.
+        # stands out from the reference list (its median size + 1pt; 11pt always does): two
+        # papers set the letter "A" at 10pt over 7-8pt references.
         sizes = [
             sz
             for t, sz, y, x in headings(start[0])
@@ -1730,8 +1904,8 @@ def end_matter_range(
                 end = first(pno, found)
                 break
         # A whole page that is not a reference list ends the range at its top, whatever its
-        # headings: the Transformer paper's attention visualizations (an appendix titled
-        # "Attention Visualizations") were skipped to the end of the document.
+        # headings: one paper's figure appendix (titled with no letter) was skipped to the end
+        # of the document.
         for pno in range(start[0] + 1, end[0] if end else n):
             lines = text_lines(pno)
             if lines and not bibliographic(lines):
@@ -1828,7 +2002,7 @@ def _continuation_idx(page: dict, max_scan: int = 16) -> int | None:
 def _tail_open(page: dict) -> bool:
     """True when a page's last sentence is prose that does not end a sentence at all (no .!? and
     no closing colon). Wider than _tail_unfinished: it also admits a tail closing on ')' or an
-    uppercase acronym ("...Modulation (FiLM)"), which may only be stitched to a citation."""
+    uppercase acronym ("...Scaling (FiGS)"), which may only be stitched to a citation."""
     j = _tail_idx(page)
     if j is None:
         return False
@@ -1843,7 +2017,7 @@ def _stitch_idx(prev: dict, nxt: dict) -> int | None:
     """Index of the sentence on `nxt` that continues the last sentence of `prev`, or None. Used by
     BOTH the forward and the backward pass, so the two pages always agree. Besides the lowercase
     continuation (_tail_unfinished + _continuation_idx), a sentence the page break cut right before
-    an inline author-year citation ("...Modulation (FiLM)" | "Perez et al. (2018) as well as ...")
+    an inline author-year citation ("...Scaling (FiGS)" | "Lee et al. (2018) as well as ...")
     is joined: the next page's FIRST prose sentence (no float caption skipped) must start with
     such a citation, which a new sentence practically never does after an open tail."""
     if _tail_unfinished(prev):
@@ -2134,12 +2308,27 @@ def _page_layout(
 
         raw = [w for w in styled if not _drop(w)]
         # On page 1, drop everything above the Abstract (title, authors, affiliations), except a
-        # figure caption: a teaser figure above the Abstract (SAM) has a caption to translate.
+        # figure caption: a teaser figure above the Abstract has a caption to translate.
+        # A paper that starts on the next page (`_first_page`) has its front matter there.
+        first = page_index < 2 and page_index in (0, _first_page(pdf_bytes))
         front_marks: set[str] = set()
-        if page_index == 0:
+        if first:
             cut = _front_cut(
                 [
-                    {"t": w["t"], "y0": w["y0"], "line": (w["bno"], w["lno"])}
+                    {
+                        "t": w["t"],
+                        "x0": w["x0"],
+                        "y0": w["y0"],
+                        "x1": w["x1"],
+                        "y1": w["y1"],
+                        "line": (w["bno"], w["lno"]),
+                        "size": w["size"],
+                        "skip": _in_rects(
+                            (w["x0"] + w["x1"]) / 2,
+                            (w["y0"] + w["y1"]) / 2,
+                            title_rects + caption_rects,
+                        ),
+                    }
                     for w in raw
                 ],
                 ph,
@@ -2431,9 +2620,10 @@ def _page_layout(
                     last_title = None
                     continue
                 if ln["heading"]:
-                    # A wrapped title ("5 OPTIMIZATION WITH ADAPTIVE DENSITY" + "CONTROL OF 3D
-                    # GAUSSIANS") is one heading: its lines share a title box. A section and its
-                    # first subsection right below it have a box each.
+                    # A wrapped title ("5 OPTIMIZATION WITH ADAPTIVE LEARNING" + "RATE
+                    # CONTROL FOR SPARSE MODELS") is one heading: its lines share a title
+                    # box. A section and its first subsection right below it have a box
+                    # each.
                     if ln["title"] is not None and ln["title"] == last_title:
                         paras[-1]["widx"].extend(ln["widx"])
                         continue
@@ -2497,7 +2687,7 @@ def _page_layout(
         # foot of the page. Over 32 papers, all 10 such footnotes were one (one also held a
         # funding note, which goes with it); content footnotes (a definition, a URL) carry no
         # address.
-        if page_index == 0:
+        if first:
             paras = [
                 p
                 for p in paras
@@ -2512,6 +2702,124 @@ def _page_layout(
                 for p in paras
             ]
             paras = [p for p in paras if p["widx"]]
+
+        # Pages 0 and 1 also carry the publisher's front matter: a copyright or licence
+        # notice ("© 2026 Example Corp. All rights reserved.", "Copyright held by the
+        # owner/author(s).", "Permission to make digital or hard copies ...") and the
+        # paper's own citation ("ACM Reference Format:" + "Ann Lee and Bo Li. 2025.
+        # <title>. In Proceedings of ..."), with its authors' names; a contact block the
+        # model typed as text ("E-mail: {a}@sjtu.edu.cn", "Primary contact for the
+        # report: Ann Lee (a@b.org)"); and on the first page, a note on the authors with
+        # no address ("Ann Lee and Bo Li are with the Department of ...",
+        # "(Corresponding author: Ann Lee.)"). It goes by PDF blocks, as a paragraph may
+        # hold content footnotes beside the notice, or run from a footnote the model
+        # typed as text into the next column: the footnote lines of a block with a
+        # notice (the PDF may put the other column's text in that block too); a block
+        # with an address or, on the first page, an author note that is no running text
+        # (`_prose`), or a short one (25 words or fewer) with an address that asks to be
+        # contacted; a
+        # block with a notice that is short (40 words or fewer) or set smaller than the
+        # page's text; and a notice line set smaller than the rest of its block (a
+        # footer the PDF put in a column's block). A word broken at a line's end
+        # ("Copy-" + "right") is read whole. An author note in a footnote goes by its
+        # sentence (below). A paragraph that opens with a notice goes. A paragraph that
+        # holds the document's title and a year and is no running text (names, a venue)
+        # cites it, and goes with a heading right above it that ends in a colon; an
+        # abstract may hold the title too.
+        if page_index <= 1 and paras:
+
+            def joined(lns: list[dict]) -> str:  # "Copy-" + "right": one word again
+                return re.sub(
+                    r"(\w)- (\w)", r"\1\2", " ".join(ln["text"] for ln in lns)
+                )
+
+            blocks: dict[int, list[dict]] = {}
+            for ln in lines:
+                if ln["aside"] != "caption":
+                    blocks.setdefault(ln["key"][0], []).append(ln)
+            text_size = statistics.median(w["size"] for w in raw) if raw else 0
+            gone: set[int] = set()
+            for lns in blocks.values():
+                foot = [ln for ln in lns if ln["aside"]]
+                if _NOTICE.search(joined(foot)):
+                    gone.update(g for ln in foot for g in ln["widx"])
+                body = [ln for ln in lns if not ln["aside"]]
+                if not body:
+                    continue
+                t = joined(body)
+                n = len(t.split())
+                size = statistics.median(ln["size"] for ln in body)
+                note = _EMAIL.search(t) or (first and _AUTHOR_NOTE.search(t))
+                contact = (
+                    n <= 25
+                    and _EMAIL.search(t)
+                    and re.search(r"\b(?:[Cc]ontact|[Cc]orrespond|[Ee]-?mail)", t)
+                )
+                if (note and (contact or not _prose(t.split()))) or (
+                    _NOTICE.search(t) and (n <= 40 or size < text_size - 0.5)
+                ):
+                    gone.update(
+                        g
+                        for ln in body
+                        if not (note and ln["heading"])
+                        for g in ln["widx"]
+                    )
+                    continue
+                for ln in body:  # a footer the PDF put in a column's block, set smaller
+                    if _NOTICE.search(ln["text"]) and ln["size"] < size - 0.5:
+                        gone.update(ln["widx"])
+            paras = [
+                {**p, "widx": [g for g in p["widx"] if g not in gone]} for p in paras
+            ]
+            title = _letters(_title_from_fonts(doc[0]))
+            kept: list[dict] = []
+            for p in paras:
+                if not p["widx"]:
+                    continue
+                t = " ".join(words[g]["t"] for g in p["widx"])
+                if not p.get("caption") and _NOTICE.match(t.lstrip()):
+                    continue
+                lt = _letters(t)
+                if (
+                    not p.get("caption")
+                    and not p.get("heading")
+                    and len(title) >= 20
+                    and title in lt
+                    and len(lt) > len(title) + 20
+                    and re.search(r"\b(?:19|20)\d\d\b", t)
+                    and not _prose(t.split())
+                ):
+                    if (
+                        kept
+                        and kept[-1].get("heading")
+                        and words[kept[-1]["widx"][-1]]["t"].endswith(":")
+                    ):
+                        kept.pop()
+                    continue
+                kept.append(p)
+            paras = kept
+
+        # A report may list its authors under a heading of their own ("Authors", "Core
+        # Contributors"): the heading and the lists below it that are no running text go, up to
+        # the next heading. A paragraph of running text ("All authors contributed to ...")
+        # stays and ends the list.
+        if any(p.get("heading") for p in paras):
+            kept, listing = [], False
+            for p in paras:
+                if p.get("aside"):
+                    kept.append(p)
+                    continue
+                t = " ".join(words[g]["t"] for g in p["widx"])
+                if p.get("heading"):
+                    listing = bool(_AUTHORS_HEADING.fullmatch(t.strip()))
+                    if listing:
+                        continue
+                elif listing and not _prose(t.split()):
+                    continue
+                else:
+                    listing = False
+                kept.append(p)
+            paras = kept
 
         # An appendix or supplement may open on a cover that repeats page 0's front matter
         # (title, authors, affiliations). Page 0 drops those lines, so a later paragraph made
@@ -2630,11 +2938,18 @@ def _page_layout(
             for s, e, st, idxs in split:
                 # headings/labels are always kept (shown as titles), and so are list items
                 # and algorithm steps ("5: end for"); body uses the filter. A footnote that
-                # is only a link has nothing to translate.
+                # is only a link has nothing to translate, and one on the first page that is
+                # a note on the authors ("Ann Lee is with ...") is front matter: a sentence,
+                # as content footnotes may share its PDF block.
                 if (
                     idxs
                     and not (
-                        para.get("aside") and not para.get("caption") and _link_only(st)
+                        para.get("aside")
+                        and not para.get("caption")
+                        and (
+                            _link_only(st)
+                            or (page_index <= 1 and _AUTHOR_NOTE.search(st))
+                        )
                     )
                     and (
                         para["heading"]

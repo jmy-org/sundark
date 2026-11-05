@@ -32,7 +32,7 @@ endbfrange
 endbfchar
 endcmap"""
 
-# entries of the full map in 2609.26280's CMEX10
+# entries of the full map in one paper's CMEX10
 FULL_CMAP = """begincmap
 6 beginbfchar
 <00> <0028FE00>
@@ -130,8 +130,8 @@ class CmexDecodeTests(unittest.TestCase):
         self.assertEqual(_decode_span({"font": CMEX, "text": "(P)"}, tables), "{∑}")
 
     def test_codes_a_full_map_covers_are_kept(self):
-        # 2609.26280: a full ToUnicode map reads a big "(" (code 0) as "(" + U+FE00 and code
-        # 40 as "{" + U+FE03, so its "(" is a real parenthesis
+        # a full ToUnicode map reads a big "(" (code 0) as "(" + U+FE00 and code 40 as "{" +
+        # U+FE03, so its "(" is a real parenthesis
         page = FakePage(FULL_CMAP)
         text = "(\ufe00 )\ufe00 ∑\ufe00"
         self.assertEqual(
@@ -171,14 +171,14 @@ class CmexDecodeTests(unittest.TestCase):
 
 class MarginTests(unittest.TestCase):
     def test_a_margin_word_goes_only_with_its_whole_line(self):
-        # NeRF: a narrow page whose body lines start at x=34, inside the 44pt side margin
+        # a narrow page whose body lines start at x=34, inside the 44pt side margin
         doc = pymupdf.open()
         doc.new_page(width=414, height=630)
         p = doc.new_page(width=414, height=630)
         p.insert_text(
             (34, 300), "to colors has also been used for graphics.", fontsize=10
         )
-        p.insert_text((20, 500), "arXiv:2003.08934v2", fontsize=10, rotate=90)
+        p.insert_text((20, 500), "arXiv:0000.00001v2", fontsize=10, rotate=90)
         data = doc.tobytes()
         doc.close()
         with patch.object(pdf_utils.layout_model, "detect_page", return_value=[]):

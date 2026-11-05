@@ -3,7 +3,7 @@
 The PDF text layer reads "{ã^j}_{j=1}^{N_neg}" as "{ ˜ a j } N neg j = 1": without marks the
 translator has to guess which run is which. A run is marked only when it is attached to the
 glyph before it, so an inline fraction (a small numerator above, a small denominator below,
-after a gap) is not mistaken for scripts. Geometry is from Diffusion Policy p6 and Adam p4."""
+after a gap) is not mistaken for scripts. Geometry is from two papers' pages."""
 
 import copy
 import unittest
@@ -85,7 +85,7 @@ class ScriptMarkTests(unittest.TestCase):
 
     def test_small_text_on_the_baseline_is_not_a_script(self):
         # small caps / a smaller font on the same baseline
-        ws = [word(50, 70, "Diffusion"), word(70.5, 90, "POLICY", size=7.0, base=152.0)]
+        ws = [word(50, 70, "Our"), word(70.5, 90, "METHOD", size=7.0, base=152.0)]
         self.assertEqual(roles(ws), {})
 
     def test_a_script_on_another_line_is_not_attached(self):

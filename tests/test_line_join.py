@@ -1,7 +1,7 @@
 """Rejoining one visual line the PDF split into fragments (app/pdf_utils._joins_line).
 
-Geometry below is taken from page 1 of arXiv 2506.09762 ("... iterations with O(√d) processors"),
-where the radical is drawn ~10 pt above the baseline and used to split the sentence in two."""
+Geometry below is taken from page 1 of a paper ("... iterations with O(√d) processors"), where
+the radical is drawn ~10 pt above the baseline and used to split the sentence in two."""
 
 import unittest
 
@@ -45,8 +45,8 @@ class JoinLineTests(unittest.TestCase):
         self.assertFalse(_joins_line(O_PAREN, line(95.9, 300.0, 384.0, 398.0)))
 
     def test_stacked_subscript_joins_the_line_it_hangs_under(self):
-        # Diffusion Policy p6: "... samples {ã^j}_{j=1}^{N_neg} are used to estimate". The
-        # fragment "j=1 are used to estimate" starts under "N neg", 12 pt left of its end.
+        # "... samples {ã^j}_{j=1}^{N_neg} are used to estimate": the fragment "j=1 are used
+        # to estimate" starts under "N neg", 12 pt left of its end.
         sup = line(51.0, 210.1, 140.7, 161.1)
         sub = line(198.1, 291.7, 144.6, 157.7, sizes=[7.4, 7.4, 7.4, 10.0, 10.0])
         self.assertTrue(_joins_line(sup, sub))
