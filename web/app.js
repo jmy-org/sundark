@@ -484,6 +484,39 @@ async function openFromLibrary(rel, li) {
   } catch (err) { setTitle("Open failed: " + err.message); }
 }
 
+// Sample papers on the start screen (samples/README.md): the first one is the main action.
+// Opening one starts translation like any paper, so nothing opens until the reader asks.
+async function loadSamples() {
+  try {
+    const r = await fetch("/api/samples").then((x) => x.json());
+    const list = $("sample-list");
+    list.innerHTML = "";
+    r.samples.forEach((s, i) => {
+      const li = document.createElement("li");
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = i === 0 ? "btn-primary" : "btn-ghost";
+      open.textContent = s.title;
+      open.addEventListener("click", () => openSample(s.id));
+      const source = document.createElement("span");
+      source.className = "small";
+      source.innerHTML = `${esc(s.credit)} · <a href="https://arxiv.org/abs/${esc(s.arxiv)}" target="_blank" rel="noopener noreferrer">arXiv:${esc(s.arxiv)}</a>`;
+      li.append(open, source);
+      list.appendChild(li);
+    });
+    $("samples").classList.toggle("hidden", !r.samples.length);
+  } catch { /* no samples: the start screen keeps its plain prompt */ }
+}
+loadSamples();
+
+async function openSample(id) {
+  document.querySelectorAll(".paperlist li").forEach((x) => x.classList.remove("active"));
+  setTitle("Opening…");
+  try {
+    await openDoc(await postJSON("/api/samples/open", { id }));
+  } catch (err) { setTitle("Open failed: " + err.message); }
+}
+
 $("file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
