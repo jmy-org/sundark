@@ -17,7 +17,9 @@ def lines(*events):
 
 class HermesBackendTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        patcher = patch("app.backends.hermes._python", return_value="/hermes/python")
+        patcher = patch(
+            "app.backends.hermes._command", return_value=["/hermes/python", "runner.py"]
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -98,4 +100,72 @@ class HermesPythonDiscoveryTests(unittest.TestCase):
                 patch("app.backends.hermes.shutil.which", return_value=str(shim)),
             ):
                 os.environ.pop("HERMES_PYTHON", None)
-                self.assertEqual(Path(hermes._python()).resolve(), python.resolve())
+                cmd = hermes._command()
+                self.assertEqual(Path(cmd[0]).resolve(), python.resolve())
+                self.assertEqual(cmd[1:], [str(hermes.RUNNER)])
+
+    def test_store_launcher_runs_the_runner_through_hermes_bootstrap(self):
+        """A store-Python launcher (`exec python3 -I -c '...multi-line...'`) is resolved with
+        `hermes --print-runtime-command`; the bootstrap is kept and only the entry point is
+        swapped for the runner."""
+        import os
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        bootstrap = (
+            "import os, sys, runpy; sys.path.insert(0, '/h'); import hermes_bootstrap; "
+            "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            launcher = Path(d) / "hermes"
+            launcher.write_text(
+                "#!/bin/sh\nexec /store/python3 -I -c 'import os\n"
+                "os.environ.pop('\"'\"'PYTHONHOME'\"'\"', None)\n' \"$@\"\n"
+            )
+            launcher.chmod(0o755)
+            done = subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(["/store/python3", "-I", "-c", bootstrap]),
+                stderr="",
+            )
+            with (
+                patch.dict(os.environ, {}, clear=False),
+                patch("app.backends.hermes.shutil.which", return_value=str(launcher)),
+                patch("app.backends.hermes.subprocess.run", return_value=done) as run,
+            ):
+                os.environ.pop("HERMES_PYTHON", None)
+                hermes._runtime.cache_clear()
+                cmd = hermes._command()
+        self.assertEqual(
+            run.call_args.args[0], [str(launcher), "--print-runtime-command"]
+        )
+        self.assertEqual(cmd[:3], ["/store/python3", "-I", "-c"])
+        self.assertIn("import hermes_bootstrap", cmd[3])
+        self.assertTrue(
+            cmd[3].endswith(
+                f"runpy.run_path({str(hermes.RUNNER)!r}, run_name='__main__')"
+            )
+        )
+        self.assertNotIn("hermes_cli.main", cmd[3])
+
+    def test_unparseable_launcher_is_an_ai_error_not_a_crash(self):
+        import os
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            launcher = Path(d) / "hermes"
+            launcher.write_text("#!/bin/sh\nexec /x/python3 -c 'unclosed\n")
+            failed = subprocess.CompletedProcess([], 2, stdout="", stderr="usage")
+            with (
+                patch.dict(os.environ, {}, clear=False),
+                patch("app.backends.hermes.shutil.which", return_value=str(launcher)),
+                patch("app.backends.hermes.subprocess.run", return_value=failed),
+            ):
+                os.environ.pop("HERMES_PYTHON", None)
+                hermes._runtime.cache_clear()
+                with self.assertRaises(AIError):
+                    hermes._command()
