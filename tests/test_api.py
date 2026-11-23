@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app import main, settings, store
-from app.errors import ModelUnavailableError, RateLimitError
+from app.errors import AuthError, ModelUnavailableError, RateLimitError
 
 DOC = {"pages": ["PAPER TEXT"], "meta": {"num_pages": 1, "title": "T"}}
 
@@ -28,6 +28,8 @@ class ApiTests(unittest.TestCase):
             patch.object(store, "CACHE", root / "cache"),
             patch.object(store, "CHATS", root / "chats"),
             patch("app.main._require_doc", return_value=DOC),
+            # Never run the real CLI from a test.
+            patch("app.backends.claude.signed_in", return_value=None),
         ]
         for p in self.patches:
             p.start()
@@ -231,6 +233,43 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 429)
         self.assertTrue(r.json()["rate_limited"])
 
+    def test_signed_out_maps_to_401(self):
+        with patch(
+            "app.main.ai.summarize", new=AsyncMock(side_effect=AuthError("sign in"))
+        ):
+            r = self.client.post("/api/summarize", json={"doc_id": "d"})
+        self.assertEqual(r.status_code, 401)
+        self.assertTrue(r.json()["auth_required"])
+        self.assertFalse(r.json()["rate_limited"])
+
+    def test_stream_signed_out_line(self):
+        async def stream(segs, lang, brief=""):
+            raise AuthError("sign in")
+            yield  # an async generator
+
+        with (
+            patch("app.main.ai.translate_stream", new=stream),
+            patch("app.main._get_brief", new=AsyncMock(return_value="")),
+        ):
+            r = self.client.post(
+                "/api/translate_stream",
+                json={"doc_id": "d", "page": 0, "segments": ["a"]},
+            )
+        lines = [json.loads(x) for x in r.text.splitlines()]
+        self.assertEqual(
+            lines, [{"error": "sign in", "rate_limited": False, "auth_required": True}]
+        )
+
+    def test_config_reports_whether_claude_code_is_signed_in(self):
+        with (
+            patch("app.backends.claude.installed", return_value=True),
+            patch("app.backends.claude.signed_in", return_value=False),
+        ):
+            rows = self.client.get("/api/config").json()["backends"]
+        by_id = {row["id"]: row for row in rows}
+        self.assertIs(by_id["claude"]["signed_in"], False)
+        self.assertIsNone(by_id["chatgpt"]["signed_in"])
+
     def test_stream_rate_limit_line_and_no_cache(self):
         async def stream(segs, lang, brief=""):
             yield "가"  # translate_stream yields translations in order; server numbers by arrival
@@ -346,7 +385,10 @@ class ApiTests(unittest.TestCase):
                 json={"doc_id": "d", "page": 0, "segments": [src] * 3},
             )
         lines = [json.loads(x) for x in response.text.splitlines()]
-        self.assertEqual(lines, [{"error": "Slow down", "rate_limited": True}])
+        self.assertEqual(
+            lines,
+            [{"error": "Slow down", "rate_limited": True, "auth_required": False}],
+        )
         retry.assert_awaited_once()
         put.assert_not_called()
         self.assertTrue(all("checked" not in seg for seg in cached["segments"]))

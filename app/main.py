@@ -41,7 +41,7 @@ from . import (
     zotero,
 )
 from .backends import chatgpt_auth
-from .errors import AIError, RateLimitError
+from .errors import AIError, AuthError, RateLimitError
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
@@ -72,13 +72,20 @@ logging.getLogger("uvicorn.access").addFilter(_ChatGPTCallbackLogFilter())
 app = FastAPI(title="Sundark")
 
 
+def _stop_flags(exc: AIError) -> dict:
+    """The errors after which the browser stops sending requests: a usage limit, or an AI
+    Backend that is signed out (it shows how to sign in)."""
+    return {
+        "rate_limited": isinstance(exc, RateLimitError),
+        "auth_required": isinstance(exc, AuthError),
+    }
+
+
 @app.exception_handler(AIError)
 async def _ai_error(_request: Request, exc: AIError):
-    limited = isinstance(exc, RateLimitError)
-    return JSONResponse(
-        status_code=429 if limited else 502,
-        content={"detail": str(exc), "rate_limited": limited},
-    )
+    flags = _stop_flags(exc)
+    status = 429 if flags["rate_limited"] else 401 if flags["auth_required"] else 502
+    return JSONResponse(status_code=status, content={"detail": str(exc), **flags})
 
 
 @app.on_event("startup")
@@ -523,7 +530,7 @@ async def math(doc_id: str, page: int):
         png = pdf_utils.crop_region_png(pdf_bytes, page, bbox)
         try:
             latex = await ai.equation_latex(png)
-        except RateLimitError:
+        except (RateLimitError, AuthError):
             raise
         except AIError:
             latex = ""  # best-effort: keep the original text if a crop can't be read
@@ -635,7 +642,7 @@ async def anatomy(req: AnatomyReq):
     text = pdf_utils.full_text(doc["pages"])
     try:
         result = await ai.anatomy(text, target_lang=language)
-    except RateLimitError:
+    except (RateLimitError, AuthError):
         raise
     except AIError as e:
         raise HTTPException(502, f"분석 실패: {e}") from e
@@ -735,7 +742,7 @@ async def review_export(doc_id: str, output_language: str | None = None):
         try:
             summ = {"summary": await ai.summarize(text, target_lang=language)}
             store.cache_put(doc_id, skey, summ)
-        except RateLimitError:
+        except (RateLimitError, AuthError):
             raise
         except AIError:
             summ = {"summary": ""}
@@ -750,7 +757,7 @@ async def review_export(doc_id: str, output_language: str | None = None):
             for sub in (anat.get("evidence") or {}).values():
                 _verify_card_quotes(sub, text)
             store.cache_put(doc_id, akey, anat)
-        except RateLimitError:
+        except (RateLimitError, AuthError):
             raise
         except AIError:
             anat = {}
@@ -871,7 +878,7 @@ async def _retranslate(src: str, target_lang: str) -> str:
     Returns the new translation, or "" if it failed or is still untranslated."""
     try:
         again = (await ai.translate(src, target_lang)).strip()
-    except RateLimitError:
+    except (RateLimitError, AuthError):
         raise
     except AIError:
         return ""
@@ -913,10 +920,10 @@ async def translate_stream(req: TranslateReq):
                     ):
                         try:
                             better = await _retranslate(seg["src"], language)
-                        except RateLimitError as exc:
+                        except (RateLimitError, AuthError) as exc:
                             yield (
                                 json.dumps(
-                                    {"error": str(exc), "rate_limited": True},
+                                    {"error": str(exc), **_stop_flags(exc)},
                                     ensure_ascii=False,
                                 )
                                 + "\n"
@@ -969,11 +976,8 @@ async def translate_stream(req: TranslateReq):
                 type(exc).__name__,
                 str(exc),
             )
-            limited = isinstance(exc, RateLimitError)
             yield (
-                json.dumps(
-                    {"error": str(exc), "rate_limited": limited}, ensure_ascii=False
-                )
+                json.dumps({"error": str(exc), **_stop_flags(exc)}, ensure_ascii=False)
                 + "\n"
             )
             return
@@ -1065,7 +1069,7 @@ async def _get_brief(doc_id: str, doc: dict, target_lang: str) -> str:
     try:
         src = pdf_utils.brief_source(doc["pages"])
         brief = await ai.translate_brief(src, target_lang)
-    except RateLimitError:
+    except (RateLimitError, AuthError):
         raise
     except Exception:  # noqa: BLE001
         return ""  # non-fatal: a missing glossary just means no extra consistency hint
@@ -1096,12 +1100,15 @@ async def _backend_rows() -> list[dict]:
                 ready = chatgpt_auth.status()["ready"]
             except AIError:
                 ready = False
+        signed_in = None  # unknown: only Claude Code can be asked without a request
         if mod.installed():
             try:
                 # describe() may start a subprocess (Hermes); keep it off the event loop.
                 provider = (await asyncio.to_thread(mod.describe)).get("provider")
             except AIError:
                 provider = None
+            if hasattr(mod, "signed_in"):
+                signed_in = await asyncio.to_thread(mod.signed_in)
         rows.append(
             {
                 "id": name,
@@ -1110,6 +1117,7 @@ async def _backend_rows() -> list[dict]:
                 "provider": provider,
                 "suggestions": mod.MODEL_SUGGESTIONS,
                 "ready": ready,
+                "signed_in": signed_in,
             }
         )
     return rows

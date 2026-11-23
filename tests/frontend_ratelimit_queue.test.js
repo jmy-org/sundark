@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const src = fs.readFileSync("web/app.js", "utf8");
 const fn = (name) => { const i = src.indexOf(name); assert.ok(i >= 0, name); return src.slice(i, src.indexOf("\n}\n", i) + 3); };
 const line = (name) => src.slice(src.indexOf(name), src.indexOf("\n", src.indexOf(name)));
-const code = [line("class RateLimited"), fn("async function streamTranslate("), fn("function fillSource("),
+const code = [line("class RateLimited"), line("class AuthRequired"), line("const aiError"), fn("async function streamTranslate("), fn("function fillSource("),
   fn("async function translateBatch("), fn("async function translateAll(")].join("\n");
 
 (async () => {

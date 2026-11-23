@@ -24,16 +24,29 @@ const S = {
   summaryLoaded: false,
   trToken: 0,
   aiConfig: null,
-  rateLimited: null,
+  rateLimited: null,  // token of the translation run a usage limit or a sign-in problem stopped
 };
 
 class RateLimited extends Error {}
+class AuthRequired extends Error {}
+// A failed AI request's error, from the flags the server sends with it.
+const aiError = (body, detail) => (body.rate_limited ? new RateLimited(detail) : body.auth_required ? new AuthRequired(detail) : new Error(detail));
 
 const TASK_LABELS = { translate: "Translation", summary: "Summary", anatomy: "Anatomy",
   chat: "Chat", explain: "Explain", equation: "Equations", brief: "Glossary", review: "Review" };
 
 function showRateLimit() {
   $("ai-banner").textContent = "구독 사용 한도에 도달했습니다. 남은 번역은 원문으로 표시합니다. 잠시 후 다시 번역하세요.";
+  show($("ai-banner"));
+}
+
+// The AI Backend is signed out, or its sign-in expired and could not be refreshed.
+function showAuthRequired() {
+  const backend = S.aiConfig && S.aiConfig.backend;
+  const row = backend && S.aiConfig.backends.find((b) => b.id === backend);
+  $("ai-banner").textContent = backend === "claude"
+    ? "Claude Code 로그인이 필요합니다. 터미널에서 claude를 실행해 /login으로 로그인한 뒤 다시 번역하세요."
+    : `${row ? row.label : "AI 백엔드"} 로그인이 필요합니다. 다시 로그인한 뒤 번역하세요.`;
   show($("ai-banner"));
 }
 
@@ -44,6 +57,7 @@ async function loadConfig() {
   const row = backend && S.aiConfig.backends.find((b) => b.id === backend);
   $("ai-badge").textContent = "AI: " + (row ? row.label : "not set");
   if (!backend) openSettings();
+  else if (row && row.signed_in === false) showAuthRequired();
 }
 
 const chatGPT = {
@@ -925,7 +939,7 @@ async function streamTranslate(page, offset, texts, force, write, targetLanguage
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw body.rate_limited ? new RateLimited(body.detail) : new Error(body.detail || res.statusText);
+    throw aiError(body, body.detail || res.statusText);
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -939,7 +953,7 @@ async function streamTranslate(page, offset, texts, force, write, targetLanguage
       const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
       if (!line.trim()) continue;
       let obj; try { obj = JSON.parse(line); } catch { continue; }
-      if (obj.error) throw obj.rate_limited ? new RateLimited(obj.error) : new Error(obj.error);
+      if (obj.error) throw aiError(obj, obj.error);
       write(offset + obj.i, obj.tr);
     }
   }
@@ -1071,6 +1085,7 @@ async function translateBatch(page, b, force, token, targetLanguage) {
       await streamTranslate(page, b.start, b.texts, force || attempt > 0, write, targetLanguage);
     } catch (err) {
       if (err instanceof RateLimited) { S.rateLimited = token; showRateLimit(); break; }
+      if (err instanceof AuthRequired) { S.rateLimited = token; showAuthRequired(); break; }
     }
     if (!hasGap()) break;
     if (attempt < 2) await sleep(400);
@@ -1517,6 +1532,7 @@ $("export-review").addEventListener("click", async () => {
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
       if (d.rate_limited) showRateLimit();
+      else if (d.auth_required) showAuthRequired();
       throw new Error(d.detail || res.statusText);
     }
     const blob = await res.blob();
@@ -1650,6 +1666,7 @@ async function postJSON(url, body) {
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     if (data.rate_limited) showRateLimit();
+    else if (data.auth_required) showAuthRequired();
     throw new Error(data.detail || res.statusText);
   }
   return res.json();

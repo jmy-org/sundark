@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -78,6 +79,21 @@ class ClaudeBackendTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.backends.claude.stream_process", new=cut):
             with self.assertRaises(AIError):
                 [d async for d in claude.stream("p", model="sonnet")]
+
+    def test_signed_in_reads_auth_status(self):
+        def run(stdout):
+            done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr=b"")
+            return patch("app.backends.claude.subprocess.run", return_value=done)
+
+        with run(b'{"loggedIn": false, "authMethod": "none"}') as fake:
+            self.assertIs(claude.signed_in(), False)
+        self.assertEqual(fake.call_args.args[0][:3], ["claude", "auth", "status"])
+        with run(b'{"loggedIn": true}'):
+            self.assertIs(claude.signed_in(), True)
+        with run(b"error: unknown option '--json'"):  # an old CLI
+            self.assertIsNone(claude.signed_in())
+        with patch("app.backends.claude.subprocess.run", side_effect=OSError):
+            self.assertIsNone(claude.signed_in())
 
     def test_default_model_is_not_passed_as_flag(self):
         self.assertNotIn("--model", claude._args("default", None, stream=False))

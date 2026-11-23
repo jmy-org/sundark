@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import shutil
+import subprocess
 
 from ..errors import AIError, from_text
 from .process import run_process, stream_process
@@ -24,6 +25,24 @@ def installed() -> bool:
 
 def describe() -> dict:
     return {"provider": None}
+
+
+def signed_in() -> bool | None:
+    """Whether the CLI holds a login, from `claude auth status` (fast, no tokens). None when
+    it cannot say: an old CLI without the command, or no answer in time. A login whose
+    refresh the server refuses may still read as signed in; a request reports it."""
+    try:
+        out = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            env=_env(),
+            timeout=10,
+        ).stdout
+        value = json.loads(out).get("loggedIn")
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, bool) else None
 
 
 def _env() -> dict:
