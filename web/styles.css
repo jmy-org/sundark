@@ -156,6 +156,7 @@
 .ai-banner { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); z-index: 100;
   padding: 10px 16px; background: var(--panel2); color: var(--text);
   border: 1px solid var(--accent); border-radius: var(--radius); }
+.ai-banner button { margin-left: 10px; }
 .settings { border: 1px solid var(--accent); border-radius: var(--radius);
   background: var(--panel2); color: var(--text); max-width: min(520px, calc(100vw - 32px)); }
 .settings label { display: flex; justify-content: space-between; gap: 12px; margin: 8px 0; }

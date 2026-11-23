@@ -149,7 +149,20 @@ Requires Claude Code (`claude`, signed in), Hermes (`hermes setup`), or ChatGPT 
   Every AI call is bounded by a per-backend semaphore in `app/ai.py`
   sized by the same concurrency setting, which also covers summary/anatomy. A rate limit
   (`RateLimitError`, HTTP 429, or a stream line with `rate_limited`) stops the remaining
-  batches and leaves source text; the user lowers concurrency in Settings if it repeats. The server stays generic (it
+  batches and leaves source text; the user lowers concurrency in Settings if it repeats. A
+  signed-out AI Backend (`AuthError`, HTTP 401, or a stream line with `auth_required`) stops
+  them the same way, and the banner says how to sign in. Claude Code's error results ("Not
+  logged in", "Failed to authenticate: OAuth session expired ...", "You've hit your limit")
+  were once a plain `AIError`, so every batch was tried three times and failed with nothing
+  on screen. `/api/config` also asks `claude auth status` (fast, no tokens) whether Claude
+  Code is signed in, so the banner shows before a paper is opened. For Claude Code the banner
+  has a sign-in button: the server runs `claude auth login` (`app/backends/claude.py`), which
+  opens the default browser on that machine and finishes by itself when the user approves
+  there, as it listens on a localhost port for the reply; then the paper is translated again
+  from the cache, and the failed batches are sent again. Only the app's own page on that
+  machine may start it (`_local_page`), one at a time, for five minutes at most; its output is
+  not read, as its sign-in URL carries one-time values. A CLI without `claude auth` gets the
+  terminal steps. The server stays generic (it
   translates whatever segment list it is given and caches by a signature of those segments,
   so each batch caches independently). On open, the loader reveals the UI as soon as the
   FIRST translated sentence is painted (`S.onFirstPaint`) and a few pages of layout are

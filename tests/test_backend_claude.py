@@ -1,11 +1,12 @@
 import base64
 import json
 import os
+import subprocess
 import unittest
 from unittest.mock import patch
 
 from app.backends import claude
-from app.errors import AIError, RateLimitError
+from app.errors import AIError, AuthError, RateLimitError
 
 
 def result_line(text="ok", is_error=False):
@@ -54,6 +55,15 @@ class ClaudeBackendTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RateLimitError):
                 await claude.run("x", model="sonnet")
 
+    async def test_stream_signed_out_result_is_an_auth_error(self):
+        async def fake(args, stdin, env, timeout=300):
+            yield result_line("Not logged in · Please run /login", is_error=True)
+
+        with patch("app.backends.claude.stream_process", new=fake):
+            with self.assertRaises(AuthError):
+                async for _ in claude.stream("x", model="sonnet"):
+                    pass
+
     async def test_stream_yields_deltas_and_requires_final_result(self):
         async def ok(args, stdin, env, timeout=300):
             yield delta_line("1\t가\n")
@@ -69,6 +79,21 @@ class ClaudeBackendTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.backends.claude.stream_process", new=cut):
             with self.assertRaises(AIError):
                 [d async for d in claude.stream("p", model="sonnet")]
+
+    def test_signed_in_reads_auth_status(self):
+        def run(stdout):
+            done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr=b"")
+            return patch("app.backends.claude.subprocess.run", return_value=done)
+
+        with run(b'{"loggedIn": false, "authMethod": "none"}') as fake:
+            self.assertIs(claude.signed_in(), False)
+        self.assertEqual(fake.call_args.args[0][:3], ["claude", "auth", "status"])
+        with run(b'{"loggedIn": true}'):
+            self.assertIs(claude.signed_in(), True)
+        with run(b"error: unknown option '--json'"):  # an old CLI
+            self.assertIsNone(claude.signed_in())
+        with patch("app.backends.claude.subprocess.run", side_effect=OSError):
+            self.assertIsNone(claude.signed_in())
 
     def test_default_model_is_not_passed_as_flag(self):
         self.assertNotIn("--model", claude._args("default", None, stream=False))

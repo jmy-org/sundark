@@ -24,10 +24,13 @@ const S = {
   summaryLoaded: false,
   trToken: 0,
   aiConfig: null,
-  rateLimited: null,
+  rateLimited: null,  // token of the translation run a usage limit or a sign-in problem stopped
 };
 
 class RateLimited extends Error {}
+class AuthRequired extends Error {}
+// A failed AI request's error, from the flags the server sends with it.
+const aiError = (body, detail) => (body.rate_limited ? new RateLimited(detail) : body.auth_required ? new AuthRequired(detail) : new Error(detail));
 
 const TASK_LABELS = { translate: "Translation", summary: "Summary", anatomy: "Anatomy",
   chat: "Chat", explain: "Explain", equation: "Equations", brief: "Glossary", review: "Review" };
@@ -37,6 +40,61 @@ function showRateLimit() {
   show($("ai-banner"));
 }
 
+// The AI Backend is signed out, or its sign-in expired and could not be refreshed. Claude Code
+// signs in from here when its CLI can say whether it is signed in (`claude auth`, signed_in
+// not null); an older CLI gets the terminal steps.
+const CLAUDE_TERMINAL_LOGIN = "터미널에서 claude를 실행해 /login으로 로그인한 뒤 다시 번역하세요.";
+function showAuthRequired() {
+  const backend = S.aiConfig && S.aiConfig.backend;
+  const row = backend && S.aiConfig.backends.find((b) => b.id === backend);
+  const banner = $("ai-banner");
+  if (backend === "claude" && row && row.signed_in != null) {
+    banner.textContent = "Claude Code 로그인이 필요합니다.";
+    banner.appendChild(claudeLoginButton());
+  } else {
+    banner.textContent = backend === "claude"
+      ? "Claude Code 로그인이 필요합니다. " + CLAUDE_TERMINAL_LOGIN
+      : `${row ? row.label : "AI 백엔드"} 로그인이 필요합니다. 다시 로그인한 뒤 번역하세요.`;
+  }
+  show(banner);
+}
+
+// The server runs `claude auth login`, which opens a browser tab at Claude's sign-in page and
+// ends by itself once the user approves there. Then the paper is translated again: what was
+// translated comes from the cache, and the batches that failed are sent again.
+function claudeLoginButton() {
+  const btn = document.createElement("button");
+  btn.className = "btn-primary"; btn.textContent = "로그인";
+  btn.addEventListener("click", signInClaude);
+  return btn;
+}
+async function signInClaude() {
+  const banner = $("ai-banner");
+  banner.textContent = "새로 열린 브라우저 탭에서 Claude 로그인을 마쳐 주세요. 탭이 열리지 않으면 " + CLAUDE_TERMINAL_LOGIN;
+  try {
+    await postJSON("/api/claude/login", {});
+  } catch {
+    banner.textContent = "로그인 창을 열지 못했습니다. " + CLAUDE_TERMINAL_LOGIN;
+    return;
+  }
+  for (let i = 0; i < 200; i++) {   // the server stops the sign-in after five minutes
+    await sleep(2000);
+    const res = await fetch("/api/claude/login", { cache: "no-store" }).catch(() => null);
+    const r = res && res.ok ? await res.json() : {};
+    if (r.state === "running") continue;
+    if (r.state === "done" && r.signed_in !== false) {
+      banner.textContent = "Claude Code에 로그인했습니다.";
+      await loadConfig();
+      if (S.docId && $("autotr").checked) retranslateAll(false);   // hides the banner
+      else setTimeout(() => hide(banner), 3000);
+      return;
+    }
+    break;
+  }
+  banner.textContent = "로그인을 마치지 못했습니다.";
+  banner.appendChild(claudeLoginButton());
+}
+
 async function loadConfig() {
   const res = await fetch("/api/config", { cache: "no-store" });
   S.aiConfig = res.ok ? await res.json() : null;
@@ -44,6 +102,7 @@ async function loadConfig() {
   const row = backend && S.aiConfig.backends.find((b) => b.id === backend);
   $("ai-badge").textContent = "AI: " + (row ? row.label : "not set");
   if (!backend) openSettings();
+  else if (row && row.signed_in === false) showAuthRequired();
 }
 
 const chatGPT = {
@@ -925,7 +984,7 @@ async function streamTranslate(page, offset, texts, force, write, targetLanguage
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw body.rate_limited ? new RateLimited(body.detail) : new Error(body.detail || res.statusText);
+    throw aiError(body, body.detail || res.statusText);
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -939,7 +998,7 @@ async function streamTranslate(page, offset, texts, force, write, targetLanguage
       const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
       if (!line.trim()) continue;
       let obj; try { obj = JSON.parse(line); } catch { continue; }
-      if (obj.error) throw obj.rate_limited ? new RateLimited(obj.error) : new Error(obj.error);
+      if (obj.error) throw aiError(obj, obj.error);
       write(offset + obj.i, obj.tr);
     }
   }
@@ -1071,6 +1130,7 @@ async function translateBatch(page, b, force, token, targetLanguage) {
       await streamTranslate(page, b.start, b.texts, force || attempt > 0, write, targetLanguage);
     } catch (err) {
       if (err instanceof RateLimited) { S.rateLimited = token; showRateLimit(); break; }
+      if (err instanceof AuthRequired) { S.rateLimited = token; showAuthRequired(); break; }
     }
     if (!hasGap()) break;
     if (attempt < 2) await sleep(400);
@@ -1517,6 +1577,7 @@ $("export-review").addEventListener("click", async () => {
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
       if (d.rate_limited) showRateLimit();
+      else if (d.auth_required) showAuthRequired();
       throw new Error(d.detail || res.statusText);
     }
     const blob = await res.blob();
@@ -1650,6 +1711,7 @@ async function postJSON(url, body) {
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     if (data.rate_limited) showRateLimit();
+    else if (data.auth_required) showAuthRequired();
     throw new Error(data.detail || res.statusText);
   }
   return res.json();
