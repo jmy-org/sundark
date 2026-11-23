@@ -5,6 +5,7 @@ tool is disabled because prompts carry untrusted PDF content."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -43,6 +44,51 @@ def signed_in() -> bool | None:
     except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
         return None
     return value if isinstance(value, bool) else None
+
+
+# `claude auth login` opens the default browser on this machine at Claude's sign-in page and
+# listens on a localhost port for the reply, so it finishes by itself once the user approves
+# there: nothing is typed in a terminal. One runs at a time, for five minutes at most.
+LOGIN_TIMEOUT = 300
+_login: asyncio.subprocess.Process | None = None
+_login_watch: asyncio.Task | None = None
+
+
+async def start_login() -> None:
+    global _login, _login_watch
+    if _login is not None and _login.returncode is None:
+        return
+    try:
+        _login = await asyncio.create_subprocess_exec(
+            "claude",
+            "auth",
+            "login",
+            "--claudeai",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,  # its sign-in URL carries one-time values
+            stderr=asyncio.subprocess.DEVNULL,
+            env=_env(),
+        )
+    except OSError as exc:
+        raise AIError("Cannot start Claude Code; install it") from exc
+    _login_watch = asyncio.create_task(_end_login(_login))
+
+
+async def _end_login(proc) -> None:
+    try:
+        await asyncio.wait_for(proc.wait(), LOGIN_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+
+
+def login_state() -> str:
+    """idle (none started), running, done (signed in) or failed (refused or timed out)."""
+    if _login is None:
+        return "idle"
+    if _login.returncode is None:
+        return "running"
+    return "done" if _login.returncode == 0 else "failed"
 
 
 def _env() -> dict:

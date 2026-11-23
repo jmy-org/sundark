@@ -40,14 +40,59 @@ function showRateLimit() {
   show($("ai-banner"));
 }
 
-// The AI Backend is signed out, or its sign-in expired and could not be refreshed.
+// The AI Backend is signed out, or its sign-in expired and could not be refreshed. Claude Code
+// signs in from here when its CLI can say whether it is signed in (`claude auth`, signed_in
+// not null); an older CLI gets the terminal steps.
+const CLAUDE_TERMINAL_LOGIN = "터미널에서 claude를 실행해 /login으로 로그인한 뒤 다시 번역하세요.";
 function showAuthRequired() {
   const backend = S.aiConfig && S.aiConfig.backend;
   const row = backend && S.aiConfig.backends.find((b) => b.id === backend);
-  $("ai-banner").textContent = backend === "claude"
-    ? "Claude Code 로그인이 필요합니다. 터미널에서 claude를 실행해 /login으로 로그인한 뒤 다시 번역하세요."
-    : `${row ? row.label : "AI 백엔드"} 로그인이 필요합니다. 다시 로그인한 뒤 번역하세요.`;
-  show($("ai-banner"));
+  const banner = $("ai-banner");
+  if (backend === "claude" && row && row.signed_in != null) {
+    banner.textContent = "Claude Code 로그인이 필요합니다.";
+    banner.appendChild(claudeLoginButton());
+  } else {
+    banner.textContent = backend === "claude"
+      ? "Claude Code 로그인이 필요합니다. " + CLAUDE_TERMINAL_LOGIN
+      : `${row ? row.label : "AI 백엔드"} 로그인이 필요합니다. 다시 로그인한 뒤 번역하세요.`;
+  }
+  show(banner);
+}
+
+// The server runs `claude auth login`, which opens a browser tab at Claude's sign-in page and
+// ends by itself once the user approves there. Then the paper is translated again: what was
+// translated comes from the cache, and the batches that failed are sent again.
+function claudeLoginButton() {
+  const btn = document.createElement("button");
+  btn.className = "btn-primary"; btn.textContent = "로그인";
+  btn.addEventListener("click", signInClaude);
+  return btn;
+}
+async function signInClaude() {
+  const banner = $("ai-banner");
+  banner.textContent = "새로 열린 브라우저 탭에서 Claude 로그인을 마쳐 주세요. 탭이 열리지 않으면 " + CLAUDE_TERMINAL_LOGIN;
+  try {
+    await postJSON("/api/claude/login", {});
+  } catch {
+    banner.textContent = "로그인 창을 열지 못했습니다. " + CLAUDE_TERMINAL_LOGIN;
+    return;
+  }
+  for (let i = 0; i < 200; i++) {   // the server stops the sign-in after five minutes
+    await sleep(2000);
+    const res = await fetch("/api/claude/login", { cache: "no-store" }).catch(() => null);
+    const r = res && res.ok ? await res.json() : {};
+    if (r.state === "running") continue;
+    if (r.state === "done" && r.signed_in !== false) {
+      banner.textContent = "Claude Code에 로그인했습니다.";
+      await loadConfig();
+      if (S.docId && $("autotr").checked) retranslateAll(false);   // hides the banner
+      else setTimeout(() => hide(banner), 3000);
+      return;
+    }
+    break;
+  }
+  banner.textContent = "로그인을 마치지 못했습니다.";
+  banner.appendChild(claudeLoginButton());
 }
 
 async function loadConfig() {

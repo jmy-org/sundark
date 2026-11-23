@@ -41,6 +41,7 @@ from . import (
     zotero,
 )
 from .backends import chatgpt_auth
+from .backends import claude as claude_backend
 from .errors import AIError, AuthError, RateLimitError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1223,6 +1224,33 @@ def _chatgpt_origin(request: Request) -> str:
     if request.headers.get("origin") != origin:
         raise HTTPException(403, "ChatGPT account actions must start from Sundark")
     return origin
+
+
+# Starting a Claude Code sign-in opens a browser on the machine the server runs on, so only this
+# app's own page, opened on that machine, may ask for it.
+def _local_page(request: Request) -> None:
+    origin = str(request.base_url).rstrip("/")
+    if (
+        request.url.hostname not in ("127.0.0.1", "localhost")
+        or request.headers.get("origin") != origin
+    ):
+        raise HTTPException(403, "Sign in from Sundark opened on this computer")
+
+
+@app.post("/api/claude/login")
+async def claude_login(request: Request):
+    _local_page(request)
+    await claude_backend.start_login()
+    return {"state": claude_backend.login_state()}
+
+
+@app.get("/api/claude/login")
+async def claude_login_state():
+    state = claude_backend.login_state()
+    signed_in = None
+    if state != "running":
+        signed_in = await asyncio.to_thread(claude_backend.signed_in)
+    return {"state": state, "signed_in": signed_in}
 
 
 class ChatGPTAccountReq(BaseModel):
