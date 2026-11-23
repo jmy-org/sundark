@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from app.backends import claude
-from app.errors import AIError, RateLimitError
+from app.errors import AIError, AuthError, RateLimitError
 
 
 def result_line(text="ok", is_error=False):
@@ -53,6 +53,15 @@ class ClaudeBackendTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.backends.claude.run_process", new=fake):
             with self.assertRaises(RateLimitError):
                 await claude.run("x", model="sonnet")
+
+    async def test_stream_signed_out_result_is_an_auth_error(self):
+        async def fake(args, stdin, env, timeout=300):
+            yield result_line("Not logged in · Please run /login", is_error=True)
+
+        with patch("app.backends.claude.stream_process", new=fake):
+            with self.assertRaises(AuthError):
+                async for _ in claude.stream("x", model="sonnet"):
+                    pass
 
     async def test_stream_yields_deltas_and_requires_final_result(self):
         async def ok(args, stdin, env, timeout=300):
