@@ -396,7 +396,7 @@ async def translate_stream(segments: list[str], target_lang: str, brief: str = "
 
 
 def latex_ok(latex: str) -> bool:
-    """Reject transcriptions KaTeX cannot render: unbalanced braces or \begin/\end pairs
+    r"""Reject transcriptions KaTeX cannot render: unbalanced braces or \begin/\end pairs
     (e.g. a vision model appending a stray "\end{final")."""
     if not latex.strip():
         return False
