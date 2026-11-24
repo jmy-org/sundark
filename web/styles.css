@@ -136,6 +136,12 @@
 .empty { grid-column: 2 / 4; background: var(--bg); display: flex; flex-direction: column;
   justify-content: center; align-items: center; color: var(--muted); text-align: center; padding: 24px; }
 .empty .small { font-size: 13px; max-width: 440px; margin-top: 4px; }
+.samples { margin-top: 28px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.samples h2 { font-size: 14px; font-weight: 600; color: var(--text); margin: 0; }
+.sample-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; width: min(520px, 100%); }
+.sample-list li { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
+.sample-list button { text-align: left; padding: 8px 12px; }
+.sample-list a { color: var(--accent); }
 
 /* Selection popup + explanation popup */
 .selpop { position: fixed; z-index: 50; display: flex; gap: 3px; background: var(--panel2);
