@@ -1,5 +1,10 @@
 """Hermes transport. Runs hermes_runner.py with Hermes's own Python (its dependency tree is
-separate from ours). No Hermes session, memory, or profile is created or changed."""
+separate from ours). No Hermes session, memory, or profile is created or changed.
+
+Older Hermes installs run from a venv whose python sits in the launcher's shebang; the runner
+runs with that python directly. Store-Python installs launch through a bootstrap that leases
+dependencies at start, published by `hermes --print-runtime-command`; the runner runs through
+that bootstrap with only its entry point swapped."""
 
 from __future__ import annotations
 
@@ -37,19 +42,54 @@ def installed() -> bool:
     return bool(os.environ.get("HERMES_PYTHON") or shutil.which("hermes"))
 
 
-def _python() -> str:
+def _command() -> list[str]:
+    """argv that runs hermes_runner.py inside Hermes's environment."""
     override = os.environ.get("HERMES_PYTHON")
     if override:
-        return override
+        return [override, str(RUNNER)]
     exe = shutil.which("hermes")
     if not exe:
         raise AIError("Hermes is not installed; install it and run hermes setup")
     found = _interpreter(Path(exe), hops=4)
     if found:
-        return found
-    raise AIError(
-        "Could not locate Hermes Python; set HERMES_PYTHON to its venv python"
+        return [found, str(RUNNER)]
+    resolved = Path(exe).resolve()
+    return list(_runtime(exe, resolved.stat().st_mtime_ns))
+
+
+_ENTRY = "runpy.run_module("
+
+
+@functools.lru_cache(maxsize=4)
+def _runtime(exe: str, stamp: int) -> tuple[str, ...]:
+    """Hermes's published launch command with the runner as its entry point. Cached per
+    launcher version: `hermes update` rewrites the launcher and so changes the stamp."""
+    unsupported = AIError(
+        "Could not locate Hermes Python; update Hermes or set HERMES_PYTHON"
     )
+    try:
+        out = subprocess.run(
+            [exe, "--print-runtime-command"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            env=_env(),
+            timeout=30,
+            check=False,
+        )
+        cmd = json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise unsupported from exc
+    if not (
+        isinstance(cmd, list)
+        and len(cmd) >= 3
+        and all(isinstance(a, str) for a in cmd)
+        and cmd[-2] == "-c"
+        and _ENTRY in cmd[-1]
+    ):
+        raise unsupported
+    code = cmd[-1][: cmd[-1].rindex(_ENTRY)]
+    return (*cmd[:-1], f"{code}runpy.run_path({str(RUNNER)!r}, run_name='__main__')")
 
 
 def _interpreter(path: Path, hops: int) -> str | None:
@@ -64,7 +104,12 @@ def _interpreter(path: Path, hops: int) -> str | None:
     if lines and lines[0].startswith("#!") and "python" in lines[0]:
         return shlex.split(lines[0][2:])[0]
     for line in lines:
-        words = shlex.split(line.strip()) if line.strip().startswith("exec ") else []
+        try:  # a store launcher's exec line opens a multi-line quoted program
+            words = (
+                shlex.split(line.strip()) if line.strip().startswith("exec ") else []
+            )
+        except ValueError:
+            continue
         if len(words) > 1 and hops > 0:
             target = Path(os.path.expandvars(words[1])).expanduser()
             if target.is_absolute():
@@ -98,14 +143,14 @@ def _env() -> dict:
 def describe() -> dict:
     home = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser() / "config.yaml"
     stamp = home.stat().st_mtime_ns if home.exists() else 0
-    return _describe(_python(), stamp)
+    return _describe(tuple(_command()), stamp)
 
 
 @functools.lru_cache(maxsize=4)
-def _describe(python: str, stamp: int) -> dict:
+def _describe(command: tuple[str, ...], stamp: int) -> dict:
     try:
         out = subprocess.run(
-            [python, str(RUNNER), "--info"],
+            [*command, "--info"],
             capture_output=True,
             env=_env(),
             timeout=30,
@@ -124,7 +169,7 @@ async def _events(prompt, model, system, images):
         "images": [base64.b64encode(png).decode() for png in images],
     }
     async for line in stream_process(
-        [_python(), str(RUNNER)], json.dumps(payload).encode("utf-8"), _env()
+        _command(), json.dumps(payload).encode("utf-8"), _env()
     ):
         try:
             event = json.loads(line)
